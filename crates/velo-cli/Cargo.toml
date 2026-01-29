@@ -1,0 +1,17 @@
+[package]
+name = "velo-cli"
+description = "Command-line interface for Velo Rift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "velo"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+walkdir.workspace = true
+velo-cas.workspace = true
+velo-manifest.workspace = true
