@@ -45,6 +45,19 @@ echo "Velo Exec Works"
 EOF
 chmod +x "$DATA_DIR/hello.sh"
 
+# Create Python test files (main + dependency)
+echo "def greet(): return 'Hello from Helper'" > "$DATA_DIR/helper.py"
+cat <<EOF > "$DATA_DIR/main.py"
+import sys
+import os
+
+# Ensure we can import from the script's directory (standard python behavior)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+import helper
+print(helper.greet())
+EOF
+
 # 3. Test Daemon Auto-Start & Ingest
 echo "[*] Testing Daemon Auto-Start & Ingest..."
 # Note: we don't start daemon manually. CLI should do it.
@@ -190,6 +203,21 @@ if [ "$OS" == "Linux" ]; then
         echo "ERROR: Script is not executable in mount."
         ls -l "$MOUNT_DIR/data/hello.sh"
         exit 1
+    fi
+
+    # Test Python Integration (Module Import)
+    echo "Checking Python execution..."
+    if [ -f "$MOUNT_DIR/data/main.py" ]; then
+        PY_OUTPUT=$(python3 "$MOUNT_DIR/data/main.py")
+        if [ "$PY_OUTPUT" == "Hello from Helper" ]; then
+            echo "[PASS] Python execution verified."
+        else
+            echo "ERROR: Python output mismatch. Got: '$PY_OUTPUT'"
+            exit 1
+        fi
+    else
+         echo "ERROR: Python script not found."
+         exit 1
     fi
 
     # Cleanup
