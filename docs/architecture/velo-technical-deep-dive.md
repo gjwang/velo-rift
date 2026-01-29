@@ -4791,6 +4791,2569 @@ fn prefetch_hot_files(manifest: &Manifest, cache: &mut FdCache) {
 
 ---
 
-*Document Version: 8.0*
+## 73. Minimal Perfect Hash Function (MPHF) for O(1) Lookup
+
+### 73.1 The Problem: Tree Traversal Overhead
+
+Git's path lookup is O(depth):
+
+```text
+Lookup "/src/components/ui/button.js":
+  Root → find "src" → load tree
+       → find "components" → load tree
+       → find "ui" → load tree
+       → find "button.js" → return entry
+
+Depth = 4, 4 memory hops, 4 possible cache misses
+```
+
+### 73.2 MPHF: Compile-Time Perfect Mapping
+
+For immutable snapshots, Velo knows all paths upfront. Build a perfect hash at ingest time:
+
+```text
+F("src/main.rs")           → 0
+F("package.json")          → 1
+F("src/components/App.js") → 2
+...
+F(path_N)                  → N-1
+
+Properties:
+- No collisions (perfect)
+- Dense output range [0, N) (minimal)
+- O(1) lookup (constant time)
+```
+
+### 73.3 Build vs Runtime
+
+```rust
+// Build time: Generate MPHF (slow, one-time)
+use ph::fmph::Function as MPHF;
+
+fn ingest(paths: Vec<String>) -> VeloSnapshot {
+    // Build perfect hash (O(N) time, done once)
+    let hash_fn = MPHF::from(paths.iter().map(|p| hash(p)));
+    
+    // Create metadata array
+    let metadata: Vec<Entry> = paths.iter()
+        .map(|p| build_entry(p))
+        .collect();
+    
+    VeloSnapshot { hash_fn, metadata }
+}
+
+// Runtime: O(1) lookup
+fn lookup(&self, path: &str) -> Option<&Entry> {
+    let path_hash = hash(path);
+    let idx = self.hash_fn.get(&path_hash)?;  // Pure arithmetic
+    self.metadata.get(idx as usize)           // Direct array access
+}
+```
+
+### 73.4 Performance Comparison
+
+| Operation | Git Tree | HashMap | MPHF |
+|-----------|----------|---------|------|
+| Lookup | O(depth) | O(1) avg | O(1) guaranteed |
+| Memory | Sparse pointers | Entry + metadata | Entry only |
+| Cache behavior | Random hops | Hash table probing | Single array access |
+
+---
+
+## 74. String Interning Architecture
+
+### 74.1 Core Principle: Everything is a Number
+
+```text
+API Boundary (slow):
+  "/src/components/button.js"  ← 27 bytes + heap allocation
+
+Velo Internal (fast):
+  0x8899AABBCCDDEEFF           ← 8 bytes, register-friendly
+```
+
+**Rule: Strings only exist at ingress (API) and egress (logs/UI).**
+
+### 74.2 Hot/Cold Zone Separation
+
+```rust
+struct VeloRuntime {
+    // HOT ZONE: Always in L1/L2 cache
+    // No strings here - pure integers
+    
+    // Path hash → dense internal ID
+    lookup: MPHF,
+    
+    // Internal ID → metadata (array indexing)
+    metadata: Vec<Entry>,
+}
+
+struct Entry {
+    content_hash: [u8; 32],  // Points to CAS blob
+    name_offset: u32,        // Pointer to cold zone
+    file_size: u64,
+    flags: u16,
+}
+
+// COLD ZONE: Only loaded for ls/error messages
+// mmap'd from disk, never touches hot path
+struct StringPool {
+    data: Mmap,  // All filenames concatenated
+}
+
+impl StringPool {
+    fn resolve(&self, offset: u32) -> &str {
+        // Only called for user-facing output
+        read_null_terminated(&self.data[offset as usize..])
+    }
+}
+```
+
+### 74.3 Lookup Pipeline
+
+**Fast Path (read file):**
+```text
+1. Request: open("/src/utils/helper.js")
+2. Hash: xxHash(path) → 0x8899AABB      ← String dies here
+3. MPHF: F(0x8899AABB) → 42             ← Pure arithmetic
+4. Array: metadata[42] → Entry           ← Single memory access
+5. Return: &Entry.content_hash → mmap blob
+```
+
+**Slow Path (ls command):**
+```text
+1. Iterate metadata array
+2. For each entry.name_offset → StringPool.resolve()
+3. Page fault → load string from disk
+4. Return to user
+```
+
+### 74.4 Path as Content, Content as ID
+
+```text
+Traditional Filesystem:
+  Path = Navigation procedure
+  "Walk this tree to find data"
+
+VeloVFS:
+  Path = Key in hash map
+  Hash(Path) → Direct lookup → Data
+
+Philosophy: "全路径即内容，内容即 ID"
+(The full path IS the content, content IS the ID)
+```
+
+---
+
+## 75. SoA (Structure of Arrays) Data Layout
+
+### 75.1 The Cache Problem
+
+**AoS (Array of Structures) - Git style:**
+```rust
+struct FileNode {
+    name: String,           // 24 bytes
+    hash: [u8; 32],         // 32 bytes  
+    mode: u32,              // 4 bytes
+    children: Vec<Node>,    // 24 bytes
+}
+// 84 bytes per node, scattered in memory
+```
+
+When iterating, CPU loads entire 84-byte struct even if you only need `hash`.
+
+**SoA (Structure of Arrays) - Velo style:**
+```rust
+struct VeloSnapshot {
+    hashes: Vec<[u8; 32]>,   // Contiguous 32-byte blocks
+    modes: Vec<u32>,         // Contiguous 4-byte blocks
+    name_offsets: Vec<u32>,  // Contiguous 4-byte blocks
+}
+```
+
+### 75.2 Cache Line Efficiency
+
+```text
+Cache Line = 64 bytes
+
+AoS iteration (check file hashes):
+  Load File[0] partial (64 bytes) → process hash
+  Load File[1] partial (64 bytes) → process hash
+  ...
+  64 bytes per operation, 50% wasted
+
+SoA iteration (check hashes):
+  Load hashes[0..1] (64 bytes) → process 2 hashes
+  Load hashes[2..3] (64 bytes) → process 2 hashes
+  ...
+  64 bytes = 2 hashes, 100% utilized
+```
+
+### 75.3 SIMD-Friendly Comparison
+
+```rust
+// SoA enables SIMD hash comparison
+fn find_hash(snapshot: &VeloSnapshot, target: &[u8; 32]) -> Option<usize> {
+    // Compiler can vectorize this with AVX2
+    snapshot.hashes.iter()
+        .position(|h| h == target)
+}
+```
+
+### 75.4 Memory Prefetching
+
+```text
+Sequential access pattern enables CPU prefetch:
+
+snapshot.hashes:    [ H0 ][ H1 ][ H2 ][ H3 ]...
+                      ↑     ↑     ↑     ↑
+CPU prefetches:     Load  +1    +2    +3
+
+Random access (pointers) breaks prefetch:
+
+tree.children[0].children[2].children[1]...
+                              ↑
+CPU: "No idea what's next, stall pipeline"
+```
+
+---
+
+## 76. Thread-per-Core Runtime Model (Monoio Philosophy)
+
+### 76.1 The Problem with Work Stealing
+
+**Tokio (Multi-threaded runtime):**
+```text
+Thread Pool + Work Stealing:
+  Thread A: busy
+  Thread B: idle → "steals" task from Thread A's queue
+  
+Cost:
+  - Cross-thread synchronization (atomics, locks)
+  - Cache invalidation when task moves
+  - Memory allocator contention
+```
+
+### 76.2 Thread-per-Core Design
+
+**Monoio/VeloVFS Model:**
+```text
+Core 0: Event Loop 0 (owns its data)
+Core 1: Event Loop 1 (owns its data)
+Core 2: Event Loop 2 (owns its data)
+...
+
+Rules:
+  - Data never moves between cores
+  - Each core has private allocator slab
+  - No synchronization needed for hot path
+```
+
+### 76.3 Memory Ownership
+
+```rust
+// Each core owns its buffers
+struct CoreLocalState {
+    // Private to this core - no Arc, no Mutex
+    io_ring: IoUring,
+    fd_cache: LruCache<u64, RawFd>,
+    read_buffers: SlabAllocator<[u8; 4096]>,
+}
+
+thread_local! {
+    static CORE_STATE: RefCell<CoreLocalState> = ...;
+}
+```
+
+### 76.4 Request Distribution
+
+```text
+Incoming requests hashed to cores:
+
+Request(path="/src/foo.js"):
+  Core = hash(path) % num_cores
+  → Route to Core N's event loop
+  → Processed entirely on Core N
+
+Result: Zero cross-core communication on hot path
+```
+
+### 76.5 Performance vs Tokio
+
+| Aspect | Tokio | Thread-per-Core |
+|--------|-------|-----------------|
+| Task scheduling | Global queue + stealing | Local queue only |
+| Allocator | Global (contended) | Per-core slab |
+| Cache locality | Poor (tasks migrate) | Excellent (data stays) |
+| Complexity | High (fairness, stealing) | Low (simple loops) |
+| Tail latency | Variable | Predictable |
+
+---
+
+## 77. Memory Allocator Selection
+
+### 77.1 Allocator Comparison
+
+| Feature | mimalloc (MS) | jemalloc (FB) | tcmalloc (Google) |
+|---------|---------------|---------------|-------------------|
+| **Philosophy** | Max speed | Min fragmentation | Thread caching |
+| **Small objects** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| **Lock contention** | Near-zero | Low | Low |
+| **Memory overhead** | Higher | Lowest | Highest |
+| **Cold start** | Fastest | Slower | Medium |
+| **Best for** | Short-lived allocs | Long-running daemons | Mixed |
+
+### 77.2 Recommendation for VeloVFS
+
+**Use mimalloc:**
+
+```rust
+// Cargo.toml
+[dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+// main.rs
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+```
+
+**Why mimalloc:**
+1. **Free List Sharding**: Allocation completes in L1 cache
+2. **VeloVFS pattern**: High-frequency, short-lived allocations
+3. **Not a database**: No need to optimize for 50GB heaps
+4. **Rust ecosystem**: Battle-tested, used by rustc itself
+
+### 77.3 jemalloc: When to Use
+
+Use jemalloc if:
+- Running for months without restart
+- Heap grows to 10GB+
+- Memory fragmentation becomes visible
+
+```rust
+// Alternative for long-running deployments
+#[cfg(feature = "jemalloc")]
+use jemallocator::Jemalloc;
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+```
+
+### 77.4 CoW-Friendly Allocation
+
+For Alpine/musl environments (where malloc is weak):
+
+```dockerfile
+# Force jemalloc in Alpine container
+ENV LD_PRELOAD=/usr/lib/libjemalloc.so.2
+```
+
+**Why this matters:**
+- musl's malloc has poor CoW behavior
+- jemalloc reuses memory blocks → fewer new pages → better CoW sharing
+
+### 77.5 GWP-ASan: Production Memory Debugging
+
+ByteDance's secret weapon: Sample-based memory safety:
+
+```text
+GWP-ASan (Google/ByteDance):
+  - Samples 1/10000 allocations
+  - Guards them with protected pages
+  - Catches use-after-free in production
+  - Near-zero overhead
+```
+
+---
+
+## 78. Bloom Filter for Negative Lookups
+
+### 78.1 The Hidden Bottleneck: ENOENT
+
+Node.js/Python module resolution generates massive failed lookups:
+
+```text
+require("express"):
+  Try: /node_modules/express.js       → ENOENT
+  Try: /node_modules/express.json     → ENOENT  
+  Try: /node_modules/express/index.js → FOUND
+
+3 syscalls, 2 were wasted
+```
+
+Large projects: Thousands of ENOENT per startup.
+
+### 78.2 Bloom Filter: O(1) "Does Not Exist"
+
+```rust
+struct VeloFS {
+    // Loaded at startup, ~4MB for millions of files
+    existence_bloom: BloomFilter,
+    
+    // Actual lookup structures
+    mphf: PerfectHash,
+    metadata: Vec<Entry>,
+}
+
+impl VeloFS {
+    fn open(&self, path: &str) -> Result<Fd> {
+        let hash = xxhash(path);
+        
+        // Fast path: Bloom says "definitely not here"
+        if !self.existence_bloom.may_contain(hash) {
+            return Err(ENOENT);  // Zero syscalls, nanoseconds
+        }
+        
+        // Slow path: Actually look it up
+        self.do_real_lookup(hash)
+    }
+}
+```
+
+### 78.3 Performance Characteristics
+
+| Metric | Value |
+|--------|-------|
+| Memory | ~10 bits per file (~1.25MB for 1M files) |
+| False positive rate | 1% (tunable) |
+| Lookup time | ~3 memory accesses |
+| ENOENT acceleration | 100% hit → instant return |
+
+### 78.4 Node.js Module Resolution Impact
+
+| Scenario | Without Bloom | With Bloom |
+|----------|---------------|------------|
+| 100 requires | 400 syscalls | 100 syscalls |
+| Startup time | 200ms | 50ms |
+
+---
+
+## 79. Pre-Calculated Metadata (Zero-fstat)
+
+### 79.1 The Standard Read Pattern
+
+```text
+Traditional:
+  1. open(file)     → syscall #1
+  2. fstat(fd)      → syscall #2 (get file size for buffer)
+  3. read(fd, buf)  → syscall #3
+  4. close(fd)      → syscall #4
+```
+
+### 79.2 Velo Optimization: Inline Metadata
+
+Since Velo manages immutable content, size is known at ingest:
+
+```rust
+struct VeloEntry {
+    content_hash: [u8; 32],
+    file_size: u64,        // Known at ingest time!
+    mode: u32,
+    mtime: u64,
+}
+
+impl VeloFS {
+    fn fstat(&self, velo_fd: VeloFd) -> Stat {
+        // Return from memory, NOT syscall
+        let entry = &self.metadata[velo_fd.0];
+        Stat {
+            size: entry.file_size,
+            mode: entry.mode,
+            mtime: entry.mtime,
+            // ... all pre-computed
+        }
+    }
+}
+```
+
+### 79.3 Result
+
+```text
+Velo optimized:
+  1. open(file)     → memory lookup (no syscall)
+  2. fstat(fd)      → memory return (no syscall)
+  3. read(fd, buf)  → mmap/pread (1 syscall)
+  
+Syscall reduction: 75%
+```
+
+---
+
+## 80. Profile-Guided Optimization (PGO)
+
+### 80.1 What is PGO?
+
+Compiler uses runtime profile to optimize hot paths:
+
+```text
+1. Build instrumented binary
+2. Run typical workload (e.g., npm install)
+3. Collect profile data
+4. Rebuild with profile → optimized binary
+```
+
+### 80.2 Implementation
+
+```bash
+# Step 1: Build instrumented version
+RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" \
+  cargo build --release
+
+# Step 2: Run typical workload
+./target/release/velo install numpy pandas torch
+
+# Step 3: Merge profile data
+llvm-profdata merge -o merged.profdata /tmp/pgo-data
+
+# Step 4: Build optimized version
+RUSTFLAGS="-Cprofile-use=merged.profdata" \
+  cargo build --release
+```
+
+### 80.3 What PGO Optimizes
+
+| Optimization | Description |
+|--------------|-------------|
+| **Branch layout** | Hot branches placed sequentially |
+| **Inlining** | Only inline actually-hot functions |
+| **Register allocation** | Prioritize hot variables |
+| **Code placement** | Group hot code for cache locality |
+
+### 80.4 Expected Gains
+
+| Workload | Improvement |
+|----------|-------------|
+| Branch-heavy code (VFS logic) | 10-20% |
+| Overall throughput | 10-15% |
+| Cost | Zero runtime cost (compile-time only) |
+
+---
+
+## 81. ID Recycling with Generational Index
+
+### 81.1 The Problem: ID Exhaustion
+
+```text
+If IDs are never recycled:
+  Mount project → allocate 100,000 IDs
+  Unmount project → IDs lost forever
+  Repeat 42,000 times → u32 exhausted
+```
+
+### 81.2 Free List Solution
+
+```rust
+struct IdAllocator {
+    next_id: u32,
+    free_list: Vec<u32>,  // Recycled IDs
+}
+
+impl IdAllocator {
+    fn allocate(&mut self) -> u32 {
+        // Prefer recycled IDs
+        if let Some(id) = self.free_list.pop() {
+            return id;
+        }
+        
+        // Fallback: fresh ID
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+    
+    fn deallocate(&mut self, id: u32) {
+        self.free_list.push(id);
+    }
+}
+```
+
+### 81.3 Generational Arena (Safe Recycling)
+
+Prevent use-after-free when IDs are recycled:
+
+```rust
+#[derive(Clone, Copy)]
+struct GenerationalId {
+    index: u32,       // Slot in array
+    generation: u32,  // Version counter
+}
+
+struct Arena<T> {
+    entries: Vec<Option<(u32, T)>>,  // (generation, value)
+    free_list: Vec<u32>,
+}
+
+impl<T> Arena<T> {
+    fn get(&self, id: GenerationalId) -> Option<&T> {
+        let (gen, value) = self.entries[id.index as usize].as_ref()?;
+        if *gen == id.generation {
+            Some(value)
+        } else {
+            None  // Stale reference - slot was recycled
+        }
+    }
+}
+```
+
+### 81.4 Why 48-bit ID Eliminates Need for Recycling
+
+```text
+48-bit capacity: 281 trillion IDs
+
+At 1 million IDs/second:
+  Time to exhaust = 281 trillion / 1M = 281 million seconds
+                  = 8.9 years of continuous operation
+
+Conclusion: With 48-bit IDs, recycling is unnecessary
+```
+
+---
+
+## 82. Flight Recorder (Zero-Alloc Debug Logging)
+
+### 82.1 The Problem: Production Debugging
+
+Traditional logging:
+- `log::info!()` → String allocation → disk write → slow
+- High-frequency logging kills performance
+- No logs → blind when crash happens
+
+### 82.2 Ring Buffer Flight Recorder
+
+```rust
+// Fixed-size, overwriting ring buffer in memory
+struct FlightRecorder {
+    buffer: [LogEntry; 65536],  // ~1MB pre-allocated
+    head: AtomicUsize,
+}
+
+// No strings - only structured data
+#[derive(Copy, Clone)]
+struct LogEntry {
+    timestamp: u64,     // rdtsc or nanos
+    event_type: u8,     // Enum as number
+    file_id: u64,       // Hash, not string
+    result: i32,        // Error code or FD
+}
+
+impl FlightRecorder {
+    #[inline(always)]
+    fn record(&self, event: u8, file_id: u64, result: i32) {
+        let idx = self.head.fetch_add(1, Ordering::Relaxed) & 0xFFFF;
+        unsafe {
+            let entry = &mut *self.buffer.as_ptr().add(idx).cast_mut();
+            entry.timestamp = rdtsc();
+            entry.event_type = event;
+            entry.file_id = file_id;
+            entry.result = result;
+        }
+    }
+}
+```
+
+### 82.3 Post-Crash Analysis
+
+```text
+On crash:
+  1. Core dump contains FlightRecorder buffer
+  2. Extract last 65536 operations
+  3. Decode event_type → human-readable
+  4. Find exactly what happened before crash
+
+Zero runtime cost:
+  - No heap allocation
+  - No syscalls
+  - No string formatting
+  - Just memory writes
+```
+
+### 82.4 Decode on Demand
+
+```rust
+impl LogEntry {
+    fn decode(&self, string_pool: &StringPool) -> String {
+        // Only called during debugging, never in hot path
+        format!(
+            "[{}] {} file={} result={}",
+            self.timestamp,
+            EVENT_NAMES[self.event_type as usize],
+            string_pool.resolve(self.file_id),
+            self.result
+        )
+    }
+}
+```
+
+---
+
+## 83. FUSE vs OverlayFS: Architectural Decision
+
+### 83.1 Positioning Comparison
+
+| Aspect | OverlayFS | FUSE |
+|--------|-----------|------|
+| **Location** | Kernel space | User space |
+| **Performance** | Native (ext4-like) | 10x slower (context switches) |
+| **Purpose** | Layer composition | Request interception |
+| **Complexity** | One mount command | Full driver code |
+
+### 83.2 When to Use Each
+
+**OverlayFS (Primary for VeloVFS):**
+```text
+Use case: Tenant root filesystem
+
+Why:
+  - Docker/Podman standard
+  - Zero custom code
+  - apt install = memory speed
+  - Full POSIX compliance for free
+```
+
+**FUSE (Special cases only):**
+```text
+Use case: Lazy loading remote data
+
+Example: 50GB AI model on S3
+  - User opens /data/model.bin
+  - FUSE intercepts, returns fake size
+  - User reads bytes 100MB-200MB
+  - FUSE streams from S3 on-demand
+  
+Never use for: General file I/O (too slow)
+```
+
+### 83.3 VeloVFS Hybrid Architecture
+
+```text
+┌─────────────────────────────────────────────┐
+│  Tenant View (OverlayFS)                    │
+│  ├─ /usr, /lib → LowerDir (immutable CAS)  │
+│  ├─ /home → UpperDir (Tmpfs, writable)     │
+│  └─ /data/remote → FUSE (lazy load only)   │
+└─────────────────────────────────────────────┘
+
+Rule: Use OverlayFS for 99% of paths
+      Use FUSE only for streaming remote data
+```
+
+### 83.4 FUSE Performance Trap
+
+```text
+apt install package (10,000 small files):
+
+OverlayFS:
+  - Direct kernel I/O
+  - 1 second
+
+FUSE:
+  - 10,000 × context switch
+  - 10,000 × user→kernel→user
+  - 100 seconds (10x slower!)
+```
+
+---
+
+## 84. Page Cache Magic (Hard Link Deduplication)
+
+### 84.1 The Core Insight
+
+Linux Page Cache is keyed by **inode**, not path:
+
+```text
+Same inode → Same physical pages in RAM
+
+File A: /tenant_1/numpy/core.so → inode 12345
+File B: /tenant_2/numpy/core.so → hard link → inode 12345
+
+Result:
+  Both tenants read from SAME memory pages
+  1000 tenants = 1 copy in RAM
+```
+
+### 84.2 Hard Link Farm Architecture
+
+```text
+Physical Storage (CAS):
+  /velo/warehouse/
+    blake3_abc123... → numpy 1.24 (100MB)
+    blake3_def456... → pandas 2.0 (50MB)
+
+Tenant Views (Hard Links):
+  /tenant_1/site-packages/numpy → hardlink → warehouse/abc123
+  /tenant_2/site-packages/numpy → hardlink → warehouse/abc123
+  ...
+  /tenant_1000/site-packages/numpy → hardlink → warehouse/abc123
+
+Physical RAM:
+  Page Cache contains ONE copy of abc123
+  All 1000 tenants share it
+```
+
+### 84.3 Implementation
+
+```rust
+fn create_tenant_view(tenant_id: u32, packages: &[Package]) {
+    for pkg in packages {
+        let source = format!("/velo/warehouse/{}", pkg.content_hash);
+        let target = format!("/tenant_{}/site-packages/{}", tenant_id, pkg.name);
+        
+        // Hard link: same inode, same page cache
+        std::fs::hard_link(&source, &target).unwrap();
+    }
+}
+```
+
+### 84.4 Requirements
+
+| Constraint | Reason |
+|------------|--------|
+| Same filesystem | Hard links can't cross mount boundaries |
+| Use Tmpfs for both | Warehouse + tenant dirs on same mount |
+| Hard links, not symlinks | Symlinks expose real paths, different inodes |
+
+### 84.5 Memory Savings
+
+| Scenario | Without Dedup | With Hard Link Farm |
+|----------|---------------|---------------------|
+| 1000 tenants × 100MB numpy | 100GB RAM | 100MB RAM |
+| Memory reduction | 1x | 1000x |
+
+---
+
+## 85. Profile-Guided Packfile Optimization (Cold Start Acceleration)
+
+### 85.1 The Problem: Scattered Small Files
+
+NPM/Node.js pattern: Thousands of tiny files (1-10KB)
+
+```text
+Standard CAS layout:
+  /cas/a1b2c3...  (index.js, 2KB)
+  /cas/d4e5f6...  (utils.js, 1KB)  ← 10MB away on disk
+  /cas/g7h8i9...  (config.js, 1KB) ← 50MB away on disk
+
+Node.js startup:
+  require("index.js")  → IO #1
+  require("utils.js")  → IO #2  
+  require("config.js") → IO #3
+  ...
+  5000 files = 5000 random IOs
+```
+
+### 85.2 Why Contiguous Layout Matters
+
+```text
+Linux kernel readahead: 128KB per page fault
+
+Scattered files:
+  Read index.js (2KB) → readahead brings 128KB of garbage
+  Read utils.js (1KB) → readahead brings 128KB of garbage
+  Waste: 99% of IO bandwidth
+
+Contiguous files:
+  Read index.js (2KB) → readahead brings utils.js, config.js too!
+  Next require() = memory hit, 0 IO
+  
+Result: 5000 random IOs → ~10 sequential IOs
+Cold start: 5-10x faster
+```
+
+### 85.3 Three-Phase Implementation
+
+**Phase 1: Profile Collection (The Spy)**
+
+```rust
+struct AccessProfiler {
+    traces: HashMap<ProjectId, Vec<(u64, Blake3Hash)>>,  // (timestamp, hash)
+}
+
+impl VeloFS {
+    fn on_file_access(&self, project: ProjectId, hash: Blake3Hash) {
+        let ts = Instant::now();
+        self.profiler.traces
+            .entry(project)
+            .or_default()
+            .push((ts, hash));
+    }
+}
+```
+
+**Phase 2: Background Packing (The Defrag Daemon)**
+
+```rust
+fn pack_hot_files(profile: &AccessTrace) {
+    // Sort by access order
+    let ordered: Vec<_> = profile.deduplicate_and_sort();
+    
+    // Create packfile
+    let mut pack = PackfileWriter::new();
+    let mut index = Vec::new();
+    
+    for (offset, hash) in ordered.iter().enumerate() {
+        let content = read_loose_blob(hash);
+        let pack_offset = pack.append(&content);
+        
+        index.push(PackEntry {
+            hash: *hash,
+            packfile_id: pack.id(),
+            offset: pack_offset,
+            length: content.len(),
+        });
+    }
+    
+    pack.finalize();
+    update_lmdb_index(&index);
+}
+```
+
+**Phase 3: Transparent Access (The Mapping)**
+
+```rust
+fn read_blob(&self, hash: Blake3Hash) -> &[u8] {
+    match self.lmdb.get(hash) {
+        Location::Loose(path) => mmap_loose(path),
+        Location::Packed { file, offset, len } => {
+            // mmap entire packfile (or region)
+            let pack_mmap = self.get_pack_mmap(file);
+            &pack_mmap[offset..offset + len]
+        }
+    }
+}
+```
+
+### 85.4 When to Pack
+
+| Strategy | Trigger | Benefit |
+|----------|---------|---------|
+| Install-time | During `npm install` | Write once in order |
+| First-run | After initial startup | Capture actual access pattern |
+| Background | Idle CPU detection | No impact on user |
+
+### 85.5 Index Update (Hash Unchanged)
+
+```text
+Before packing:
+  LMDB[hash_a] = { type: Loose, path: "/cas/a1b2c3..." }
+
+After packing:
+  LMDB[hash_a] = { type: Packed, file: "pack_001", offset: 0, len: 2048 }
+
+Key insight: Content hash unchanged, only location pointer updated
+```
+
+### 85.6 Performance Impact
+
+| Scenario | Without Packing | With Packing |
+|----------|-----------------|--------------|
+| Node.js 5000 file startup | 5000 random IOs | ~10 sequential IOs |
+| Cold start time | 2 seconds | 200ms |
+| Disk bandwidth utilization | 5% | 95% |
+
+---
+
+## 86. LD_PRELOAD Syscall Interception (FUSE-Free Approach)
+
+### 86.1 The Problem with FUSE
+
+```text
+FUSE overhead per file operation:
+  1. User calls open()
+  2. Kernel enters FUSE module
+  3. Context switch to FUSE daemon
+  4. Daemon processes request
+  5. Context switch back to kernel
+  6. Kernel returns to user
+
+Cost: ~10μs per operation (vs ~1μs native)
+```
+
+### 86.2 LD_PRELOAD Alternative
+
+Inject `libvelo_fs.so` to intercept libc calls at user-space:
+
+```c
+// libvelo_fs.so - The Shim
+#define _GNU_SOURCE
+#include <dlfcn.h>
+
+static int (*real_open)(const char*, int, ...) = NULL;
+
+__attribute__((constructor))
+void init() {
+    real_open = dlsym(RTLD_NEXT, "open");
+}
+
+int open(const char *path, int flags, ...) {
+    // Check if path is in Velo namespace
+    if (is_velo_path(path)) {
+        // Redirect to CAS
+        Blake3Hash hash = manifest_lookup(path);
+        char cas_path[128];
+        snprintf(cas_path, 128, "/dev/shm/velo_cas/%s", hash_to_hex(hash));
+        return real_open(cas_path, O_RDONLY);
+    }
+    
+    // Fall through to real syscall
+    return real_open(path, flags);
+}
+```
+
+### 86.3 Full Interception Surface
+
+```c
+// All file-related syscalls must be intercepted
+int open(const char*, int, ...);
+int openat(int, const char*, int, ...);
+int stat(const char*, struct stat*);
+int lstat(const char*, struct stat*);
+ssize_t readlink(const char*, char*, size_t);
+int access(const char*, int);
+DIR* opendir(const char*);
+// ... and more
+```
+
+### 86.4 Trade-offs
+
+| Aspect | LD_PRELOAD | FUSE |
+|--------|------------|------|
+| Performance | Native speed | 10x overhead |
+| Static binaries | ❌ Bypassed | ✅ Works |
+| Kernel involvement | None | Full |
+| Complexity | Medium | High |
+| Python/Node.js | ✅ Perfect | ✅ Works |
+| Go static | ❌ Fails | ✅ Works |
+
+**Recommendation**: Use LD_PRELOAD for interpreted languages (99% of use cases), fall back to FUSE only for static binaries.
+
+---
+
+## 87. Manifest-Based Path Virtualization
+
+### 87.1 The Manifest Structure
+
+Each tenant gets a lightweight path→hash mapping:
+
+```json
+{
+  "/usr/lib/python3.11/os.py": "blake3:a1b2c3d4...",
+  "/app/main.py": "blake3:d4e5f6g7...",
+  "/data/model.bin": "blake3:h8i9j0k1...",
+  "__metadata__": {
+    "tenant_id": "tenant_42",
+    "created_at": 1706500000,
+    "entry_count": 50000
+  }
+}
+```
+
+### 87.2 Lookup Flow
+
+```text
+User: open("/app/main.py")
+       ↓
+Shim: manifest.get("/app/main.py")
+       ↓
+Hash: "blake3:d4e5f6g7..."
+       ↓
+Redirect: open("/dev/shm/velo_cas/d4e5f6g7...")
+       ↓
+Kernel: Returns FD to shared memory
+       ↓
+User: Reads from FD (thinks it's a file)
+```
+
+### 87.3 Manifest Delivery
+
+**Option A: Shared Memory**
+```c
+// Tenant startup
+int manifest_fd = shm_open("/velo_manifest_tenant_42", O_RDONLY, 0);
+char* manifest = mmap(NULL, size, PROT_READ, MAP_SHARED, manifest_fd, 0);
+```
+
+**Option B: Embedded in libvelo_fs.so**
+```c
+// Compile manifest into DSO at tenant creation
+// Zero IPC overhead, instant lookup
+```
+
+### 87.4 Directory Listing Simulation
+
+```c
+DIR* opendir(const char* path) {
+    // Collect all manifest entries starting with path
+    Vector<ManifestEntry> entries = manifest.prefix_scan(path);
+    
+    // Return fake directory stream
+    return velo_fake_dir_from(entries);
+}
+```
+
+---
+
+## 88. User-Space CoW Write Handling
+
+### 88.1 Detecting Write Intent
+
+```c
+int open(const char* path, int flags, ...) {
+    if (is_velo_path(path)) {
+        if (flags & (O_WRONLY | O_RDWR | O_APPEND | O_CREAT)) {
+            // Write detected - need CoW
+            return handle_velo_write(path, flags);
+        }
+        // Read-only - direct CAS access
+        return redirect_to_cas(path);
+    }
+    return real_open(path, flags);
+}
+```
+
+### 88.2 Copy-Up to Private Layer
+
+```c
+int handle_velo_write(const char* path, int flags) {
+    // 1. Create private copy in tenant's Tmpfs
+    char private_path[256];
+    snprintf(private_path, 256, "/tenant_%d/overlay%s", tenant_id, path);
+    
+    // 2. If file exists in CAS, copy it
+    Blake3Hash hash = manifest_lookup(path);
+    if (hash != NULL) {
+        copy_from_cas(hash, private_path);
+    }
+    
+    // 3. Update local manifest
+    manifest_override(path, private_path);
+    
+    // 4. Open the private copy
+    return real_open(private_path, flags);
+}
+```
+
+### 88.3 Subsequent Access
+
+```c
+// After copy-up, local manifest has override
+int open(const char* path, int flags) {
+    // Check local override first
+    if (local_override_exists(path)) {
+        return real_open(get_override_path(path), flags);
+    }
+    // Then check CAS
+    if (manifest_has(path)) {
+        return redirect_to_cas(path);
+    }
+    // Finally, real filesystem
+    return real_open(path, flags);
+}
+```
+
+### 88.4 Memory Layout
+
+```text
+Tenant 42's View:
+  /app/config.json → CAS (shared, read-only)
+  /app/main.py     → CAS (shared, read-only)
+  /app/data.txt    → /tenant_42/overlay/app/data.txt (private, written)
+
+Physical Reality:
+  /dev/shm/velo_cas/abc123... → shared by 1000 tenants
+  /tenant_42/overlay/         → private to tenant 42 only
+```
+
+---
+
+## 89. Base + Delta Layered Manifest
+
+### 89.1 The Two-Layer Design
+
+```text
+┌─────────────────────────────────────────────────────┐
+│ 1. CAS Blob Store (Raw Data)                        │
+│    /dev/shm/cas/a8f9...  (Read-Only, Immutable)     │
+│    /dev/shm/cas/b2c3...                             │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ 2. Base Manifest (Perfect Hash - Shared by ALL)    │
+│    "/usr/bin/python" → Hash(a8f9...)               │
+│    "/app/main.py"    → Hash(b2c3...)               │
+│    (Read-only, mmap by all tenants)                │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ 3. Tenant A Delta (Private HashMap)                │
+│    "/app/main.py"    → Hash(NewHash...)  [override]│
+│    "/tmp/log.txt"    → Hash(LogHash...)  [new file]│
+└─────────────────────────────────────────────────────┘
+```
+
+### 89.2 Lookup Priority
+
+```rust
+fn lookup(&self, path: &str) -> Option<Blake3Hash> {
+    // 1. Check private delta first (overrides base)
+    if let Some(hash) = self.tenant_delta.get(path) {
+        return Some(hash);
+    }
+    
+    // 2. Fall back to shared base
+    if let Some(hash) = self.base_manifest.get(path) {
+        return Some(hash);
+    }
+    
+    // 3. Not found
+    None
+}
+```
+
+### 89.3 Write Path (CoW Semantics)
+
+```text
+User: open("/app/main.py", "w") → write data → close()
+
+1. Write: Data buffered in tenant's private Tmpfs
+2. Hash: On close, compute Blake3(new_content)
+3. Store: Write to CAS if hash doesn't exist
+4. Update Delta: Insert "/app/main.py" → NewHash
+5. Next Read: Delta takes priority → sees new content
+```
+
+### 89.4 Memory Characteristics
+
+| Layer | Size | Storage | Mutability |
+|-------|------|---------|------------|
+| Base Manifest | Large | Shared mmap | Immutable |
+| Delta Layer | Small | Per-tenant HashMap | Mutable |
+| CAS Blobs | Huge | Shared mmap | Immutable |
+
+---
+
+## 90. Persistence Architecture
+
+### 90.1 Core Principle: Manifest is View, CAS is Warehouse
+
+```text
+Disk Layout:
+  /velo/
+    ├── cas/                    # The warehouse (all versions, all tenants)
+    │   ├── a1b2c3d4e5f6...    # Blake3 hash = filename
+    │   ├── f6e5d4c3b2a1...
+    │   └── ...
+    ├── snapshots/              # Tenant views (just pointers)
+    │   ├── tenant_42.manifest
+    │   └── tenant_99.manifest
+    └── index.lmdb              # Global hash→location index
+```
+
+### 90.2 Restart Recovery
+
+```rust
+fn recover_on_restart() -> VeloState {
+    // 1. Load LMDB index (O(1) mmap)
+    let index = lmdb::open("/velo/index.lmdb");
+    
+    // 2. For each active tenant, load manifest
+    let tenants = load_active_tenant_list();
+    let manifests: HashMap<TenantId, Manifest> = tenants
+        .into_iter()
+        .map(|t| (t, load_manifest(t)))
+        .collect();
+    
+    // 3. CAS blobs are lazy-loaded via mmap on access
+    // No need to load them explicitly
+    
+    VeloState { index, manifests }
+}
+```
+
+### 90.3 Manifest Persistence Formats
+
+**Option A: JSON (Human readable, Debug friendly)**
+```json
+{
+  "version": 1,
+  "created_at": 1706500000,
+  "entries": {
+    "/app/main.py": "blake3:abc123...",
+    "/usr/lib/libpython.so": "blake3:def456..."
+  }
+}
+```
+
+**Option B: SQLite (Fast queries, ACID)**
+```sql
+CREATE TABLE manifest (
+  path TEXT PRIMARY KEY,
+  hash BLOB NOT NULL,
+  size INTEGER,
+  mode INTEGER
+);
+```
+
+**Option C: Flat Binary (Maximum speed)**
+```rust
+struct ManifestEntry {
+    path_offset: u32,   // Into string pool
+    hash: [u8; 32],
+    size: u64,
+}
+// Entire manifest: mmap + direct access
+```
+
+### 90.4 Package Version Management
+
+```text
+uv pip install numpy==1.24:
+  Blob: /cas/abc123... (numpy 1.24 files)
+  
+uv pip install numpy==2.0:
+  Blob: /cas/def456... (numpy 2.0 files)
+
+Tenant A manifest:
+  /site-packages/numpy → abc123 (1.24)
+
+Tenant B manifest:
+  /site-packages/numpy → def456 (2.0)
+
+Physical storage: Both versions exist in CAS
+Tenant isolation: Each sees only their version
+```
+
+---
+
+## 91. Compression Strategy (Zlib vs LZ4 vs None)
+
+### 91.1 The Zlib Problem
+
+Git default: Zlib compression for all objects
+
+```text
+Problem:
+  mmap(compressed_file)
+        ↓
+  decompress() → temp buffer  ← CPU work + memory copy
+        ↓
+  return to user
+
+Result: Zero-copy broken, 10x slower
+```
+
+### 91.2 Velo Strategy: Selective Compression
+
+| Object Type | Size | Compression | Reason |
+|-------------|------|-------------|--------|
+| Tree/Commit | Small | Zlib OK | Rarely accessed, small decode cost |
+| Blob (code) | Medium | LZ4 or None | Frequent access, mmap preferred |
+| Blob (binary) | Large | None | mmap + sendfile, zero-copy |
+
+### 91.3 LZ4 as Compromise
+
+```text
+Compression speed comparison:
+  Zlib:  ~50 MB/s encode, 200 MB/s decode
+  LZ4:   ~400 MB/s encode, 4000 MB/s decode
+
+LZ4 decode at 4GB/s = negligible vs disk I/O
+
+Trade-off:
+  - 30% less disk usage
+  - Still near-zero CPU overhead on read
+```
+
+### 91.4 Implementation
+
+```rust
+enum BlobStorage {
+    // For hot data: direct mmap, no decompression
+    Raw { mmap: Mmap },
+    
+    // For cold data: decompress on first access
+    Lz4 { compressed: Mmap, decompressed_cache: OnceCell<Vec<u8>> },
+    
+    // For tiny metadata
+    Zlib { compressed: Vec<u8> },
+}
+
+impl BlobStorage {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Raw { mmap } => mmap.as_ref(),
+            Lz4 { compressed, cache } => {
+                cache.get_or_init(|| lz4::decompress(compressed))
+            }
+            Zlib { compressed } => {
+                // Decompress every time (small objects only)
+                &zlib::decompress(compressed)
+            }
+        }
+    }
+}
+```
+
+### 91.5 Recommendation
+
+```text
+Phase 1 (Simplicity): Store blobs uncompressed (Raw)
+  - Maximum mmap performance
+  - Disk is cheap, SSD is fast
+
+Phase 2 (Optimization): Add LZ4 for cold data
+  - Background compress rarely-accessed blobs
+  - Keep hot data raw
+
+Never: Use Zlib for frequently accessed blobs
+```
+
+---
+
+## 92. PID-Based Session Table (Quantum Filesystem)
+
+### 92.1 The Challenge: Same Path, Different Content
+
+```text
+Terminal 1: cd project_a && velo build
+Terminal 2: cd project_b && velo build
+
+Both processes access: /velo_mnt/workspace/Cargo.toml
+But they need DIFFERENT contents!
+```
+
+### 92.2 Session Table Architecture
+
+```rust
+struct SessionTable {
+    // PID → (ProjectHash, RootManifest)
+    sessions: HashMap<u32, SessionContext>,
+}
+
+struct SessionContext {
+    root_pid: u32,           // Parent of this session
+    project_hash: Blake3,    // Which project
+    manifest: Arc<Manifest>, // Cached manifest
+    sandbox_dir: PathBuf,    // Private write area
+}
+
+impl SessionTable {
+    fn register(&mut self, pid: u32, project: Blake3) {
+        self.sessions.insert(pid, SessionContext {
+            root_pid: pid,
+            project_hash: project,
+            manifest: load_manifest(project),
+            sandbox_dir: PathBuf::from(format!("/tmp/velo_sessions/{}", pid)),
+        });
+    }
+    
+    fn resolve(&self, caller_pid: u32) -> Option<&SessionContext> {
+        // Direct match
+        if let Some(ctx) = self.sessions.get(&caller_pid) {
+            return Some(ctx);
+        }
+        
+        // Check parent chain (child processes inherit session)
+        let parent = get_parent_pid(caller_pid);
+        self.sessions.get(&parent)
+    }
+}
+```
+
+### 92.3 Request Flow with PID Context
+
+```text
+1. User runs: velo build (PID 1001)
+   → Session registered: 1001 → Project_A
+
+2. Velo spawns: cargo build (PID 1002)
+   → Inherits from parent 1001
+
+3. Cargo reads: /velo_mnt/Cargo.toml
+   → FUSE/LD_PRELOAD provides caller PID
+   → Lookup: 1002's parent 1001 → Project_A
+   → Return Project_A's Cargo.toml
+
+4. Concurrent: velo build in project_b (PID 2001)
+   → Session registered: 2001 → Project_B
+   → Same path → Different content
+```
+
+### 92.4 The "Quantum" Effect
+
+```text
+Same file path behaves like Schrödinger's cat:
+  - The content depends on WHO is observing
+  - Path: /velo_mnt/workspace/src/main.rs
+  - PID 1001 sees: Project A's main.rs
+  - PID 2001 sees: Project B's main.rs
+  - Both paths are "real" - just in different universes
+```
+
+---
+
+## 93. Linux Namespace Isolation
+
+### 93.1 Namespace Types Used by Velo
+
+| Namespace | Flag | Purpose |
+|-----------|------|---------|
+| Mount | CLONE_NEWNS | Isolated filesystem view |
+| PID | CLONE_NEWPID | Process 1 illusion |
+| Network | CLONE_NEWNET | Optional network isolation |
+| UTS | CLONE_NEWUTS | Custom hostname |
+| IPC | CLONE_NEWIPC | Isolated shared memory |
+
+### 93.2 Creating Isolated Environment
+
+```rust
+use nix::sched::{unshare, CloneFlags};
+use nix::mount::{mount, MsFlags};
+
+fn create_tenant_namespace() {
+    // 1. Create new namespaces
+    unshare(
+        CloneFlags::CLONE_NEWNS | 
+        CloneFlags::CLONE_NEWPID |
+        CloneFlags::CLONE_NEWNET
+    ).unwrap();
+    
+    // 2. Make mount namespace private
+    mount::<str, str, str, str>(
+        None, "/", None, 
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE, 
+        None
+    ).unwrap();
+    
+    // 3. Setup OverlayFS rootfs
+    mount_overlay_rootfs();
+    
+    // 4. Pivot root
+    pivot_root("new_root", "old_root");
+}
+```
+
+### 93.3 Mount Namespace vs FUSE
+
+```text
+Mount Namespace (Linux only):
+  - Kernel-level isolation
+  - Zero overhead
+  - Each tenant sees different /
+  - Perfect for containers
+
+FUSE + PID Session (Cross-platform):
+  - Works on macOS
+  - Slight overhead
+  - Same / path, different content per PID
+  - More flexible
+```
+
+### 93.4 Velo Strategy
+
+```text
+Linux Production: Use Mount Namespace
+  - Fastest
+  - Strongest isolation
+  - Compatible with Docker/Kubernetes
+
+macOS Development: Use FUSE + PID Session
+  - macOS lacks namespace support
+  - FUSE provides adequate isolation
+  - Acceptable dev-time overhead
+```
+
+---
+
+## 94. Artifact Sandbox and Cache Promotion
+
+### 94.1 Write Isolation Problem
+
+```text
+cargo build generates:
+  target/debug/main
+  target/debug/deps/*.rlib
+  target/debug/.fingerprint/...
+
+These must be:
+  1. Visible ONLY to current session
+  2. Eventually promoted to global cache
+```
+
+### 94.2 Private Sandbox
+
+```rust
+fn handle_write(&mut self, pid: u32, path: &str, data: &[u8]) {
+    let session = self.sessions.get(&pid).unwrap();
+    
+    // Write to private sandbox, not global CAS
+    let sandbox_path = session.sandbox_dir.join(path);
+    std::fs::create_dir_all(sandbox_path.parent().unwrap()).ok();
+    std::fs::write(&sandbox_path, data).unwrap();
+    
+    // Update session's local overlay
+    session.local_files.insert(path.to_string(), sandbox_path);
+}
+```
+
+### 94.3 Read Priority with Sandbox
+
+```rust
+fn handle_read(&self, pid: u32, path: &str) -> Option<Vec<u8>> {
+    let session = self.sessions.get(&pid)?;
+    
+    // 1. Check sandbox first (session-local writes)
+    if let Some(sandbox_path) = session.local_files.get(path) {
+        return Some(std::fs::read(sandbox_path).ok()?);
+    }
+    
+    // 2. Check global CAS
+    let hash = session.manifest.get(path)?;
+    Some(self.cas.read(hash))
+}
+```
+
+### 94.4 Cache Promotion on Success
+
+```text
+After successful build:
+
+1. Scan sandbox for artifacts
+2. Compute hash for each artifact
+3. Check if hash exists in global CAS
+   - Yes: discard sandbox copy
+   - No: promote to global CAS
+4. Update global build cache index:
+   BuildKey(crate, version, args) → ArtifactHash
+5. Clean up sandbox
+
+Next build of same config:
+  - Skip compilation entirely
+  - Return cached artifacts
+```
+
+### 94.5 Build Cache Key
+
+```rust
+#[derive(Hash)]
+struct BuildCacheKey {
+    package_name: String,
+    package_version: String,
+    target_triple: String,
+    rustc_version: String,
+    cargo_features: Vec<String>,
+    dependency_hashes: Vec<Blake3>,  // Recursive!
+}
+
+fn get_cached_artifact(key: &BuildCacheKey) -> Option<Blake3> {
+    let key_hash = blake3::hash(&serialize(key));
+    self.build_cache.get(&key_hash)
+}
+```
+
+---
+
+## 95. memfd_create + File Sealing (Kernel-Level Immutability)
+
+### 95.1 The Problem: File Descriptors as Capability Tokens
+
+```text
+Standard fd passing:
+  1. Host creates file, gets fd_rw
+  2. Host sends fd to tenant
+  3. Tenant might have write capability!
+
+Risk: Tenant could potentially modify shared data
+```
+
+### 95.2 The Nuclear Option: F_SEAL_WRITE
+
+```c
+#include <sys/mman.h>
+#include <linux/memfd.h>
+#include <fcntl.h>
+
+// 1. Create anonymous memory file
+int fd = memfd_create("shared_model", MFD_ALLOW_SEALING);
+
+// 2. Write data (only time this is possible)
+write(fd, model_data, model_size);
+
+// 3. SEAL IT - Permanent, irreversible
+fcntl(fd, F_ADD_SEALS, 
+      F_SEAL_WRITE |    // No more writes EVER
+      F_SEAL_SHRINK |   // No truncation
+      F_SEAL_GROW);     // No extension
+
+// After sealing: NOBODY can write (not even root)
+```
+
+### 95.3 The Guarantee
+
+```text
+After F_SEAL_WRITE:
+  - Host tries write(fd) → EPERM
+  - Tenant tries mmap(PROT_WRITE) → EPERM
+  - Root tries write(fd) → EPERM
+  - Kernel attack? Beyond scope.
+
+This is PHYSICAL immutability, not just permission.
+The memory region itself is locked.
+```
+
+### 95.4 Velo Architecture with memfd
+
+```text
+[ Velo Host ]
+     |
+     +-- 1. memfd_create("cas_blob") → fd_rw
+     |
+     +-- 2. write(fd_rw, blob_content)
+     |
+     +-- 3. fcntl(fd_rw, F_ADD_SEALS, F_SEAL_WRITE)
+     |      ↑ Point of no return - memory is now immutable
+     |
+     +-- 4. fork() or send_fd_over_socket()
+              |
+     [ Velo Tenant ]
+              |
+              +-- mmap(fd, PROT_READ)  → ✅ Success
+              +-- mmap(fd, PROT_WRITE) → ❌ EPERM
+              +-- write(fd, data)      → ❌ EPERM
+```
+
+### 95.5 Who Uses This?
+
+| System | Use Case |
+|--------|----------|
+| Wayland | Frame buffers between clients |
+| PulseAudio | Audio buffer sharing |
+| Android Binder | Shared memory IPC |
+| **VeloVFS** | CAS blob immutability |
+
+---
+
+## 96. V8 Bytecode Caching (Node.js Turbo Mode)
+
+### 96.1 The Parsing Problem
+
+Standard Node.js startup:
+```text
+require("express"):
+  1. Read .js file → 50μs
+  2. Parse JavaScript → 5ms ← THIS IS SLOW
+  3. Compile to bytecode → 3ms ← THIS TOO
+  4. Execute → 1ms
+```
+
+### 96.2 Velo Solution: Pre-Compiled Bytecode
+
+```text
+At install time (background):
+  Velo calls V8 engine to compile .js → Cached Bytecode
+  Store: (source_hash, v8_version) → bytecode_blob
+
+At runtime:
+  1. Read .js → 50μs
+  2. Check: Do we have bytecode for (hash, v8_version)?
+  3. YES → Load bytecode directly, skip parse/compile
+  4. Execute → 1ms
+
+Result: 8ms → 1ms (8x faster startup)
+```
+
+### 96.3 Implementation
+
+```javascript
+// Node.js cached data API
+const vm = require('vm');
+
+// At install time
+const source = fs.readFileSync('express/index.js', 'utf8');
+const script = new vm.Script(source, { 
+  filename: 'index.js',
+  produceCachedData: true  // Generate bytecode
+});
+const bytecode = script.cachedData;
+veloStore(hash(source), v8_version, bytecode);
+
+// At runtime
+const cachedData = veloFetch(hash(source), v8_version);
+const script = new vm.Script(source, {
+  cachedData: cachedData,  // Skip parsing!
+  filename: 'index.js'
+});
+script.runInThisContext();
+```
+
+### 96.4 Cache Key Structure
+
+```rust
+struct BytecodeCacheKey {
+    source_hash: Blake3,    // Hash of .js content
+    v8_version: String,     // e.g., "11.3.244.8"
+    // V8 bytecode is NOT stable across versions!
+}
+
+// Store: key → bytecode_blob
+// V8 version changes → cache miss → regenerate
+```
+
+### 96.5 Priority for Velo
+
+```text
+Phase 1: Solve NPM I/O black hole
+  - CAS, dedup, mmap
+  - Already 10x faster
+
+Phase 2 (Optional): Bytecode caching
+  - Additional 2-3x for CPU-bound startup
+  - Complex (V8 version compat)
+  - Only for Node.js (not Python, etc.)
+
+Recommendation: Don't do this in MVP
+```
+
+---
+
+## 97. The Golden Triangle Security Architecture
+
+### 97.1 Three Pillars
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│                   GOLDEN TRIANGLE                        │
+├─────────────────┬───────────────────┬───────────────────┤
+│  DATA SAFETY    │  ENVIRONMENT      │  RESOURCE         │
+│                 │  ISOLATION        │  LIMITS           │
+├─────────────────┼───────────────────┼───────────────────┤
+│ memfd_create +  │ Alpine Rootfs +   │ Cgroups v2        │
+│ F_SEAL_WRITE    │ Namespaces        │                   │
+├─────────────────┼───────────────────┼───────────────────┤
+│ Cannot modify   │ Cannot escape     │ Cannot exhaust    │
+│ shared data     │ sandbox           │ resources         │
+└─────────────────┴───────────────────┴───────────────────┘
+```
+
+### 97.2 Pillar 1: Data Safety (memfd + Sealing)
+
+```text
+Guarantee: Tenant CANNOT corrupt shared data
+
+Mechanism:
+  - All CAS blobs sealed with F_SEAL_WRITE
+  - Even root inside container cannot modify
+  - Physical memory pages are read-only
+
+Attack vectors blocked:
+  ✓ Direct write attempt
+  ✓ mmap with PROT_WRITE
+  ✓ /proc/self/mem tricks
+```
+
+### 97.3 Pillar 2: Environment Isolation (Namespaces)
+
+```text
+Guarantee: Tenant CANNOT see host filesystem
+
+Mechanism:
+  - Mount namespace: Isolated /
+  - PID namespace: Cannot see host processes
+  - Network namespace: Optional, isolated network
+
+Attack vectors blocked:
+  ✓ Reading /etc/passwd from host
+  ✓ Signaling host processes
+  ✓ Accessing host network
+```
+
+### 97.4 Pillar 3: Resource Limits (Cgroups)
+
+```text
+Guarantee: Tenant CANNOT DoS the system
+
+Mechanism:
+  - Memory limit: max 4GB per tenant
+  - PID limit: max 100 processes
+  - CPU quota: max 200% (2 cores)
+
+Attack vectors blocked:
+  ✓ Fork bomb
+  ✓ Memory exhaustion
+  ✓ VMA exhaustion (max_map_count)
+```
+
+### 97.5 Complete Security Stack
+
+```rust
+fn spawn_tenant(tenant_id: u32, manifest: &Manifest) {
+    // 1. Create resource limits
+    let cgroup = create_cgroup(tenant_id, ResourceLimits {
+        memory_max: 4 * GB,
+        pids_max: 100,
+        cpu_quota: 200_000,  // 200ms per 100ms
+    });
+    
+    // 2. Create isolated environment
+    let child = Command::new("/velo/init")
+        .unshare(Namespace::Mount | Namespace::PID | Namespace::Net)
+        .cgroup(cgroup)
+        .spawn();
+    
+    // 3. Pass sealed memfd tokens
+    for blob in manifest.blobs() {
+        let sealed_fd = open_sealed_memfd(blob.hash);
+        send_fd_to_child(child, sealed_fd);
+    }
+}
+```
+
+---
+
+## 98. Lazy Loading (On-Demand Paging for Clusters)
+
+### 98.1 The Paradigm Shift
+
+```text
+Traditional:
+  1. Download 10GB container image
+  2. Extract to local disk
+  3. Start process
+  Time: 5 minutes
+
+Velo Lazy Loading:
+  1. Download 10KB metadata (Git Tree)
+  2. Start process immediately
+  3. Fetch only accessed files on-demand
+  Time: 2 seconds (then stream rest as needed)
+```
+
+### 98.2 Page Fault as Network Request
+
+```rust
+fn handle_read(&self, hash: Blake3) -> &[u8] {
+    // 1. Check local cache
+    if let Some(data) = self.local_cache.get(hash) {
+        return data;
+    }
+    
+    // 2. Check peer cache (P2P)
+    if let Some(data) = self.peer_network.fetch(hash) {
+        self.local_cache.insert(hash, data.clone());
+        return data;
+    }
+    
+    // 3. Fetch from origin (S3/Cloud)
+    let data = self.origin.download(hash);
+    self.local_cache.insert(hash, data.clone());
+    data
+}
+```
+
+### 98.3 "Only Download What You Touch"
+
+```text
+10GB AI container:
+  - main.py (10KB) ← touched, downloaded
+  - config.json (1KB) ← touched, downloaded
+  - model.bin (9.5GB) ← NOT touched yet
+  
+If inference only uses CPU path:
+  - cuda_kernels.so (500MB) ← never downloaded
+  
+Result: Downloaded 50MB, ran full workload
+```
+
+### 98.4 Instant Burst Scaling
+
+```text
+Black Friday traffic spike:
+  Need: Spin up 1000 servers NOW
+
+Traditional:
+  1000 servers pulling from Docker Hub
+  Hub bandwidth: saturated
+  Time: 30 minutes
+
+Velo + P2P:
+  Server 1: pulls from origin (fast)
+  Server 2-10: pull from Server 1 (P2P)
+  Server 11-100: pull from Servers 2-10 (mesh)
+  Server 101-1000: pull from local mesh
+  Time: 60 seconds
+```
+
+---
+
+## 99. Four-Tier Cache Hierarchy
+
+### 99.1 The Tiers
+
+```text
+┌────────────────────────────────────────────────────────┐
+│ L1: Hot Cache (Memory/PMEM)                            │
+│     - stdlib, hot dependencies                         │
+│     - Latency: nanoseconds                             │
+├────────────────────────────────────────────────────────┤
+│ L2: Local Disk (NVMe SSD)                              │
+│     - Recently used blobs                              │
+│     - Latency: microseconds                            │
+├────────────────────────────────────────────────────────┤
+│ L3: Peer Cache (LAN P2P)                               │
+│     - Nearby machines' caches                          │
+│     - Latency: milliseconds                            │
+│     - Bandwidth: 10Gbps+                               │
+├────────────────────────────────────────────────────────┤
+│ L4: Origin (S3/MinIO/Cloud)                            │
+│     - Infinite storage, authoritative                  │
+│     - Latency: 50-200ms                                │
+│     - Cost: $/GB                                       │
+└────────────────────────────────────────────────────────┘
+```
+
+### 99.2 Lookup Chain
+
+```rust
+fn get_blob(&self, hash: Blake3) -> Bytes {
+    // L1: Memory (ns)
+    if let Some(b) = self.memory_cache.get(hash) { return b; }
+    
+    // L2: Local disk (μs)
+    if let Some(b) = self.disk_cache.get(hash) {
+        self.memory_cache.promote(hash, b.clone());
+        return b;
+    }
+    
+    // L3: Peer network (ms)
+    if let Some(b) = self.peer_mesh.query(hash) {
+        self.disk_cache.store(hash, b.clone());
+        return b;
+    }
+    
+    // L4: Origin (100ms+)
+    let b = self.origin.download(hash);
+    self.disk_cache.store(hash, b.clone());
+    b
+}
+```
+
+### 99.3 P2P Mesh Discovery
+
+```text
+Velo daemon broadcasts:
+  "I have blobs: abc123, def456, ghi789..."
+
+Peer lookup:
+  Query: "Who has blob xyz999?"
+  Response: "Machine 10.0.0.42 has it"
+  
+Transfer:
+  Direct TCP between peers
+  No central server involvement
+```
+
+### 99.4 Cache Eviction Policy
+
+| Tier | Size | Eviction |
+|------|------|----------|
+| L1 | 2GB | LRU, age < 1 hour |
+| L2 | 100GB | LRU, age < 7 days |
+| L3 | N/A | Peers manage their own |
+| L4 | ∞ | Never evict (source of truth) |
+
+---
+
+## 100. Location-Independent Storage Philosophy
+
+### 100.1 Core Insight
+
+```text
+Traditional Filesystem:
+  File = Path + Disk Location
+  "The file IS the disk block"
+
+VeloVFS:
+  File = Content Hash
+  Location = "Wherever it happens to be"
+  
+The hash is the file. Location is just an optimization.
+```
+
+### 100.2 Unified API Across Locations
+
+```rust
+trait BlobStore {
+    fn get(&self, hash: Blake3) -> Option<Bytes>;
+    fn put(&self, content: Bytes) -> Blake3;
+}
+
+// All implement the same interface:
+impl BlobStore for LocalDisk { ... }
+impl BlobStore for S3Bucket { ... }
+impl BlobStore for PeerNetwork { ... }
+impl BlobStore for MemoryCache { ... }
+
+// Application code doesn't know or care:
+fn read_file(store: &dyn BlobStore, hash: Blake3) -> Bytes {
+    store.get(hash).expect("blob must exist")
+}
+```
+
+### 100.3 "Teleporting" Environments
+
+```text
+Developer laptop:
+  $ velo push myenv
+  → Uploads metadata only (Git Tree)
+  → Blobs uploaded lazily on-demand
+
+Production server:
+  $ velo pull myenv
+  → Downloads metadata (instant)
+  → Blobs fetched as accessed
+
+From developer's view: "Environment was teleported"
+Physical reality: Just hashes were communicated
+```
+
+### 100.4 The Ultimate Vision
+
+```text
+VeloVFS transforms filesystems from:
+  "Blocks on a spinning disk"
+to:
+  "Content-addressed atoms floating in a global cache"
+
+Every blob exists exactly once in the universe.
+Every path is just a pointer to an immutable truth.
+Location is irrelevant. Content is eternal.
+```
+
+---
+
+# Part X: Day-2 Operations (运维)
+
+---
+
+## 101. Garbage Collection (Mark-and-Sweep)
+
+### 101.1 The Problem: CAS Never Shrinks
+
+```text
+CAS is append-only:
+  Day 1: numpy 1.18 installed → blob abc123
+  Day 30: numpy 1.24 installed → blob def456
+  Day 60: numpy 1.18 no longer referenced
+  
+Without GC: blob abc123 lives forever, disk fills up
+```
+
+### 101.2 GC Roots (What to Keep)
+
+```rust
+fn collect_gc_roots() -> HashSet<Blake3> {
+    let mut live = HashSet::new();
+    
+    // 1. All active tenant manifests
+    for manifest in active_manifests() {
+        for hash in manifest.all_hashes() {
+            live.insert(hash);
+        }
+    }
+    
+    // 2. Pinned packages (hot dependencies)
+    for hash in pinned_packages() {
+        live.insert(hash);
+    }
+    
+    // 3. Recently accessed (LRU protection)
+    for hash in accessed_within(Duration::hours(24)) {
+        live.insert(hash);
+    }
+    
+    live
+}
+```
+
+### 101.3 Mark-and-Sweep Algorithm
+
+```rust
+fn garbage_collect() {
+    // Phase 1: Mark
+    let live: BitSet = collect_gc_roots()
+        .into_iter()
+        .map(|h| hash_to_index(h))
+        .collect();
+    
+    // Phase 2: Sweep
+    for entry in walk_cas_directory() {
+        let hash = entry.filename();
+        let idx = hash_to_index(hash);
+        
+        if !live.contains(idx) && entry.mtime() > PROTECTION_PERIOD {
+            std::fs::remove_file(entry.path()).ok();
+            metrics.gc_freed_bytes += entry.size();
+        }
+    }
+}
+```
+
+### 101.4 Packfile Compaction
+
+```text
+Packfile "pack_001.data":
+  [blob_a: LIVE] [blob_b: DEAD] [blob_c: LIVE] [blob_d: DEAD]
+  
+If < 50% live:
+  1. Create new packfile
+  2. Copy only live blobs contiguously
+  3. Update LMDB index
+  4. Delete old packfile
+  
+Result: Disk reclaimed, locality improved
+```
+
+### 101.5 Execution Policy
+
+```rust
+fn gc_daemon() {
+    loop {
+        // Run at 3 AM or when idle
+        wait_for_idle_or_schedule();
+        
+        // Low priority I/O
+        ionice::set_class(IoClass::Idle);
+        
+        garbage_collect();
+        compact_packfiles();
+        
+        sleep(Duration::hours(24));
+    }
+}
+```
+
+---
+
+## 102. IPC Protocol: Pure Hash Strategy
+
+### 102.1 The Challenge: Variable-Length Data
+
+```text
+Ring Buffer entries must be fixed-size.
+But file paths are variable-length!
+
+Bad design:
+  Task { op: u8, path: String }  // String = heap allocation = slow
+```
+
+### 102.2 Solution: Hash-Only IPC
+
+```rust
+#[derive(Copy, Clone)]
+#[repr(C)]
+struct Task {
+    op: u8,           // 1 byte: Open/Read/Stat
+    _pad: [u8; 7],    // Alignment
+    hash: u128,       // 16 bytes: The ONLY identity
+    reply_slot: u32,  // 4 bytes: Where to write result
+}
+// Total: 28 bytes, fixed, no heap
+```
+
+### 102.3 Worker Self-Sufficiency
+
+```rust
+impl Worker {
+    fn process(&self, task: Task) {
+        // Worker reconstructs path from hash - no IPC needed!
+        let hex_path = hash_to_hex_simd(task.hash);
+        let shard = (task.hash & 0xFF) as usize;
+        
+        // Use pre-opened shard directory FD
+        let fd = unsafe {
+            libc::openat(
+                self.shard_fds[shard],
+                hex_path.as_ptr(),
+                libc::O_RDONLY
+            )
+        };
+        
+        self.reply(task.reply_slot, fd);
+    }
+}
+```
+
+### 102.4 Key Insight
+
+```text
+Worker needs NOTHING from Core except:
+  1. The operation type
+  2. The content hash
+
+Everything else is derivable:
+  - Path: hex(hash)
+  - Directory: shard_fds[hash & 0xFF]
+  - Metadata: global immutable index
+
+Result: Zero-copy IPC, no variable-length data
+```
+
+---
+
+## 103. Observability & Watchdog
+
+### 103.1 The Risk: Single-Threaded Deadlock
+
+```text
+Core thread is single-threaded event loop.
+If it blocks on anything:
+  - All I/O stalls
+  - System appears frozen
+  - No error message (it's just stuck)
+```
+
+### 103.2 Heartbeat Mechanism
+
+```rust
+static CORE_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+
+// In Core event loop
+fn core_loop() {
+    loop {
+        let task = ring.pop();
+        process(task);
+        
+        // Update heartbeat every N tasks
+        if processed % 1000 == 0 {
+            CORE_HEARTBEAT.store(now_nanos(), Ordering::Relaxed);
+        }
+    }
+}
+```
+
+### 103.3 Watchdog Thread
+
+```rust
+fn watchdog_thread() {
+    loop {
+        sleep(Duration::millis(100));
+        
+        let last_beat = CORE_HEARTBEAT.load(Ordering::Relaxed);
+        let elapsed = now_nanos() - last_beat;
+        
+        if elapsed > Duration::secs(1).as_nanos() {
+            // Core is stuck!
+            log::error!("Core deadlock detected!");
+            
+            // Option A: Trigger core dump for debugging
+            trigger_core_dump();
+            
+            // Option B: Attempt recovery
+            restart_core_loop();
+        }
+    }
+}
+```
+
+### 103.4 eBPF / USDT Probes
+
+```c
+// Predefined probe points (no recompile needed)
+USDT_PROBE(velo, task_start, (hash, op));
+USDT_PROBE(velo, task_complete, (hash, latency_ns));
+USDT_PROBE(velo, cache_miss, (hash, tier));
+USDT_PROBE(velo, gc_sweep, (freed_bytes, duration_ms));
+```
+
+```bash
+# Runtime observability
+$ bpftrace -e 'usdt:./velod:velo:cache_miss { @[arg1] = count(); }'
+```
+
+### 103.5 Metrics Export
+
+```rust
+struct VeloMetrics {
+    queue_depth: Gauge,
+    io_latency_p99: Histogram,
+    cache_hit_rate: Counter,
+    gc_freed_bytes: Counter,
+}
+
+// Expose via /metrics endpoint (Prometheus-compatible)
+```
+
+---
+
+## 104. Commit & Ingest (Write-Back to CAS)
+
+### 104.1 The Scenario
+
+```text
+Tenant A builds a Python wheel:
+  - Created in OverlayFS upperdir
+  - Currently ephemeral (lost on tenant shutdown)
+  
+Goal: Persist to CAS for other tenants to reuse
+```
+
+### 104.2 The Commit Operation
+
+```bash
+$ velo commit tenant_42 my-custom-wheel
+```
+
+### 104.3 Implementation
+
+```rust
+fn commit_tenant(tenant_id: u32, name: &str) -> Result<Blake3> {
+    let upperdir = format!("/tenant_{}/overlay/upper", tenant_id);
+    let mut new_manifest = Manifest::new();
+    
+    // 1. Scan all new files
+    for entry in walkdir::WalkDir::new(&upperdir) {
+        let content = std::fs::read(entry.path())?;
+        let hash = blake3::hash(&content);
+        
+        // 2. Check if already in CAS (dedup)
+        if !cas_exists(hash) {
+            // 3. Move to CAS (atomic)
+            let cas_path = format!("/velo/cas/{}", hash.to_hex());
+            std::fs::rename(entry.path(), &cas_path)?;
+            
+            // 4. Set immutable
+            set_readonly(&cas_path);
+        } else {
+            // Already exists - just delete local copy
+            std::fs::remove_file(entry.path())?;
+        }
+        
+        // 5. Update manifest
+        new_manifest.insert(entry.relative_path(), hash);
+    }
+    
+    // 6. Atomic tree swap
+    let root_hash = new_manifest.compute_tree_hash();
+    save_manifest(name, &new_manifest)?;
+    
+    Ok(root_hash)
+}
+```
+
+### 104.4 Key Properties
+
+| Property | Guarantee |
+|----------|-----------|
+| Atomic | Either all files committed or none |
+| Deduplicated | Existing blobs not copied |
+| Immutable | Committed files become read-only |
+| Reusable | Other tenants can reference by hash |
+
+---
+
+## 105. User Namespace & UID/GID Mapping
+
+### 105.1 The Problem
+
+```text
+Host: CAS files owned by velo_daemon (uid 999), mode 0644
+Container: Tenant runs as root (uid 0)
+
+Challenge:
+  - Tenant root should "see" files as owned by root
+  - But tenant root CANNOT modify host files
+```
+
+### 105.2 User Namespace Mapping
+
+```rust
+fn setup_user_namespace() {
+    // Map container root (0) to host user (999)
+    write("/proc/self/uid_map", "0 999 1");
+    write("/proc/self/gid_map", "0 999 1");
+    
+    // Now inside container:
+    //   uid 0 (root) = host uid 999 (velo)
+    //   Cannot write to files owned by host uid 0 (real root)
+}
+```
+
+### 105.3 Virtual Permission Masking
+
+For LD_PRELOAD (non-container) scenarios:
+
+```c
+// Intercept stat() to return virtual permissions
+int stat(const char *path, struct stat *buf) {
+    int ret = real_stat(path, buf);
+    
+    if (is_velo_path(path)) {
+        // Override with virtual metadata from manifest
+        VeloEntry *entry = manifest_lookup(path);
+        buf->st_mode = entry->virtual_mode;  // 0755 instead of 0644
+        buf->st_uid = 0;   // Appear as root-owned
+        buf->st_gid = 0;
+    }
+    
+    return ret;
+}
+```
+
+### 105.4 Why This Matters
+
+```text
+Without masking:
+  $ ls -la /app/main.py
+  -rw-r--r-- 999 999 main.py  ← Looks weird to tenant
+
+With masking:
+  $ ls -la /app/main.py
+  -rwxr-xr-x root root main.py  ← Looks normal
+
+Actual security: Still read-only (memfd sealed)
+```
+
+### 105.5 Combined Security Stack
+
+```text
+Layer 1: memfd F_SEAL_WRITE → Physical immutability
+Layer 2: User Namespace → UID isolation  
+Layer 3: Permission Masking → Visual consistency
+Layer 4: OverlayFS → CoW semantics
+
+Tenant sees: Normal filesystem with expected permissions
+Reality: Completely sandboxed, zero write capability
+```
+
+---
+
+# FAQ & Troubleshooting
+
+## Q: Why does `df -h` show wrong disk space?
+
+OverlayFS merges multiple layers. `df` reports the underlying filesystem, not the logical view. Use `velo status` for accurate CAS usage.
+
+## Q: Why can't I modify file timestamps?
+
+CAS files use `O_NOATIME` to prevent atime updates (performance). Timestamps are immutable as part of content-addressing.
+
+## Q: Build fails with "permission denied" on executables?
+
+Check that manifest has correct virtual permissions (0755). The LD_PRELOAD shim or FUSE must return executable mode in stat().
+
+## Q: System hangs after many mounts?
+
+Check `/proc/sys/fs/inotify/max_user_watches` and `vm.max_map_count`. Increase if needed:
+
+```bash
+sysctl -w vm.max_map_count=262144
+```
+
+---
+
+*Document Version: 18.0*
 *Last Updated: 2026-01-29*
-*Total Sections: 72*
+*Total Sections: 105 + FAQ*
+*Status: Production-Ready Specification*
