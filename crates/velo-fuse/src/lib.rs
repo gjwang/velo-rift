@@ -47,6 +47,18 @@ mod imp {
             fs
         }
 
+        /// Mount the filesystem at the given path (Ref: <https://docs.rs/fuser>)
+        pub fn mount(self, mountpoint: &Path) -> anyhow::Result<()> {
+            let options = [
+                fuser::MountOption::RO,
+                fuser::MountOption::FSName("velo".to_string()),
+                fuser::MountOption::AutoUnmount,
+            ];
+            // fuser::mount blocks until unmounted
+            fuser::mount2(self, mountpoint, &options)?.join();
+            Ok(())
+        }
+
         fn init_from_manifest(&mut self, manifest: &Manifest) {
             // 1. Assign inodes to all paths
             let mut next_inode = 2; // 1 is root
@@ -288,6 +300,10 @@ mod imp {
             #[cfg(all(target_os = "linux", not(feature = "fuse")))]
             println!("⚠️  VeloFs is disabled. Compile with --features fuse to enable.");
             Self
+        }
+
+        pub fn mount(self, _mountpoint: &std::path::Path) -> anyhow::Result<()> {
+            anyhow::bail!("FUSE not supported on this platform");
         }
     }
 }

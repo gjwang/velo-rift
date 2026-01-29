@@ -19,6 +19,7 @@ use walkdir::WalkDir;
 
 mod isolation;
 mod daemon;
+mod mount;
 
 use velo_cas::CasStore;
 use velo_manifest::{Manifest, VnodeEntry};
@@ -324,37 +325,10 @@ fn cmd_resolve(cas_root: &Path, lockfile: &Path) -> Result<()> {
     Ok(())
 }
 
+
 /// Mount the Velo filesystem (requires FUSE)
 fn cmd_mount(cas_root: &Path, manifest: &Path, mountpoint: &Path) -> Result<()> {
-    if !manifest.exists() {
-        anyhow::bail!("Manifest not found: {}", manifest.display());
-    }
-
-    // Ensure mountpoint exists
-    if !mountpoint.exists() {
-        fs::create_dir_all(mountpoint)?;
-    }
-
-    println!("Mounting VeloFS...");
-    println!("  Manifest:   {}", manifest.display());
-    println!("  CAS:        {}", cas_root.display());
-    println!("  Mountpoint: {}", mountpoint.display());
-
-    #[cfg(feature = "fuse")]
-    {
-        let cas = CasStore::new(cas_root)?;
-        let manifest = Manifest::load(manifest)?;
-        let _fs = velo_fuse::VeloFs::new(&manifest, cas);
-        // fuser::mount2(_fs, mountpoint, &[])?;
-        println!("FUSE mount implemented but requires 'fuse' feature enabled in velo-cli");
-    }
-
-    #[cfg(not(feature = "fuse"))]
-    {
-        println!("⚠️  FUSE support disabled. Recompile with --features fuse to enable.");
-    }
-
-    Ok(())
+    mount::run(cas_root, manifest, mountpoint)
 }
 
 /// Ingest a directory into the CAS and create a manifest
