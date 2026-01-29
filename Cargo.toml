@@ -39,6 +39,7 @@ nix = { version = "0.28", features = ["fs", "mount", "sched", "signal"] }
 walkdir = "2.5"
 memmap2 = "0.9"
 tempfile = "3.14"
+notify = "6.1.1"
 
 # Internal crates
 velo-cas = { path = "crates/velo-cas" }

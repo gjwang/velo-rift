@@ -117,6 +117,17 @@ enum Commands {
         #[command(subcommand)]
         command: DaemonCommands,
     },
+
+    /// Watch a directory for changes and auto-ingest
+    Watch {
+        /// Directory to watch
+        #[arg(value_name = "DIR")]
+        directory: PathBuf,
+
+        /// Output manifest file path
+        #[arg(short, long, default_value = "velo.manifest")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -155,6 +166,7 @@ async fn main() -> Result<()> {
         Commands::Daemon { command } => match command {
             DaemonCommands::Status => daemon::check_status().await,
         },
+        Commands::Watch { directory, output } => cmd_watch(&cli.cas_root, &directory, &output).await,
     }
 }
 
@@ -668,4 +680,70 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Watch a directory and auto-ingest on changes
+async fn cmd_watch(cas_root: &Path, directory: &Path, output: &Path) -> Result<()> {
+    use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    if !directory.exists() {
+        anyhow::bail!("Directory to watch does not exist: {}", directory.display());
+    }
+
+    println!("Watching {} for changes...", directory.display());
+    println!("Press Ctrl+C to stop.");
+
+    // Initial ingest
+    println!("\n[Initial Scan]");
+    cmd_ingest(cas_root, directory, output, None).await?;
+
+    // Create a channel to receive the events.
+    let (tx, rx) = channel();
+
+    // Create a watcher object, delivering debounced events.
+    // The notification back-end is selected based on the platform.
+    let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
+
+    // Add a path to be watched. All files and directories at that path and
+    // below will be monitored for changes.
+    watcher.watch(directory, RecursiveMode::Recursive)?;
+
+    // Optimization: Debounce logic could be here (accumulate events over X ms)
+    // For MVP, we just react to every event but maybe rate limit slightly?
+    // Actually, `notify` handles some basic stuff, but repeated ingest is expensive if triggered too fast.
+    // We'll implemented a simple loop that consumes events.
+
+    let mut last_ingest = std::time::Instant::now();
+    let debounce_duration = Duration::from_secs(1);
+
+    loop {
+        match rx.recv() {
+            Ok(event_res) => {
+                match event_res {
+                    Ok(_event) => {
+                        // Filter out unrelated events if needed, but for now we react to everything
+                        // println!("Change detected: {:?}", event.paths);
+                        
+                        // Simple debounce
+                        if last_ingest.elapsed() > debounce_duration {
+                            println!("\n[Change Detected] Re-ingesting...");
+                            if let Err(e) = cmd_ingest(cas_root, directory, output, None).await {
+                                eprintln!("Ingest failed: {}", e);
+                            }
+                            last_ingest = std::time::Instant::now();
+                        }
+                    }
+                    Err(e) => println!("Watch error: {:?}", e),
+                }
+            }
+            Err(e) => {
+                println!("Watch channel error: {:?}", e);
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
