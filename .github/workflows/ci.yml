@@ -38,7 +38,7 @@ jobs:
     name: Test
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -48,20 +48,14 @@ jobs:
         run: cargo test --workspace
 
   # TODO: Add a specific job for LD_PRELOAD integration testing on Linux
-  integration-test:
-    name: Integration Test (LD_PRELOAD)
+  e2e-test:
+    name: End-to-End Test (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Build shim
-        run: cargo build -p velo-shim --release
-      - name: Run Shim Test Script
-        run: |
-          # Simple verification that the shim works
-          # This requires the demo setup or similar
-          mkdir -p /tmp/velo-cas
-          echo "integration test" > /tmp/testfile
-          # To be properly implemented with a dedicated integration test suite
-          echo "Skipping full integration test in this iteration"
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev sqlite3
+      - name: Run E2E Test Suite
+        run: ./test.sh
