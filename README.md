@@ -5,70 +5,54 @@
 
 ---
 
-## What is Velo Rift?
+## Two Problems, One Solution
 
-Velo Rift is a **virtual file system layer** that makes dependency-heavy applications start instantly by eliminating disk I/O bottlenecks.
+### 1. Read-Only File Access is Too Slow
 
 ```text
-Traditional:  open("/node_modules/...") → disk seek → read → parse
-Velo Rift:    open("/node_modules/...") → mmap pointer → done
+Traditional:  open() → disk seek → read → copy → use
+Velo Rift:    open() → mmap pointer → use
 ```
 
-**Result**: Cold start in milliseconds, not minutes.
+### 2. Duplicate Files Waste Storage
+
+```text
+Traditional:  10 projects × same dependency = 10 copies
+Velo Rift:    10 projects × same dependency = 1 copy (shared)
+```
 
 ---
 
-## Core Principles
+## How It Works
 
-| Principle | Meaning |
+| Mechanism | Purpose |
 |-----------|---------|
-| **Path = Content** | Same path → same bytes (content-addressed) |
-| **Immutable Snapshots** | World state is frozen, verifiable, replayable |
-| **Zero-Copy I/O** | mmap directly from CAS, no file extraction |
+| **Content-Addressable Storage** | Same bytes = same hash = stored once |
+| **Memory-Mapped I/O** | Zero-copy access, no disk reads |
 
 ---
 
 ## What Velo Rift IS
 
-- ✅ A **virtual file system** optimized for immutable content
-- ✅ A **content-addressable store** with global deduplication  
-- ✅ An **I/O accelerator** for Python, Node.js, Rust, and more
-- ✅ A **state distribution layer** for reproducible execution
+- ✅ A **virtual file system** for read-only content
+- ✅ A **content-addressable store** with global deduplication
 
 ## What Velo Rift is NOT
 
-- ❌ A runtime replacement (we accelerate Node.js, Python, Bun — not replace them)
-- ❌ A package manager (we wrap uv, npm, cargo — not replace them)
+- ❌ A runtime replacement (we accelerate existing runtimes)
+- ❌ A package manager (we wrap uv, npm, cargo)
 - ❌ A build system (that's Bazel's job)
 - ❌ A container runtime (that's Docker's job)
-- ❌ A general-purpose filesystem for mutable data
-
-**We do one thing well: make file access instant.**
 
 ---
 
-## Use Cases
+## Results
 
-| Scenario | Without Velo | With Velo |
-|----------|-------------|-----------|
-| `npm install` (1000 packages) | 2 minutes | < 1 second |
+| Metric | Before | After |
+|--------|--------|-------|
+| `npm install` | 2 min | < 1 sec |
 | Python cold start | 500ms | 50ms |
-| CI dependency restore | Pull from cache | Already there |
-| Multi-tenant isolation | Copy per tenant | CoW overlay |
-
----
-
-## Quick Start
-
-```bash
-# Install (coming soon)
-curl -fsSL https://velo.dev/install.sh | sh
-
-# Accelerate your project
-cd my-project
-velo init
-velo run npm start
-```
+| Disk usage (10 projects) | 10 GB | 1 GB |
 
 ---
 
@@ -76,41 +60,29 @@ velo run npm start
 
 | Document | Description |
 |----------|-------------|
-| [World Model Whitepaper](docs/velo-world-model-whitepaper.md) | Why Velo exists (philosophy) |
-| [Technical Positioning](docs/architecture/velo-technical-positioning.md) | How we compare to other tools |
-| [Technical Deep Dive](docs/architecture/velo-technical-deep-dive.md) | Implementation specification |
+| [Whitepaper](docs/velo-world-model-whitepaper.md) | Two core problems explained |
+| [Positioning](docs/architecture/velo-technical-positioning.md) | Comparison with other tools |
+| [Technical Spec](docs/architecture/velo-technical-deep-dive.md) | Implementation details |
 
 ---
 
 ## Who Should Use Velo Rift
 
-**Yes, if you:**
-- Run large dependency trees (1000+ packages)
-- Care about cold start latency (serverless, CI/CD)
-- Want reproducible execution (auditing, compliance)
-- Build AI agent infrastructure (deterministic replay)
+**Yes:**
+- Large dependency trees (1000+ packages)
+- Cold start latency matters (serverless, CI/CD)
 
-**No, if you:**
-- Need POSIX-perfect semantics
-- Have write-heavy mutable workloads
-- Your bottleneck is CPU, not I/O
-- Have < 100 dependencies (overhead not worth it)
+**No:**
+- Write-heavy mutable workloads
+- Bottleneck is CPU, not I/O
+- < 100 dependencies
 
 ---
 
-## Project Status
+## Status
 
 🚧 **Early Development** — Architecture defined, implementation in progress.
-
----
 
 ## License
 
 Apache 2.0
-
----
-
-> *"If software is becoming an autonomous, living entity,  
-> it requires a world that does not shift beneath its feet."*
->
-> **Velo Rift is that world.**

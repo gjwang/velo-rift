@@ -6,21 +6,19 @@ A technical comparison with related tools, focusing on problem domains and archi
 
 ## 1. What VeloVFS Is (and Isn't)
 
-> **Why VeloVFS exists:**  
-> Modern runtimes are fast. Disks are not.  
-> VeloVFS exists to **remove the filesystem from the critical path of computation**.
+VeloVFS solves **two problems**:
+
+1. **Read-only file access is too slow** → mmap from CAS
+2. **Duplicate files waste storage** → content-addressable deduplication
 
 ### VeloVFS IS:
-- **A virtual file system layer** optimized for immutable content
-- **Content-addressable storage (CAS)** with deduplication
-- **An I/O accelerator** eliminating disk bottlenecks for interpreted languages
-- **A state distribution mechanism** (code, dependencies, assets)
+- A virtual file system for **read-only content**
+- Content-addressable storage with **global deduplication**
 
 ### VeloVFS is NOT:
-- A runtime replacement (still runs Node.js, Python, Cargo)
-- A package manager replacement (wraps uv, npm, cargo)
-- A distributed database
-- A general-purpose file system for mutable workloads
+- A runtime replacement (we accelerate existing runtimes)
+- A package manager (we wrap uv, npm, cargo)
+- A general-purpose filesystem for mutable data
 
 ### VeloVFS Intentionally Does NOT Model:
 - **Build graph semantics** (that's Bazel's job)
@@ -28,7 +26,7 @@ A technical comparison with related tools, focusing on problem domains and archi
 - **Process isolation** (that's Docker's job)
 - **Distributed consensus** (that's etcd's job)
 
-VeloVFS focuses on one thing: **making file access instant**.
+**One thing done well: fast read-only access, zero duplication.**
 
 ---
 
