@@ -283,23 +283,45 @@ fn cmd_status(cas_root: &Path, manifest: Option<&Path>) -> Result<()> {
         let stats = cas.stats()?;
 
         println!("CAS Store: {}", cas_root.display());
-        println!("  Blobs:      {}", stats.blob_count);
-        println!("  Total size: {}", format_bytes(stats.total_bytes));
+        println!("  Unique blobs: {}", stats.blob_count);
+        println!("  Total size:   {}", format_bytes(stats.total_bytes));
+        println!("  Avg blob:     {}", format_bytes(stats.avg_blob_size()));
+        println!();
+        println!("  Size distribution:");
+        println!("    <1KB:      {} blobs", stats.small_blobs);
+        println!("    1KB-1MB:   {} blobs", stats.medium_blobs);
+        println!("    1MB-100MB: {} blobs", stats.large_blobs);
+        println!("    >100MB:    {} blobs", stats.huge_blobs);
     } else {
         println!("CAS Store: {} (not initialized)", cas_root.display());
     }
 
-    // Manifest statistics
+    // Manifest statistics with dedup calculation
     if let Some(manifest_path) = manifest {
         println!();
         if manifest_path.exists() {
             let manifest = Manifest::load(manifest_path)?;
-            let stats = manifest.stats();
+            let mstats = manifest.stats();
 
             println!("Manifest: {}", manifest_path.display());
-            println!("  Files:       {}", stats.file_count);
-            println!("  Directories: {}", stats.dir_count);
-            println!("  Total size:  {}", format_bytes(stats.total_size));
+            println!("  Files:       {}", mstats.file_count);
+            println!("  Directories: {}", mstats.dir_count);
+            println!("  Total size:  {}", format_bytes(mstats.total_size));
+
+            // Calculate dedup ratio if CAS is available
+            if cas_root.exists() {
+                let cas = CasStore::new(cas_root)?;
+                let cas_stats = cas.stats()?;
+                if mstats.total_size > 0 && cas_stats.total_bytes > 0 {
+                    let savings = mstats.total_size.saturating_sub(cas_stats.total_bytes);
+                    let ratio = (savings as f64 / mstats.total_size as f64) * 100.0;
+                    println!();
+                    println!("  Deduplication:");
+                    println!("    Original:     {}", format_bytes(mstats.total_size));
+                    println!("    Deduplicated: {}", format_bytes(cas_stats.total_bytes));
+                    println!("    Savings:      {} ({:.1}%)", format_bytes(savings), ratio);
+                }
+            }
         } else {
             println!("Manifest: {} (not found)", manifest_path.display());
         }

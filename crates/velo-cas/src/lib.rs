@@ -166,6 +166,7 @@ impl CasStore {
     pub fn stats(&self) -> Result<CasStats> {
         let mut blob_count = 0u64;
         let mut total_bytes = 0u64;
+        let mut size_histogram: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
 
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -177,8 +178,21 @@ impl CasStore {
                         if blob.path().extension().is_some_and(|ext| ext == "tmp") {
                             continue;
                         }
+                        let size = blob.metadata()?.len();
                         blob_count += 1;
-                        total_bytes += blob.metadata()?.len();
+                        total_bytes += size;
+                        
+                        // Categorize by size
+                        let category = if size < 1024 {
+                            "<1KB"
+                        } else if size < 1024 * 1024 {
+                            "1KB-1MB"
+                        } else if size < 100 * 1024 * 1024 {
+                            "1MB-100MB"
+                        } else {
+                            ">100MB"
+                        };
+                        *size_histogram.entry(category).or_insert(0) += 1;
                     }
                 }
             }
@@ -187,7 +201,42 @@ impl CasStore {
         Ok(CasStats {
             blob_count,
             total_bytes,
+            small_blobs: *size_histogram.get("<1KB").unwrap_or(&0),
+            medium_blobs: *size_histogram.get("1KB-1MB").unwrap_or(&0),
+            large_blobs: *size_histogram.get("1MB-100MB").unwrap_or(&0),
+            huge_blobs: *size_histogram.get(">100MB").unwrap_or(&0),
         })
+    }
+
+    /// Get a memory-mapped view of a blob (D6: zero-copy optimization).
+    ///
+    /// This is more efficient than `get()` for large files as it avoids copying
+    /// the data into memory. The file is mapped directly from the filesystem,
+    /// leveraging the page cache for sharing across processes.
+    pub fn get_mmap(&self, hash: &Blake3Hash) -> Result<memmap2::Mmap> {
+        let path = self.blob_path(hash);
+        if !path.exists() {
+            return Err(CasError::NotFound {
+                hash: Self::hash_to_hex(hash),
+            });
+        }
+
+        let file = File::open(&path)?;
+        // Safety: The file is read-only and we're not modifying it
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        Ok(mmap)
+    }
+
+    /// Get the filesystem path to a blob (for external mmap or direct access).
+    pub fn blob_path_for_hash(&self, hash: &Blake3Hash) -> Option<PathBuf> {
+        let path = self.blob_path(hash);
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
     }
 }
 
@@ -196,8 +245,27 @@ impl CasStore {
 pub struct CasStats {
     /// Number of unique blobs stored
     pub blob_count: u64,
-    /// Total bytes stored
+    /// Total bytes stored (deduplicated)
     pub total_bytes: u64,
+    /// Blobs < 1KB
+    pub small_blobs: u64,
+    /// Blobs 1KB - 1MB
+    pub medium_blobs: u64,
+    /// Blobs 1MB - 100MB
+    pub large_blobs: u64,
+    /// Blobs > 100MB
+    pub huge_blobs: u64,
+}
+
+impl CasStats {
+    /// Calculate average blob size
+    pub fn avg_blob_size(&self) -> u64 {
+        if self.blob_count == 0 {
+            0
+        } else {
+            self.total_bytes / self.blob_count
+        }
+    }
 }
 
 #[cfg(test)]
