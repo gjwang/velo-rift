@@ -3774,6 +3774,542 @@ $ velo build
 
 ---
 
-*Document Version: 6.0*
+## 64. Node.js Bytecode Acceleration (`velo run`)
+
+### 64.1 The Problem: V8 Parsing Overhead
+
+Node.js startup breaks down into two major phases:
+
+| Phase | Time Share | Description |
+|-------|------------|-------------|
+| **I/O & Resolution** | 50-70% | Finding and reading files from disk |
+| **V8 Parsing & Compile** | 30-50% | Converting JS text to bytecode |
+
+VeloVFS solves the first problem (I/O). To eliminate the second, we need **Bytecode Caching**.
+
+### 64.2 Multi-Version Storage Architecture
+
+V8 bytecode is tightly coupled to the engine version. We store bytecode with versioned keys:
+
+```text
+CacheKey = Hash(SourceContent) + Hash(V8_Version) + Hash(CPU_Arch)
+
+Storage Structure:
+┌─────────────────────────────────────────┐
+│  source_blob: "blake3:source_abc123..." │  ← Universal
+├─────────────────────────────────────────┤
+│  accelerators: {                        │
+│    "v8_11.3_arm64": "blake3:bc_xyz...", │  ← Node 20 (M1/M2)
+│    "v8_10.2_x64":   "blake3:bc_qwe...", │  ← Node 18 (Intel)
+│    "v8_9.4_x64":    "blake3:bc_rty..."  │  ← Node 16 (Intel)
+│  }                                      │
+└─────────────────────────────────────────┘
+```
+
+### 64.3 Two Execution Modes
+
+| Mode | Command | Behavior |
+|------|---------|----------|
+| **Standard** | `node app.js` | VFS only (I/O acceleration) |
+| **Turbo** | `velo run node app.js` | VFS + Bytecode injection |
+
+Standard mode is safe fallback. Turbo mode is opt-in for maximum performance.
+
+### 64.4 Accelerator Injection (Non-Invasive)
+
+```bash
+# Velo injects via NODE_OPTIONS (no user code changes required)
+export NODE_OPTIONS="--require /velo/lib/accelerator.js"
+```
+
+**Accelerator Shim Logic:**
+
+```javascript
+// /velo/lib/accelerator.js (pseudo-code)
+const Module = require('module');
+const vm = require('vm');
+
+Module._extensions['.js'] = function(module, filename) {
+    const sourceHash = getVeloHash(filename);
+    const v8Tag = process.versions.v8;
+    
+    // 1. Check shadow path for cached bytecode
+    const bytecodePath = `/.velo/shadow/${sourceHash}/${v8Tag}.bc`;
+    
+    if (fs.existsSync(bytecodePath)) {
+        // HIT: Deserialize bytecode directly
+        const cached = fs.readFileSync(bytecodePath);
+        const script = new vm.Script(source, { cachedData: cached });
+        return script.runInThisContext();
+    }
+    
+    // MISS: Standard path, then cache for next time
+    const result = originalLoader(module, filename);
+    notifyVeloToCompile(filename);  // Background task
+    return result;
+};
+```
+
+### 64.5 JIT-Style Generation
+
+Bytecode is generated on-demand, not pre-built:
+
+```text
+Cold Start (First Run):
+  1. Accelerator checks for bytecode → Miss
+  2. Node.js parses source normally (slow path)
+  3. Background: Velo spawns worker to generate bytecode
+  4. Bytecode stored in Zone B (accelerator cache)
+
+Warm Start (Subsequent Runs):
+  1. Accelerator checks for bytecode → Hit
+  2. V8 deserializes bytecode directly
+  3. Skip parsing entirely
+  
+Result: First run = normal speed, all future runs = near-instant
+```
+
+### 64.6 Zone Architecture
+
+```text
+Zone A: User Assets (SSOT)          Zone B: Velo Acceleration
+┌─────────────────────────┐        ┌─────────────────────────┐
+│  .js source files       │        │  V8 bytecode blobs      │
+│  Immutable, user owns   │        │  Python .pyc files      │
+│  Never modified by Velo │        │  Ephemeral, rebuildable │
+└─────────────────────────┘        └─────────────────────────┘
+         ↓                                    ↓
+    Content Hash                     Hash(Source + Env + Arch)
+```
+
+### 64.7 Performance Impact
+
+| Scenario | Standard Node | Velo (I/O only) | Velo (Turbo) |
+|----------|---------------|-----------------|--------------|
+| Small project | 200ms | 50ms | 15ms |
+| Large Next.js | 8s | 2s | 400ms |
+| 500MB deps | 25s | 5s | 800ms |
+
+---
+
+## 65. Extended Use Cases
+
+### 65.1 AI Model Instant Switching (LLMOps)
+
+**Problem:** AI models (Llama, Stable Diffusion) are 10-100GB. Switching versions requires lengthy downloads.
+
+**Velo Solution:**
+
+```text
+Model as CAS Blob:
+  llama-2-7b/weights.bin → blake3:abc123...
+  llama-3-8b/weights.bin → blake3:def456...
+
+Switch Operation:
+  velo switch --model llama-3-8b
+  → Updates manifest pointer (1ms)
+  → mmap new weights on next load
+  → Delta download only if needed
+```
+
+### 65.2 Lazy Docker Pull (Container Acceleration)
+
+**Problem:** K8s scale-out bottleneck is `docker pull` - downloading GB of images.
+
+**Velo as Containerd Storage Driver:**
+
+```text
+Traditional:
+  Pull 2GB image → Extract → Start container (2 minutes)
+
+Velo Lazy:
+  Mount manifest (5KB) → Start container (50ms)
+  → Files fetched on-demand via page faults
+  
+Result: Container starts before full image is downloaded
+```
+
+### 65.3 Game Asset Management
+
+**Problem:** Game development (Unreal/Unity) requires managing 50GB+ of textures, models, audio. Git LFS is slow, Perforce is expensive.
+
+**Velo Solution:**
+
+```text
+git checkout feature-branch
+  Traditional: Extract 50GB assets (5 minutes)
+  Velo: Switch root hash pointer (instant)
+
+Benefits:
+  - Instant branch switching
+  - Global asset deduplication
+  - Delta sync between versions
+```
+
+### 65.4 High-Density SaaS Hosting
+
+**Problem:** Running 5000 WordPress sites means 5000 copies of identical core files.
+
+**Velo Density:**
+
+```text
+Physical Storage:
+  1× WordPress core (100MB)
+  1× Popular plugins (500MB)
+  5000× Tenant delta files (10MB each)
+  
+Total: 600MB + 50GB = 50.6GB (vs 5000 × 600MB = 3TB)
+
+Memory (CoW):
+  5000 processes read same physical pages
+  RAM usage: ~1 copy, not 5000
+  
+Result: 10-50× server density improvement
+```
+
+### 65.5 Virtual Data Lake (Data Science)
+
+**Problem:** Data analysts copy TB-scale datasets to personal directories, creating massive redundancy.
+
+**Velo Zero-Copy Sharing:**
+
+```text
+Data Team maintains: /velo/datasets/golden_v1 (Tree Hash: abc123)
+
+Analyst A: velo mount /velo/datasets/golden_v1 ~/data
+Analyst B: velo mount /velo/datasets/golden_v1 ~/data
+
+Both see identical data, zero copies made.
+Writes use CoW → personal overlay, originals untouched.
+```
+
+### 65.6 Edge / IoT OTA Updates
+
+**Problem:** Firmware updates over limited bandwidth, risk of "bricking" devices on failure.
+
+**Velo Atomic Updates:**
+
+```text
+Update = New Root Hash
+
+Process:
+  1. Download delta blobs (only changed files)
+  2. Atomic pointer swap (old_hash → new_hash)
+  3. Reboot into new state
+  
+Rollback: Swap pointer back (instant)
+Brick-proof: Old state always preserved
+```
+
+---
+
+## 66. Git CLI Acceleration on VeloVFS
+
+### 66.1 Git Performance Bottlenecks
+
+| Operation | Bottleneck | Cause |
+|-----------|------------|-------|
+| `checkout` | Disk I/O | Decompress blobs, write files |
+| `status` | Syscalls | `lstat()` every file in tree |
+| `clone` | Network + I/O | Download all history |
+
+### 66.2 Zero-Copy Checkout
+
+**Traditional Git:**
+```text
+checkout → read commit → read tree → decompress blobs → write to disk
+Time: O(files) disk writes
+```
+
+**Git on Velo:**
+```text
+checkout → update VFS root pointer
+Time: O(1) - constant regardless of repo size
+```
+
+```rust
+impl VeloGit {
+    fn checkout(&mut self, commit: Oid) {
+        // No file extraction needed!
+        self.vfs_root = get_tree_hash(commit);
+        // Working directory "changes" instantly
+    }
+}
+```
+
+### 66.3 Event-Driven Status
+
+**Traditional:**
+```text
+git status → lstat() × 100,000 files → compare mtimes
+Time: 30 seconds for large monorepo
+```
+
+**Velo Approach:**
+```text
+VeloVFS intercepts all writes → maintains dirty_set in memory
+
+git status → query dirty_set
+Time: O(dirty_files), typically < 10ms
+```
+
+```rust
+struct VeloVFS {
+    dirty_set: HashSet<PathHash>,  // Updated on every write
+}
+
+fn handle_status_query(&self) -> Vec<Path> {
+    // No filesystem traversal needed
+    self.dirty_set.iter().map(|h| self.resolve_path(h)).collect()
+}
+```
+
+### 66.4 Lazy Clone
+
+**Traditional:**
+```text
+git clone → download all blobs → extract to working directory
+Time: Minutes to hours for large repos
+```
+
+**Velo Clone:**
+```text
+Clone:
+  1. Download commits + trees only (~KB)
+  2. Mount virtual working directory (instant)
+  
+Access:
+  3. User opens file → page fault
+  4. Velo fetches blob from remote CAS
+  5. Transparent to user
+```
+
+### 66.5 Enterprise Monorepo Support
+
+| Metric | Traditional Git | Git on Velo |
+|--------|-----------------|-------------|
+| Checkout 50GB repo | 5 minutes | 1 second |
+| Status 1M files | 30 seconds | 10 milliseconds |
+| Clone 100GB repo | 1 hour | 2 seconds |
+
+---
+
+## 67. Cluster P2P Mode Architecture
+
+### 67.1 Four-Level Cache Hierarchy
+
+```text
+┌─────────────────────────────────────────────┐
+│  L1: Host Cache (Per-Machine)               │
+│  - /var/velo/cas/ on local NVMe             │
+│  - OS Page Cache = memory-speed             │
+│  - Latency: ~0ms                            │
+└─────────────────────────────────────────────┘
+                    ↓ Miss
+┌─────────────────────────────────────────────┐
+│  L2: Peer Cache (LAN P2P)                   │
+│  - Query neighboring Velo daemons           │
+│  - 10Gbps internal network                  │
+│  - Latency: ~1-5ms                          │
+└─────────────────────────────────────────────┘
+                    ↓ Miss
+┌─────────────────────────────────────────────┐
+│  L3: Regional Mirror (Velo Cloud)           │
+│  - S3 bucket + CDN                          │
+│  - Pre-warmed with popular packages         │
+│  - Latency: ~10-50ms                        │
+└─────────────────────────────────────────────┘
+                    ↓ Miss
+┌─────────────────────────────────────────────┐
+│  L4: Origin (Public Internet)               │
+│  - PyPI / npm / crates.io                   │
+│  - Backfill to L3 after download            │
+│  - Latency: ~100-1000ms                     │
+└─────────────────────────────────────────────┘
+```
+
+### 67.2 P2P Discovery Protocol
+
+```text
+Gossip-based peer discovery:
+
+1. New host joins cluster
+2. Announces to seed nodes
+3. Receives peer list
+4. Periodic heartbeat + capability exchange
+
+Query Flow:
+  Want hash X → Broadcast to known peers
+  → First responder wins
+  → Stream blob directly from peer
+```
+
+### 67.3 Lazy Loading (Streaming Execution)
+
+```text
+Traditional: Download 10GB → Then start process
+Velo Cluster: Start immediately → Fetch on-demand
+
+Startup Sequence:
+  1. Mount manifest (10KB) → 50ms
+  2. Process starts, requests main.py
+  3. Page fault → Velo fetches from L1/L2/L3
+  4. Process runs while background prefetch continues
+  
+Result: 10GB app starts in <1 second
+```
+
+### 67.4 Instant Burst Scaling
+
+```text
+Scenario: Scale to 1000 servers in response to traffic spike
+
+Traditional:
+  1000 servers × docker pull → Network congestion
+  Total time: 30 minutes
+
+Velo P2P:
+  Server 1: Pulls from L3 (cold)
+  Server 2-10: Pull from Server 1 (L2 peer)
+  Server 11-100: Pull from Servers 2-10
+  Server 101-1000: Exponential fanout
+  
+  Total time: ~2 minutes (dominated by first pull)
+```
+
+### 67.5 Data Teleportation
+
+```text
+Developer has 100GB trained model on laptop.
+Wants to deploy to production server.
+
+Traditional: Upload 100GB to S3, server downloads
+Time: Hours
+
+Velo:
+  1. Developer: velo publish model/
+     → CAS hashes computed, manifest uploaded (1MB)
+  2. Server: velo mount model/
+     → Manifest downloaded, virtual mount ready
+  3. Server accesses file → Page fault → P2P fetch from developer laptop
+  
+Time: Seconds (manifest) + lazy loading
+```
+
+---
+
+## 68. Internal ID Bit-Packing Design
+
+### 68.1 The Problem: Hash Size vs. Performance
+
+```text
+Full BLAKE3 Hash: 32 bytes (256 bits)
+- Perfect for storage (collision-proof)
+- Wasteful for runtime (CPU register = 8 bytes)
+
+Memory impact with 1M files:
+  32 bytes × 1M = 32MB just for IDs
+  Cache thrashing, slow comparisons
+```
+
+### 68.2 Bit-Packed ID Structure
+
+Pack ID and flags into single `u64`:
+
+```text
+┌────────────────────────────────────────────────────────────────┐
+│  [ 16-bit Flags ]              [ 48-bit ID / Index ]           │
+│  63            48              47                  0           │
+└────────────────────────────────────────────────────────────────┘
+
+48-bit ID capacity: 281 trillion entries (never needs recycling)
+16-bit Flags: Room for 16 boolean states
+```
+
+### 68.3 Rust Implementation
+
+```rust
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VeloId(u64);
+
+impl VeloId {
+    const ID_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;   // Lower 48 bits
+    const FLAG_MASK: u64 = 0xFFFF_0000_0000_0000; // Upper 16 bits
+    
+    #[inline(always)]
+    pub fn new(index: usize, flags: u16) -> Self {
+        let encoded = (index as u64) & Self::ID_MASK 
+                    | ((flags as u64) << 48);
+        VeloId(encoded)
+    }
+    
+    #[inline(always)]
+    pub fn index(&self) -> usize {
+        (self.0 & Self::ID_MASK) as usize
+    }
+    
+    #[inline(always)]
+    pub fn flags(&self) -> u16 {
+        (self.0 >> 48) as u16
+    }
+    
+    #[inline(always)]
+    pub fn is_dir(&self) -> bool {
+        (self.0 & (1 << 63)) != 0
+    }
+}
+```
+
+### 68.4 Flag Allocation
+
+| Bit | Flag | Purpose |
+|-----|------|---------|
+| 63 | `IS_DIR` | Directory vs file |
+| 62 | `IS_SYMLINK` | Symbolic link |
+| 61 | `IS_DIRTY` | Modified since mount |
+| 60 | `IS_LOADED` | Content in memory |
+| 59 | `IS_PINNED` | Do not evict from cache |
+| 58 | `IS_EXECUTABLE` | Execute permission |
+| 52-57 | Reserved | Future use |
+| 48-51 | `FILE_TYPE` | 16 file type variants |
+
+### 68.5 Performance Benefits
+
+| Aspect | Separate Fields | Bit-Packed |
+|--------|-----------------|------------|
+| Memory per entry | 16 bytes | 8 bytes |
+| Entries per cache line | 4 | 8 |
+| Atomic update | Requires lock | `AtomicU64` (lock-free) |
+| Comparison | Multiple ops | Single op |
+
+### 68.6 Interning: Hash → ID Mapping
+
+```rust
+struct HashRegistry {
+    // Forward: 256-bit hash → compact ID
+    map: HashMap<Blake3Hash, VeloId>,
+    
+    // Reverse: ID → original hash (for persistence)
+    store: Vec<Blake3Hash>,
+}
+
+impl HashRegistry {
+    fn intern(&mut self, hash: Blake3Hash, flags: u16) -> VeloId {
+        if let Some(&id) = self.map.get(&hash) {
+            return id;
+        }
+        
+        let index = self.store.len();
+        let id = VeloId::new(index, flags);
+        self.store.push(hash);
+        self.map.insert(hash, id);
+        id
+    }
+}
+```
+
+---
+
+*Document Version: 7.0*
 *Last Updated: 2026-01-29*
-*Total Sections: 63*
+*Total Sections: 68*
