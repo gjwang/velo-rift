@@ -78,7 +78,7 @@ fn main() -> Result<()> {
             output,
             prefix,
         } => cmd_ingest(&cli.cas_root, &directory, &output, prefix.as_deref()),
-        Commands::Run { manifest, command } => cmd_run(&manifest, &command),
+        Commands::Run { manifest, command } => cmd_run(&cli.cas_root, &manifest, &command),
         Commands::Status { manifest } => cmd_status(&cli.cas_root, manifest.as_deref()),
     }
 }
@@ -177,8 +177,8 @@ fn cmd_ingest(cas_root: &Path, directory: &Path, output: &Path, prefix: Option<&
     Ok(())
 }
 
-/// Execute a command with Velo VFS (placeholder)
-fn cmd_run(manifest: &Path, command: &[String]) -> Result<()> {
+/// Execute a command with Velo VFS shim
+fn cmd_run(cas_root: &Path, manifest: &Path, command: &[String]) -> Result<()> {
     if command.is_empty() {
         anyhow::bail!("No command specified");
     }
@@ -187,24 +187,88 @@ fn cmd_run(manifest: &Path, command: &[String]) -> Result<()> {
         anyhow::bail!("Manifest not found: {}", manifest.display());
     }
 
-    // TODO: Implement LD_PRELOAD shim execution
-    // For now, just print what would happen
-    println!("⚠️  LD_PRELOAD shim not yet implemented");
-    println!();
-    println!("Would execute with Velo VFS:");
-    println!("  Manifest: {}", manifest.display());
+    // Find the shim library
+    let shim_path = find_shim_library()?;
+    
+    let manifest_abs = manifest.canonicalize()
+        .with_context(|| format!("Failed to resolve manifest path: {}", manifest.display()))?;
+    let cas_abs = cas_root.canonicalize()
+        .unwrap_or_else(|_| cas_root.to_path_buf());
+
+    println!("Running with Velo VFS:");
+    println!("  Shim:     {}", shim_path.display());
+    println!("  Manifest: {}", manifest_abs.display());
+    println!("  CAS:      {}", cas_abs.display());
     println!("  Command:  {}", command.join(" "));
     println!();
-    println!("For now, running command directly...");
-    println!();
 
-    // Run the command directly as a fallback
-    let status = std::process::Command::new(&command[0])
-        .args(&command[1..])
-        .status()
+    // Build the command with environment variables
+    let mut cmd = std::process::Command::new(&command[0]);
+    cmd.args(&command[1..]);
+    
+    // Set Velo environment variables
+    cmd.env("VELO_MANIFEST", &manifest_abs);
+    cmd.env("VELO_CAS_ROOT", &cas_abs);
+    
+    // Set platform-specific library preload
+    #[cfg(target_os = "macos")]
+    {
+        cmd.env("DYLD_INSERT_LIBRARIES", &shim_path);
+        // Disable SIP restrictions for child process (requires entitlements in production)
+        cmd.env("DYLD_FORCE_FLAT_NAMESPACE", "1");
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        cmd.env("LD_PRELOAD", &shim_path);
+    }
+
+    // Enable debug output if VELO_DEBUG is set
+    if std::env::var("VELO_DEBUG").is_ok() {
+        cmd.env("VELO_DEBUG", "1");
+    }
+
+    let status = cmd.status()
         .with_context(|| format!("Failed to execute: {}", command[0]))?;
 
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Find the velo-shim library
+fn find_shim_library() -> Result<PathBuf> {
+    // Check standard locations
+    let candidates = [
+        // Development: relative to cargo target
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .map(|p| {
+                #[cfg(target_os = "macos")]
+                { p.join("libvelo_shim.dylib") }
+                #[cfg(target_os = "linux")]
+                { p.join("libvelo_shim.so") }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                { p.join("libvelo_shim.so") }
+            }),
+        // Installed location
+        Some(PathBuf::from("/usr/local/lib/velo/libvelo_shim.so")),
+        #[cfg(target_os = "macos")]
+        Some(PathBuf::from("/usr/local/lib/velo/libvelo_shim.dylib")),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    // Provide helpful error message
+    anyhow::bail!(
+        "Could not find velo-shim library. \n\
+        Build with: cargo build -p velo-shim --release\n\
+        Expected at: target/release/libvelo_shim.{}", 
+        if cfg!(target_os = "macos") { "dylib" } else { "so" }
+    );
 }
 
 /// Display CAS and optionally manifest statistics
