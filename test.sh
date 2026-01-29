@@ -5,11 +5,20 @@ echo "=== Velo Rift E2E Verification ==="
 
 # 1. Build project
 echo "[*] Building Velo Rift..."
-# Only rebuild if binary is missing, explicitly requested, or in CI
-if [ ! -f "target/release/velo" ] || [ "$1" == "--rebuild" ] || [ -n "$CI" ]; then
-    cargo build --release
+if [ "$SKIP_BUILD" == "true" ]; then
+    echo "Skipping build (SKIP_BUILD=true). assuming binaries are in PATH."
 else
-    echo "Skipping build (target/release/velo exists). Use --rebuild to force."
+    # Only rebuild if binary is missing, explicitly requested, or in CI
+    if [ ! -f "target/release/velo" ] || [ "$1" == "--rebuild" ] || [ -n "$CI" ]; then
+        BUILD_ARGS="--release"
+        if [ "$(uname -s)" == "Linux" ]; then
+             echo "[*] Enabling FUSE feature for Linux build..."
+             BUILD_ARGS="$BUILD_ARGS --features velo-cli/fuse"
+        fi
+        cargo build $BUILD_ARGS
+    else
+        echo "Skipping build (target/release/velo exists). Use --rebuild to force."
+    fi
 fi
 
 # Add binaries to path
@@ -146,8 +155,8 @@ if [ "$OS" == "Linux" ]; then
 
     # Check content
     echo "Checking mount content..."
-    if [ -f "$MOUNT_DIR/file1.txt" ]; then
-       CONTENT=$(cat "$MOUNT_DIR/file1.txt")
+    if [ -f "$MOUNT_DIR/data/file1.txt" ]; then
+       CONTENT=$(cat "$MOUNT_DIR/data/file1.txt")
        if [ "$CONTENT" == "Hello Velo" ]; then
            echo "[PASS] FUSE read verified."
        else

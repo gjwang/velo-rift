@@ -55,7 +55,7 @@ mod imp {
                 fuser::MountOption::AutoUnmount,
             ];
             // fuser::mount blocks until unmounted
-            fuser::mount2(self, mountpoint, &options)?.join();
+            fuser::mount2(self, mountpoint, &options)?;
             Ok(())
         }
 

@@ -52,7 +52,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
     cargo build --release && \
     cargo build --release -p velo-cli --features fuse && \
-    cp target/release/velo target/release/velo-daemon target/release/libvelo_shim.so .
+    cargo build --release -p velo-cli --features fuse && \
+    cp target/release/velo target/release/velo-daemon target/release/libvelo_shim.so /usr/local/bin/
+
+ENV SKIP_BUILD=true
 
 # Run tests
 CMD ["./test.sh"]
