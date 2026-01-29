@@ -85,31 +85,38 @@ mod tests {
                 uv_lock_hash: "sha256:7f8a...".to_string(),
                 target_platform: "linux_x86_64_gnu".to_string(),
             },
-            roots: HashMap::from([
-                ("site_packages".to_string(), RootEntry {
+            roots: HashMap::from([(
+                "site_packages".to_string(),
+                RootEntry {
                     mount_point: "/app/.venv/lib/python3.11/site-packages".to_string(),
                     tree_hash: "tree:root_site_packages_merged_hash".to_string(),
-                })
-            ]),
+                },
+            )]),
             packages: HashMap::from([
-                ("numpy".to_string(), PackageEntry {
-                    version: "1.26.0".to_string(),
-                    source_tree: "tree:numpy_1.26.0_hash".to_string(),
-                    dist_info_tree: Some("tree:numpy_1.26.0_dist_info_hash".to_string()),
-                }),
-                ("pandas".to_string(), PackageEntry {
-                    version: "2.1.0".to_string(),
-                    source_tree: "tree:pandas_2.1.0_hash".to_string(),
-                    dist_info_tree: None,
-                })
+                (
+                    "numpy".to_string(),
+                    PackageEntry {
+                        version: "1.26.0".to_string(),
+                        source_tree: "tree:numpy_1.26.0_hash".to_string(),
+                        dist_info_tree: Some("tree:numpy_1.26.0_dist_info_hash".to_string()),
+                    },
+                ),
+                (
+                    "pandas".to_string(),
+                    PackageEntry {
+                        version: "2.1.0".to_string(),
+                        source_tree: "tree:pandas_2.1.0_hash".to_string(),
+                        dist_info_tree: None,
+                    },
+                ),
             ]),
         };
 
         let file = NamedTempFile::new().unwrap();
         lock.save(file.path()).unwrap();
-        
+
         let loaded = VeloLock::load(file.path()).unwrap();
-        
+
         assert_eq!(loaded.meta.engine, "velo-native-v1");
         assert_eq!(loaded.packages.len(), 2);
         assert_eq!(loaded.packages["numpy"].version, "1.26.0");

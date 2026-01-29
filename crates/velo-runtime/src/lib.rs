@@ -19,17 +19,17 @@ use velo_manifest::Manifest;
 pub enum RuntimeError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("CAS error: {0}")]
     Cas(#[from] velo_cas::CasError),
-    
+
     #[error("Blob not found in CAS: {0}")]
     BlobNotFound(String),
-    
+
     #[cfg(target_os = "linux")]
     #[error("Nix system error: {0}")]
     Nix(#[from] nix::Error),
-    
+
     #[error("OverlayFS error: {0}")]
     Overlay(String),
 }
@@ -81,8 +81,12 @@ impl LinkFarm {
 
             if entry.is_file() {
                 // Find source blob in CAS
-                let src_path = self.cas.blob_path_for_hash(&entry.content_hash)
-                    .ok_or_else(|| RuntimeError::BlobNotFound(format!("{:?}", entry.content_hash)))?;
+                let src_path = self
+                    .cas
+                    .blob_path_for_hash(&entry.content_hash)
+                    .ok_or_else(|| {
+                        RuntimeError::BlobNotFound(format!("{:?}", entry.content_hash))
+                    })?;
 
                 // Create hard link: src (CAS) -> dest (Link Farm)
                 // Remove existing file if present (idempotency)
@@ -93,19 +97,21 @@ impl LinkFarm {
                 fs::hard_link(&src_path, &dest_path)?;
             } else if entry.is_symlink() {
                 // Fetch symlink target from CAS
-                let target_bytes = self.cas.get(&entry.content_hash)
-                    .map_err(|e| RuntimeError::Cas(e))?;
-                
+                let target_bytes = self
+                    .cas
+                    .get(&entry.content_hash)
+                    .map_err(RuntimeError::Cas)?;
+
                 let target_path_str = String::from_utf8(target_bytes)
                     .map_err(|_| RuntimeError::Overlay("Invalid UTF-8 in symlink target".into()))?;
-                
+
                 // Remove existing file if present
                 if dest_path.exists() {
-                     fs::remove_file(&dest_path)?;
+                    fs::remove_file(&dest_path)?;
                 }
 
                 std::os::unix::fs::symlink(target_path_str, &dest_path)
-                    .map_err(|e| RuntimeError::Io(e))?;
+                    .map_err(RuntimeError::Io)?;
             }
         }
         Ok(())
@@ -171,15 +177,18 @@ impl OverlayManager {
         println!("      Upper:  {}", self.upper_dir.display());
         println!("      Work:   {}", self.work_dir.display());
         println!("      Merged: {}", self.merged_dir.display());
-        
+
         // Ensure directories exist simulation
         fs::create_dir_all(&self.merged_dir)?;
         fs::create_dir_all(&self.upper_dir)?;
         fs::create_dir_all(&self.work_dir)?;
-        
+
         // Create a dummy file in merged to simulate success
-        fs::write(self.merged_dir.join("velo_overlay_mock.txt"), "OverlayFS Mock Active")?;
-        
+        fs::write(
+            self.merged_dir.join("velo_overlay_mock.txt"),
+            "OverlayFS Mock Active",
+        )?;
+
         Ok(())
     }
 }
@@ -228,7 +237,7 @@ impl NamespaceManager {
         use nix::unistd::pivot_root;
 
         pivot_root(new_root, put_old)?;
-        
+
         // Unmount old root
         use nix::mount::{umount2, MntFlags};
         umount2(put_old, MntFlags::MNT_DETACH)?;
@@ -239,7 +248,11 @@ impl NamespaceManager {
     #[cfg(not(target_os = "linux"))]
     pub fn pivot_root(new_root: &Path, put_old: &Path) -> Result<()> {
         println!("⚠️  pivot_root is only supported on Linux.");
-        println!("    Would pivot_root(new={}, old={})", new_root.display(), put_old.display());
+        println!(
+            "    Would pivot_root(new={}, old={})",
+            new_root.display(),
+            put_old.display()
+        );
         Ok(())
     }
 
@@ -253,7 +266,7 @@ impl NamespaceManager {
         let dev_path = root.join("dev");
 
         if proc_path.exists() {
-             mount(
+            mount(
                 Some("proc"),
                 &proc_path,
                 Some("proc"),
@@ -263,7 +276,7 @@ impl NamespaceManager {
         }
 
         if sys_path.exists() {
-             mount(
+            mount(
                 Some("sysfs"),
                 &sys_path,
                 Some("sysfs"),
@@ -272,18 +285,18 @@ impl NamespaceManager {
             )?;
         }
 
-         // bind mount /dev
-         // In a real scenario we might want a devtmpfs or bind mount from host
-         // For now, let's assume bind mount of /dev
-         if dev_path.exists() {
-             mount(
+        // bind mount /dev
+        // In a real scenario we might want a devtmpfs or bind mount from host
+        // For now, let's assume bind mount of /dev
+        if dev_path.exists() {
+            mount(
                 Some("/dev"),
                 &dev_path,
                 None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REC,
                 None::<&str>,
             )?;
-         }
+        }
 
         Ok(())
     }
@@ -309,14 +322,17 @@ mod tests {
         let link_farm_root = temp.path().join("lower");
 
         let cas = CasStore::new(&cas_root).unwrap();
-        
+
         // Store a file
         let content = b"runtime test";
         let hash = cas.store(content).unwrap();
 
         // Create manifest
         let mut manifest = Manifest::new();
-        manifest.insert("/etc/config", VnodeEntry::new_file(hash, content.len() as u64, 0, 0o644));
+        manifest.insert(
+            "/etc/config",
+            VnodeEntry::new_file(hash, content.len() as u64, 0, 0o644),
+        );
         manifest.insert("/var/log", VnodeEntry::new_directory(0, 0o755));
 
         // Populate Link Farm
@@ -328,10 +344,13 @@ mod tests {
         assert!(config_path.exists());
         let read_content = fs::read(&config_path).unwrap();
         assert_eq!(read_content, content);
-        
+
         // Verify it's a hard link (same inode) - simplified check
         // Rust std doesn't expose inode easily without stat, but metadata should match
-        assert_eq!(fs::metadata(&config_path).unwrap().len(), content.len() as u64);
+        assert_eq!(
+            fs::metadata(&config_path).unwrap().len(),
+            content.len() as u64
+        );
 
         let log_path = link_farm_root.join("var/log");
         assert!(log_path.exists());

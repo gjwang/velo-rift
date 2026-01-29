@@ -16,7 +16,7 @@ walkdir.workspace = true
 velo-cas.workspace = true
 velo-manifest.workspace = true
 velo-shim.workspace = true
-velo-fuse.workspace = true
+velo-fuse = { workspace = true, optional = true }
 velo-lock.workspace = true
 
 [features]

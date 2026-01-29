@@ -30,6 +30,9 @@
 //! - `VELO_VFS_PREFIX`: Virtual path prefix to intercept (default: `/velo`)
 //! - `VELO_DEBUG`: Enable debug logging if set
 
+#![allow(clippy::missing_safety_doc)]
+#![allow(unused_doc_comments)]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -95,22 +98,23 @@ struct ShimState {
     vfs_prefix: String,
 }
 
-use tracing::{debug, info, error};
+use tracing::{debug, error};
 
 impl ShimState {
     fn init() -> Option<Self> {
         let manifest_path = std::env::var("VELO_MANIFEST").ok()?;
-        let cas_root = std::env::var("VELO_CAS_ROOT")
-            .unwrap_or_else(|_| "/var/velo/the_source".to_string());
-        let vfs_prefix = std::env::var("VELO_VFS_PREFIX")
-            .unwrap_or_else(|_| "/velo".to_string());
-        
+        let cas_root =
+            std::env::var("VELO_CAS_ROOT").unwrap_or_else(|_| "/var/velo/the_source".to_string());
+        let vfs_prefix = std::env::var("VELO_VFS_PREFIX").unwrap_or_else(|_| "/velo".to_string());
+
         // Initialize tracing if not already initialized
         // We use try_init because this might be called multiple times or conflict with app
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .with_writer(std::io::stderr)
-            .try_init();
+        // Initialize tracing if not already initialized
+        // We use try_init because this might be called multiple times or conflict with app
+        // let _ = tracing_subscriber::fmt()
+        //     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        //     .with_writer(std::io::stderr)
+        //     .try_init();
 
         debug!(manifest = %manifest_path, cas = %cas_root, prefix = %vfs_prefix, "Initializing Velo Shim");
 
@@ -125,14 +129,16 @@ impl ShimState {
     }
 
     fn get() -> Option<&'static Self> {
-        SHIM_STATE.get_or_init(|| Self::init().unwrap_or_else(|| {
-            // Return a dummy state that doesn't intercept anything
-            ShimState {
-                manifest: Manifest::new(),
-                cas: CasStore::new("/tmp/velo-shim-dummy").unwrap(),
-                vfs_prefix: "/nonexistent-velo-prefix".to_string(),
-            }
-        }));
+        SHIM_STATE.get_or_init(|| {
+            Self::init().unwrap_or_else(|| {
+                // Return a dummy state that doesn't intercept anything
+                ShimState {
+                    manifest: Manifest::new(),
+                    cas: CasStore::new("/tmp/velo-shim-dummy").unwrap(),
+                    vfs_prefix: "/nonexistent-velo-prefix".to_string(),
+                }
+            })
+        });
         let state = SHIM_STATE.get()?;
         // Only return state if manifest is non-empty (properly initialized)
         if state.manifest.is_empty() && state.vfs_prefix == "/nonexistent-velo-prefix" {
@@ -200,7 +206,7 @@ fn allocate_velo_fd() -> RawFd {
 }
 
 fn is_velo_fd(fd: RawFd) -> bool {
-    fd < -100  // Our fake FDs are very negative
+    fd < -100 // Our fake FDs are very negative
 }
 
 // ============================================================================
@@ -223,7 +229,7 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
     if !state.should_intercept(&path_str) {
         return real_open(path, flags, mode);
     }
-    
+
     let span = tracing::trace_span!("open", path = %path_str);
     let _enter = span.enter();
 
@@ -259,24 +265,23 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
         let name = CString::new(entry.content_hash.len().to_string()).unwrap();
         let memfd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
         if memfd < 0 {
-             error!("memfd_create failed");
-             set_errno(libc::EIO);
-             return -1;
+            error!("memfd_create failed");
+            set_errno(libc::EIO);
+            return -1;
         }
-        
+
         // Write content to memfd
-        // Note: write() is simple and fast for moderate sizes. 
+        // Note: write() is simple and fast for moderate sizes.
         // For huge files, splicing from a pipe or using a shared buffer would be even faster,
         // but this already avoids disk I/O.
-        let written = unsafe { 
-            libc::write(memfd, content.as_ptr() as *const c_void, content.len()) 
-        };
-        
+        let written =
+            unsafe { libc::write(memfd, content.as_ptr() as *const c_void, content.len()) };
+
         if written != content.len() as ssize_t {
-             error!("Failed to write content to memfd");
-             unsafe { libc::close(memfd) };
-             set_errno(libc::EIO);
-             return -1;
+            error!("Failed to write content to memfd");
+            unsafe { libc::close(memfd) };
+            set_errno(libc::EIO);
+            return -1;
         }
 
         // Reset file offset to 0 so the user reads from start
@@ -293,9 +298,9 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
     {
         // Fallback (macOS): Use temp file + mmap
         let temp_path = format!("/tmp/velo-shim-{}", std::process::id());
-        let temp_file_path = PathBuf::from(&temp_path)
-            .join(CasStore::hash_to_hex(&entry.content_hash));
-        
+        let temp_file_path =
+            PathBuf::from(&temp_path).join(CasStore::hash_to_hex(&entry.content_hash));
+
         if !temp_file_path.exists() {
             std::fs::create_dir_all(&temp_path).ok();
             std::fs::write(&temp_file_path, &content).ok();
@@ -318,13 +323,16 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
         };
 
         let velo_fd = allocate_velo_fd();
-        
+
         FD_MAP.with(|map| {
-            map.borrow_mut().insert(velo_fd, VeloFd {
-                mmap,
-                position: 0,
-                vpath: path_str.clone(),
-            });
+            map.borrow_mut().insert(
+                velo_fd,
+                VeloFd {
+                    mmap,
+                    position: 0,
+                    vpath: path_str.clone(),
+                },
+            );
         });
 
         debug!(fd = velo_fd, "Opened virtual file (mmap)");
@@ -352,14 +360,10 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
         let to_read = count.min(remaining);
 
         if to_read == 0 {
-            return 0;  // EOF
+            return 0; // EOF
         }
 
-        ptr::copy_nonoverlapping(
-            vfd.mmap.as_ptr().add(vfd.position),
-            buf as *mut u8,
-            to_read,
-        );
+        ptr::copy_nonoverlapping(vfd.mmap.as_ptr().add(vfd.position), buf as *mut u8, to_read);
 
         vfd.position += to_read;
         to_read as ssize_t
@@ -400,8 +404,8 @@ pub unsafe extern "C" fn lseek(fd: c_int, offset: libc::off_t, whence: c_int) ->
 
         let new_pos = match whence {
             libc::SEEK_SET => offset as usize,
-            libc::SEEK_CUR => (vfd.position as i64 + offset as i64) as usize,
-            libc::SEEK_END => (vfd.mmap.len() as i64 + offset as i64) as usize,
+            libc::SEEK_CUR => (vfd.position as i64 + offset) as usize,
+            libc::SEEK_END => (vfd.mmap.len() as i64 + offset) as usize,
             _ => {
                 set_errno(libc::EINVAL);
                 return -1;
@@ -435,10 +439,9 @@ pub unsafe extern "C" fn stat(path: *const c_char, statbuf: *mut libc::stat) -> 
         return real_stat(path, statbuf);
     }
 
-
     let span = tracing::trace_span!("stat", path = %path_str);
     let _enter = span.enter();
-    
+
     debug!("Intercepting stat call");
 
     let Some(entry) = state.manifest.get(&path_str) else {
@@ -448,11 +451,11 @@ pub unsafe extern "C" fn stat(path: *const c_char, statbuf: *mut libc::stat) -> 
 
     // Fill stat buffer
     let stat = &mut *statbuf;
-    ptr::write_bytes(stat, 0, 1);  // Zero-initialize
-    
+    ptr::write_bytes(stat, 0, 1); // Zero-initialize
+
     stat.st_size = entry.size as libc::off_t;
     stat.st_mtime = entry.mtime as libc::time_t;
-    
+
     // Handle mode - platform-specific type
     #[cfg(target_os = "macos")]
     {
@@ -462,18 +465,26 @@ pub unsafe extern "C" fn stat(path: *const c_char, statbuf: *mut libc::stat) -> 
     {
         stat.st_mode = entry.mode;
     }
-    
+
     if entry.is_dir() {
         #[cfg(target_os = "macos")]
-        { stat.st_mode |= (libc::S_IFDIR as u32) as u16; }
+        {
+            stat.st_mode |= (libc::S_IFDIR as u32) as u16;
+        }
         #[cfg(target_os = "linux")]
-        { stat.st_mode |= libc::S_IFDIR; }
+        {
+            stat.st_mode |= libc::S_IFDIR;
+        }
         stat.st_nlink = 2;
     } else {
         #[cfg(target_os = "macos")]
-        { stat.st_mode |= (libc::S_IFREG as u32) as u16; }
+        {
+            stat.st_mode |= (libc::S_IFREG as u32) as u16;
+        }
         #[cfg(target_os = "linux")]
-        { stat.st_mode |= libc::S_IFREG; }
+        {
+            stat.st_mode |= libc::S_IFREG;
+        }
         stat.st_nlink = 1;
     }
 
@@ -499,7 +510,7 @@ pub unsafe extern "C" fn lstat(path: *const c_char, statbuf: *mut libc::stat) ->
 
     let span = tracing::trace_span!("lstat", path = %path_str);
     let _enter = span.enter();
-    
+
     debug!("Intercepting lstat call");
 
     let Some(entry) = state.manifest.get(&path_str) else {
@@ -509,28 +520,40 @@ pub unsafe extern "C" fn lstat(path: *const c_char, statbuf: *mut libc::stat) ->
 
     // Fill stat buffer
     let stat = &mut *statbuf;
-    ptr::write_bytes(stat, 0, 1);  // Zero-initialize
-    
+    ptr::write_bytes(stat, 0, 1); // Zero-initialize
+
     stat.st_size = entry.size as libc::off_t;
     stat.st_mtime = entry.mtime as libc::time_t;
-    
+
     if entry.is_dir() {
         #[cfg(target_os = "macos")]
-        { stat.st_mode = (libc::S_IFDIR as u32 | 0o755) as u16; }
+        {
+            stat.st_mode = (libc::S_IFDIR as u32 | 0o755) as u16;
+        }
         #[cfg(target_os = "linux")]
-        { stat.st_mode = libc::S_IFDIR | 0o755; }
+        {
+            stat.st_mode = libc::S_IFDIR | 0o755;
+        }
         stat.st_nlink = 2;
     } else if entry.is_symlink() {
         #[cfg(target_os = "macos")]
-        { stat.st_mode = (libc::S_IFLNK as u32 | 0o777) as u16; }
+        {
+            stat.st_mode = (libc::S_IFLNK as u32 | 0o777) as u16;
+        }
         #[cfg(target_os = "linux")]
-        { stat.st_mode = libc::S_IFLNK | 0o777; }
+        {
+            stat.st_mode = libc::S_IFLNK | 0o777;
+        }
         stat.st_nlink = 1;
     } else {
         #[cfg(target_os = "macos")]
-        { stat.st_mode = (libc::S_IFREG as u32 | entry.mode) as u16; }
+        {
+            stat.st_mode = (libc::S_IFREG as u32 | entry.mode) as u16;
+        }
         #[cfg(target_os = "linux")]
-        { stat.st_mode = libc::S_IFREG | entry.mode; }
+        {
+            stat.st_mode = libc::S_IFREG | entry.mode;
+        }
         stat.st_nlink = 1;
     }
 
@@ -555,7 +578,7 @@ pub unsafe extern "C" fn fstat(fd: c_int, statbuf: *mut libc::stat) -> c_int {
 
         let stat = &mut *statbuf;
         ptr::write_bytes(stat, 0, 1);
-        
+
         stat.st_size = vfd.mmap.len() as libc::off_t;
         stat.st_nlink = 1;
 
@@ -563,7 +586,7 @@ pub unsafe extern "C" fn fstat(fd: c_int, statbuf: *mut libc::stat) -> c_int {
         let mode = (libc::S_IFREG as u32 | 0o644) as u16;
         #[cfg(target_os = "linux")]
         let mode = libc::S_IFREG | 0o644;
-        
+
         stat.st_mode = mode;
 
         0
@@ -572,7 +595,11 @@ pub unsafe extern "C" fn fstat(fd: c_int, statbuf: *mut libc::stat) -> c_int {
 
 /// Intercept readlink() syscall
 #[no_mangle]
-pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, bufsize: size_t) -> ssize_t {
+pub unsafe extern "C" fn readlink(
+    path: *const c_char,
+    buf: *mut c_char,
+    bufsize: size_t,
+) -> ssize_t {
     let real_readlink = get_real_fn!(REAL_READLINK, "readlink", ReadlinkFn);
 
     let Some(path_str) = path_from_cstr(path) else {
@@ -589,7 +616,7 @@ pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, bufsize
 
     let span = tracing::trace_span!("readlink", path = %path_str);
     let _enter = span.enter();
-    
+
     debug!("Intercepting readlink call");
 
     let Some(entry) = state.manifest.get(&path_str) else {
@@ -614,7 +641,7 @@ pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, bufsize
 
     let len = content.len().min(bufsize);
     ptr::copy_nonoverlapping(content.as_ptr() as *const c_char, buf, len);
-    
+
     // readlink does NOT null-terminate
     len as ssize_t
 }
@@ -629,13 +656,21 @@ mod linux_compat {
 
     /// Intercept __xstat() (glibc internal)
     #[no_mangle]
-    pub unsafe extern "C" fn __xstat(_ver: c_int, path: *const c_char, statbuf: *mut libc::stat) -> c_int {
+    pub unsafe extern "C" fn __xstat(
+        _ver: c_int,
+        path: *const c_char,
+        statbuf: *mut libc::stat,
+    ) -> c_int {
         stat(path, statbuf)
     }
 
     /// Intercept __lxstat() (glibc internal)
     #[no_mangle]
-    pub unsafe extern "C" fn __lxstat(_ver: c_int, path: *const c_char, statbuf: *mut libc::stat) -> c_int {
+    pub unsafe extern "C" fn __lxstat(
+        _ver: c_int,
+        path: *const c_char,
+        statbuf: *mut libc::stat,
+    ) -> c_int {
         lstat(path, statbuf)
     }
 
@@ -658,6 +693,7 @@ mod linux_compat {
 
 /// Called when the library is loaded
 #[used]
+#[cfg(not(test))]
 #[cfg_attr(target_os = "linux", link_section = ".init_array")]
 #[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
 static INIT: extern "C" fn() = {

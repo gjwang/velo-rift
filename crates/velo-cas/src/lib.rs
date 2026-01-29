@@ -170,7 +170,8 @@ impl CasStore {
     pub fn stats(&self) -> Result<CasStats> {
         let mut blob_count = 0u64;
         let mut total_bytes = 0u64;
-        let mut size_histogram: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        let mut size_histogram: std::collections::HashMap<&str, u64> =
+            std::collections::HashMap::new();
 
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -185,7 +186,7 @@ impl CasStore {
                         let size = blob.metadata()?.len();
                         blob_count += 1;
                         total_bytes += size;
-                        
+
                         // Categorize by size
                         let category = if size < 1024 {
                             "<1KB"
@@ -228,10 +229,18 @@ impl CasStore {
 
         let file = File::open(&path)?;
         // Safety: The file is read-only and we're not modifying it
-        let mmap = unsafe { memmap2::Mmap::map(&file) }
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(io::Error::other)?;
 
         Ok(mmap)
+    }
+
+    /// Get an iterator over all blob hashes in the CAS.
+    pub fn iter(&self) -> Result<CasIterator> {
+        let root_iter = fs::read_dir(&self.root)?;
+        Ok(CasIterator {
+            root_iter,
+            current_prefix_iter: None,
+        })
     }
 
     /// Get the filesystem path to a blob (for external mmap or direct access).
@@ -269,6 +278,63 @@ impl CasStats {
             0
         } else {
             self.total_bytes / self.blob_count
+        }
+    }
+}
+
+/// Iterator over CAS hashes
+pub struct CasIterator {
+    root_iter: fs::ReadDir,
+    current_prefix_iter: Option<fs::ReadDir>,
+}
+
+impl Iterator for CasIterator {
+    type Item = Result<Blake3Hash>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // If we have an active prefix iterator, try to get the next file
+            if let Some(ref mut prefix_iter) = self.current_prefix_iter {
+                match prefix_iter.next() {
+                    Some(Ok(entry)) => {
+                        let path = entry.path();
+                        if path.is_file() {
+                            // Skip temp files
+                            if path.extension().is_some_and(|ext| ext == "tmp") {
+                                continue;
+                            }
+
+                            // Parse filename as hash
+                            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                                if let Some(hash) = CasStore::hex_to_hash(filename) {
+                                    return Some(Ok(hash));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Some(Err(e)) => return Some(Err(CasError::Io(e))),
+                    None => {
+                        // Prefix iterator exhausted, clear it and loop to get next prefix
+                        self.current_prefix_iter = None;
+                    }
+                }
+            }
+
+            // No active prefix iterator, get next prefix directory from root
+            match self.root_iter.next() {
+                Some(Ok(entry)) => {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        match fs::read_dir(path) {
+                            Ok(iter) => self.current_prefix_iter = Some(iter),
+                            Err(e) => return Some(Err(CasError::Io(e))),
+                        }
+                    }
+                }
+                Some(Err(e)) => return Some(Err(CasError::Io(e))),
+                None => return None, // Root iterator exhausted
+            }
         }
     }
 }

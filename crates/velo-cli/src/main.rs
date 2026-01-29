@@ -85,6 +85,21 @@ enum Commands {
         #[arg(short, long, default_value = "velo.lock")]
         lockfile: PathBuf,
     },
+
+    /// Garbage Collection
+    Gc {
+        /// Directory containing manifests to scan for active blobs
+        #[arg(long, value_name = "MANIFEST_DIR")]
+        manifests: PathBuf,
+
+        /// Delete garbage blobs (default: dry-run)
+        #[arg(long)]
+        delete: bool,
+
+        /// Print deleted blob hashes
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -98,9 +113,116 @@ fn main() -> Result<()> {
         } => cmd_ingest(&cli.cas_root, &directory, &output, prefix.as_deref()),
         Commands::Run { manifest, command } => cmd_run(&cli.cas_root, &manifest, &command),
         Commands::Status { manifest } => cmd_status(&cli.cas_root, manifest.as_deref()),
-        Commands::Mount { manifest, mountpoint } => cmd_mount(&cli.cas_root, &manifest, &mountpoint),
+        Commands::Mount {
+            manifest,
+            mountpoint,
+        } => cmd_mount(&cli.cas_root, &manifest, &mountpoint),
         Commands::Resolve { lockfile } => cmd_resolve(&cli.cas_root, &lockfile),
+        Commands::Gc {
+            manifests,
+            delete,
+            verbose,
+        } => cmd_gc(&cli.cas_root, &manifests, delete, verbose),
     }
+}
+
+/// Run Garbage Collection
+fn cmd_gc(cas_root: &Path, manifest_dir: &Path, delete: bool, verbose: bool) -> Result<()> {
+    use std::collections::HashSet;
+    use velo_cas::CasStore;
+
+    if !cas_root.exists() {
+        anyhow::bail!("CAS root not found: {}", cas_root.display());
+    }
+    if !manifest_dir.exists() {
+        anyhow::bail!("Manifest directory not found: {}", manifest_dir.display());
+    }
+
+    println!("Starting Garbage Collection...");
+    if !delete {
+        println!("Mode: DRY RUN (no files will be deleted)");
+    } else {
+        println!("Mode: DELETE (garbage files will be removed)");
+    }
+
+    // 1. Mark Phase: Scan manifests for active blobs
+    println!("Scanning manifests in {}...", manifest_dir.display());
+    let mut active_blobs = HashSet::new();
+    let mut manifest_count = 0;
+
+    for entry in fs::read_dir(manifest_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|ext| ext == "bin" || ext == "manifest")
+        {
+            // Try to load manifest
+            match Manifest::load(&path) {
+                Ok(manifest) => {
+                    manifest_count += 1;
+                    for (_, vnode) in manifest.iter() {
+                        active_blobs.insert(vnode.content_hash);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load manifest {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+    println!("  Scanned {} manifests.", manifest_count);
+    println!("  Found {} active unique blobs.", active_blobs.len());
+
+    // 2. Sweep Phase: Scan CAS for unused blobs
+    println!("Scanning CAS {}...", cas_root.display());
+    let cas = CasStore::new(cas_root)?;
+
+    let mut garbage_count = 0;
+    let mut garbage_bytes = 0u64;
+    let mut kept_count = 0;
+
+    for blob_hash_res in cas.iter()? {
+        let blob_hash = blob_hash_res?;
+
+        if active_blobs.contains(&blob_hash) {
+            kept_count += 1;
+        } else {
+            // Garbage found!
+            // Get size for stats
+            let size = if let Some(path) = cas.blob_path_for_hash(&blob_hash) {
+                fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+
+            garbage_count += 1;
+            garbage_bytes += size;
+
+            if verbose {
+                println!("  [GARBAGE] {}", CasStore::hash_to_hex(&blob_hash));
+            }
+
+            if delete {
+                if let Some(path) = cas.blob_path_for_hash(&blob_hash) {
+                    if let Err(e) = fs::remove_file(&path) {
+                        eprintln!("Failed to delete {}: {}", path.display(), e);
+                    }
+                }
+            }
+        }
+    }
+
+    println!("\nGC Summary:");
+    println!("  Active blobs:   {}", kept_count);
+    println!("  Garbage blobs:  {}", garbage_count);
+    println!("  Garbage size:   {}", format_bytes(garbage_bytes));
+
+    if !delete && garbage_count > 0 {
+        println!("\nRun with --delete to reclaim this space.");
+    }
+
+    Ok(())
 }
 
 /// Resolve dependencies from a lockfile
@@ -133,17 +255,23 @@ fn cmd_resolve(cas_root: &Path, lockfile: &Path) -> Result<()> {
                     missing += 1;
                 }
             } else {
-                println!("  [INVALID] {} v{} (Bad hash: {})", name, pkg.version, hash_str);
+                println!(
+                    "  [INVALID] {} v{} (Bad hash: {})",
+                    name, pkg.version, hash_str
+                );
                 missing += 1;
             }
         } else {
-            println!("  [INVALID] {} v{} (Bad prefix: {})", name, pkg.version, pkg.source_tree);
+            println!(
+                "  [INVALID] {} v{} (Bad prefix: {})",
+                name, pkg.version, pkg.source_tree
+            );
             missing += 1;
         }
     }
 
     println!("\nResult: {} resolved, {} missing", resolved, missing);
-    
+
     if missing > 0 {
         println!("Note: In a full implementation, this command would fetch missing trees from L2 storage.");
         // In MVP, we just report them.
@@ -157,7 +285,7 @@ fn cmd_mount(cas_root: &Path, manifest: &Path, mountpoint: &Path) -> Result<()> 
     if !manifest.exists() {
         anyhow::bail!("Manifest not found: {}", manifest.display());
     }
-    
+
     // Ensure mountpoint exists
     if !mountpoint.exists() {
         fs::create_dir_all(mountpoint)?;
@@ -170,15 +298,14 @@ fn cmd_mount(cas_root: &Path, manifest: &Path, mountpoint: &Path) -> Result<()> 
 
     let cas = CasStore::new(cas_root)?;
     let manifest = Manifest::load(manifest)?;
-    
-    // This will print a warning if FUSE feature is disabled
-    let _fs = velo_fuse::VeloFs::new(&manifest, cas);
-    
+
     #[cfg(feature = "fuse")]
     {
+        let _fs = velo_fuse::VeloFs::new(&manifest, cas);
         // fuser::mount2(_fs, mountpoint, &[])?;
         println!("FUSE mount implemented but requires 'fuse' feature enabled in velo-cli");
     }
+
     #[cfg(not(feature = "fuse"))]
     {
         println!("⚠️  FUSE support disabled. Recompile with --features fuse to enable.");
@@ -188,7 +315,12 @@ fn cmd_mount(cas_root: &Path, manifest: &Path, mountpoint: &Path) -> Result<()> 
 }
 
 /// Ingest a directory into the CAS and create a manifest
-fn cmd_ingest(cas_root: &Path, directory: &Path, output: &Path, prefix: Option<&str>) -> Result<()> {
+fn cmd_ingest(
+    cas_root: &Path,
+    directory: &Path,
+    output: &Path,
+    prefix: Option<&str>,
+) -> Result<()> {
     // Validate input directory
     if !directory.exists() {
         anyhow::bail!("Directory does not exist: {}", directory.display());
@@ -218,9 +350,7 @@ fn cmd_ingest(cas_root: &Path, directory: &Path, output: &Path, prefix: Option<&
 
     for entry in WalkDir::new(directory).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        let relative = path
-            .strip_prefix(directory)
-            .unwrap_or(path);
+        let relative = path.strip_prefix(directory).unwrap_or(path);
 
         // Build manifest path
         let manifest_path = if relative.as_os_str().is_empty() {
@@ -244,10 +374,10 @@ fn cmd_ingest(cas_root: &Path, directory: &Path, output: &Path, prefix: Option<&
             // Store file content in CAS
             let content = fs::read(path)
                 .with_context(|| format!("Failed to read file: {}", path.display()))?;
-            
+
             let was_new = !cas.exists(&CasStore::compute_hash(&content));
             let hash = cas.store(&content)?;
-            
+
             if was_new {
                 unique_blobs += 1;
             }
@@ -261,7 +391,8 @@ fn cmd_ingest(cas_root: &Path, directory: &Path, output: &Path, prefix: Option<&
     }
 
     // Save manifest
-    manifest.save(output)
+    manifest
+        .save(output)
         .with_context(|| format!("Failed to save manifest to {}", output.display()))?;
 
     let stats = manifest.stats();
@@ -275,7 +406,10 @@ fn cmd_ingest(cas_root: &Path, directory: &Path, output: &Path, prefix: Option<&
     println!("  Files:       {}", stats.file_count);
     println!("  Directories: {}", stats.dir_count);
     println!("  Total size:  {} bytes", format_bytes(bytes_ingested));
-    println!("  Unique blobs: {} ({:.1}% dedup)", unique_blobs, dedup_ratio);
+    println!(
+        "  Unique blobs: {} ({:.1}% dedup)",
+        unique_blobs, dedup_ratio
+    );
     println!("  Manifest:    {}", output.display());
 
     Ok(())
@@ -293,10 +427,12 @@ fn cmd_run(cas_root: &Path, manifest: &Path, command: &[String]) -> Result<()> {
 
     // Find the shim library
     let shim_path = find_shim_library()?;
-    
-    let manifest_abs = manifest.canonicalize()
+
+    let manifest_abs = manifest
+        .canonicalize()
         .with_context(|| format!("Failed to resolve manifest path: {}", manifest.display()))?;
-    let cas_abs = cas_root.canonicalize()
+    let cas_abs = cas_root
+        .canonicalize()
         .unwrap_or_else(|_| cas_root.to_path_buf());
 
     println!("Running with Velo VFS:");
@@ -309,11 +445,11 @@ fn cmd_run(cas_root: &Path, manifest: &Path, command: &[String]) -> Result<()> {
     // Build the command with environment variables
     let mut cmd = std::process::Command::new(&command[0]);
     cmd.args(&command[1..]);
-    
+
     // Set Velo environment variables
     cmd.env("VELO_MANIFEST", &manifest_abs);
     cmd.env("VELO_CAS_ROOT", &cas_abs);
-    
+
     // Set platform-specific library preload
     #[cfg(target_os = "macos")]
     {
@@ -321,7 +457,7 @@ fn cmd_run(cas_root: &Path, manifest: &Path, command: &[String]) -> Result<()> {
         // Disable SIP restrictions for child process (requires entitlements in production)
         cmd.env("DYLD_FORCE_FLAT_NAMESPACE", "1");
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         cmd.env("LD_PRELOAD", &shim_path);
@@ -332,7 +468,8 @@ fn cmd_run(cas_root: &Path, manifest: &Path, command: &[String]) -> Result<()> {
         cmd.env("VELO_DEBUG", "1");
     }
 
-    let status = cmd.status()
+    let status = cmd
+        .status()
         .with_context(|| format!("Failed to execute: {}", command[0]))?;
 
     std::process::exit(status.code().unwrap_or(1));
@@ -348,11 +485,17 @@ fn find_shim_library() -> Result<PathBuf> {
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .map(|p| {
                 #[cfg(target_os = "macos")]
-                { p.join("libvelo_shim.dylib") }
+                {
+                    p.join("libvelo_shim.dylib")
+                }
                 #[cfg(target_os = "linux")]
-                { p.join("libvelo_shim.so") }
+                {
+                    p.join("libvelo_shim.so")
+                }
                 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                { p.join("libvelo_shim.so") }
+                {
+                    p.join("libvelo_shim.so")
+                }
             }),
         // Installed location
         Some(PathBuf::from("/usr/local/lib/velo/libvelo_shim.so")),
@@ -370,8 +513,12 @@ fn find_shim_library() -> Result<PathBuf> {
     anyhow::bail!(
         "Could not find velo-shim library. \n\
         Build with: cargo build -p velo-shim --release\n\
-        Expected at: target/release/libvelo_shim.{}", 
-        if cfg!(target_os = "macos") { "dylib" } else { "so" }
+        Expected at: target/release/libvelo_shim.{}",
+        if cfg!(target_os = "macos") {
+            "dylib"
+        } else {
+            "so"
+        }
     );
 }
 
@@ -423,7 +570,11 @@ fn cmd_status(cas_root: &Path, manifest: Option<&Path>) -> Result<()> {
                     println!("  Deduplication:");
                     println!("    Original:     {}", format_bytes(mstats.total_size));
                     println!("    Deduplicated: {}", format_bytes(cas_stats.total_bytes));
-                    println!("    Savings:      {} ({:.1}%)", format_bytes(savings), ratio);
+                    println!(
+                        "    Savings:      {} ({:.1}%)",
+                        format_bytes(savings),
+                        ratio
+                    );
                 }
             }
         } else {

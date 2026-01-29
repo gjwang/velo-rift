@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use velo_cas::CasStore;
 use tempfile::TempDir;
+use velo_cas::CasStore;
 
 fn bench_cas_store(c: &mut Criterion) {
     let temp = TempDir::new().unwrap();
@@ -10,7 +10,7 @@ fn bench_cas_store(c: &mut Criterion) {
     c.bench_function("cas_store_10kb", |b| {
         b.iter(|| {
             // Note: This will repeatedly store the same content (deduplication path)
-            // To test write speed, we might need unique content, but for CAS `store` checks, 
+            // To test write speed, we might need unique content, but for CAS `store` checks,
             // deduplication is a valid/common path.
             // Let's vary usage if needed, but for now strict store overhead is fine.
             cas.store(black_box(&data)).unwrap()
@@ -25,9 +25,7 @@ fn bench_cas_get(c: &mut Criterion) {
     let hash = cas.store(&data).unwrap();
 
     c.bench_function("cas_get_10kb", |b| {
-        b.iter(|| {
-            cas.get(black_box(&hash)).unwrap()
-        })
+        b.iter(|| cas.get(black_box(&hash)).unwrap())
     });
 }
 
@@ -38,9 +36,7 @@ fn bench_cas_get_mmap(c: &mut Criterion) {
     let hash = cas.store(&data).unwrap();
 
     c.bench_function("cas_get_mmap_1mb", |b| {
-        b.iter(|| {
-            cas.get_mmap(black_box(&hash)).unwrap()
-        })
+        b.iter(|| cas.get_mmap(black_box(&hash)).unwrap())
     });
 }
 

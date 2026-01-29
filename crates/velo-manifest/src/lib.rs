@@ -30,24 +30,19 @@ pub enum ManifestError {
 
 pub type Result<T> = std::result::Result<T, ManifestError>;
 
-/// Flags for VnodeEntry
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u16)]
+/// Flags for VnodeEnt#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[repr(u8)]
 pub enum VnodeFlags {
     /// Regular file
+    #[default]
     File = 0,
     /// Directory
     Directory = 1,
     /// Symbolic link
     Symlink = 2,
     /// Executable file
-    Executable = 4,
-}
-
-impl Default for VnodeFlags {
-    fn default() -> Self {
-        Self::File
-    }
+    Executable = 3,
 }
 
 /// Virtual node entry representing a file or directory in the manifest.
@@ -225,9 +220,9 @@ impl Manifest {
 
     /// Iterate over all entries with their paths
     pub fn iter(&self) -> impl Iterator<Item = (&str, &VnodeEntry)> {
-        self.paths.iter().filter_map(|(hash, path)| {
-            self.entries.get(hash).map(|entry| (path.as_str(), entry))
-        })
+        self.paths
+            .iter()
+            .filter_map(|(hash, path)| self.entries.get(hash).map(|entry| (path.as_str(), entry)))
     }
 
     /// Iterate over all paths
@@ -247,7 +242,7 @@ impl Manifest {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let manifest = bincode::deserialize_from(reader)?;
+        let manifest = bincode::deserialize_from(reader).map_err(io::Error::other)?;
         Ok(manifest)
     }
 
@@ -328,7 +323,10 @@ mod tests {
         let manifest_path = temp.path().join("test.manifest");
 
         let mut manifest = Manifest::new();
-        manifest.insert("/test/file.txt", VnodeEntry::new_file([1u8; 32], 100, 0, 0o644));
+        manifest.insert(
+            "/test/file.txt",
+            VnodeEntry::new_file([1u8; 32], 100, 0, 0o644),
+        );
         manifest.insert("/test/dir", VnodeEntry::new_directory(0, 0o755));
 
         manifest.save(&manifest_path).unwrap();

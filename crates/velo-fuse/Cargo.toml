@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-fuser = { version = "0.14", optional = true }
+# fuser = { version = "0.14", optional = true }
 libc = "0.2"
 velo-cas.workspace = true
 velo-manifest.workspace = true
@@ -16,7 +16,7 @@ anyhow.workspace = true
 
 [features]
 default = []
-fuse = ["fuser"]
+fuse = []
 
 [dev-dependencies]
 tempfile = "3.14"

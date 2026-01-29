@@ -115,8 +115,7 @@ impl PackReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
-        let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(io::Error::other)?;
 
         if mmap.len() < 32 {
             return Err(PackError::Invalid("File too small".to_string()));
@@ -292,7 +291,7 @@ mod tests {
 
         // Create packfile
         let mut writer = PackWriter::new(&pack_path);
-        
+
         let data1 = b"Hello, world!";
         let data2 = b"Goodbye, world!";
         let hash1 = CasStore::compute_hash(data1);
@@ -322,7 +321,7 @@ mod tests {
         let mut profile = AccessProfile::default();
         let hash1 = [1u8; 32];
         let hash2 = [2u8; 32];
-        
+
         profile.record(hash1);
         profile.record(hash2);
         profile.record(hash1); // Duplicate - should be ignored
