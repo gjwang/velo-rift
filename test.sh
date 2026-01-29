@@ -36,7 +36,14 @@ export VELO_CAS_ROOT="$CAS_DIR"
 
 # Create test data
 echo "Hello Velo" > "$DATA_DIR/file1.txt"
-dd if=/dev/urandom of="$DATA_DIR/bigfile.bin" bs=1M count=10 status=none
+dd if=/dev/urandom of="$DATA_DIR/bigfile.bin" bs=1M count=10 2>/dev/null
+
+# Create an executable script to test execute permissions
+cat <<EOF > "$DATA_DIR/hello.sh"
+#!/bin/sh
+echo "Velo Exec Works"
+EOF
+chmod +x "$DATA_DIR/hello.sh"
 
 # 3. Test Daemon Auto-Start & Ingest
 echo "[*] Testing Daemon Auto-Start & Ingest..."
@@ -167,6 +174,22 @@ if [ "$OS" == "Linux" ]; then
        echo "ERROR: Virtual file not found in mount."
        ls -R "$MOUNT_DIR"
        exit 1
+    fi
+
+    # Test Execution
+    echo "Checking execution permission..."
+    if [ -x "$MOUNT_DIR/data/hello.sh" ]; then
+        EXEC_OUTPUT=$("$MOUNT_DIR/data/hello.sh")
+        if [ "$EXEC_OUTPUT" == "Velo Exec Works" ]; then
+            echo "[PASS] FUSE execution verified."
+        else
+            echo "ERROR: Execution output mismatch. Got: '$EXEC_OUTPUT'"
+            exit 1
+        fi
+    else
+        echo "ERROR: Script is not executable in mount."
+        ls -l "$MOUNT_DIR/data/hello.sh"
+        exit 1
     fi
 
     # Cleanup
