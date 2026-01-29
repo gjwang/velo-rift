@@ -5,37 +5,27 @@
 
 ---
 
-## Two Problems, One Solution
+## What is Velo Rift?
 
-### 1. Read-Only File Access is Too Slow
+Velo Rift is a **virtual file system layer** that solves two problems:
 
-```text
-Traditional:  open() → disk seek → read → copy → use
-Velo Rift:    open() → mmap pointer → use
-```
-
-### 2. Duplicate Files Waste Storage
+1. **Read-only file access is too slow** → mmap from content-addressable storage
+2. **Duplicate files waste storage** → global deduplication
 
 ```text
-Traditional:  10 projects × same dependency = 10 copies
-Velo Rift:    10 projects × same dependency = 1 copy (shared)
+Traditional:  open("/node_modules/...") → disk seek → read → copy
+Velo Rift:    open("/node_modules/...") → mmap pointer → done
 ```
 
----
-
-## How It Works
-
-| Mechanism | Purpose |
-|-----------|---------|
-| **Content-Addressable Storage** | Same bytes = same hash = stored once |
-| **Memory-Mapped I/O** | Zero-copy access, no disk reads |
+**Result**: Cold start in milliseconds, not minutes.
 
 ---
 
 ## What Velo Rift IS
 
 - ✅ A **virtual file system** for read-only content
-- ✅ A **content-addressable store** with global deduplication
+- ✅ A **content-addressable store** with global deduplication  
+- ✅ An **I/O accelerator** for Python, Node.js, Rust, and more
 
 ## What Velo Rift is NOT
 
@@ -43,6 +33,7 @@ Velo Rift:    10 projects × same dependency = 1 copy (shared)
 - ❌ A package manager (we wrap uv, npm, cargo)
 - ❌ A build system (that's Bazel's job)
 - ❌ A container runtime (that's Docker's job)
+- ❌ A general-purpose filesystem for mutable data
 
 ---
 
@@ -50,9 +41,23 @@ Velo Rift:    10 projects × same dependency = 1 copy (shared)
 
 | Metric | Before | After |
 |--------|--------|-------|
-| `npm install` | 2 min | < 1 sec |
+| `npm install` (1000 packages) | 2 minutes | < 1 second |
 | Python cold start | 500ms | 50ms |
 | Disk usage (10 projects) | 10 GB | 1 GB |
+
+---
+
+## Quick Start
+
+```bash
+# Install (coming soon)
+curl -fsSL https://velo.dev/install.sh | sh
+
+# Accelerate your project
+cd my-project
+velo init
+velo run npm start
+```
 
 ---
 
@@ -60,9 +65,8 @@ Velo Rift:    10 projects × same dependency = 1 copy (shared)
 
 | Document | Description |
 |----------|-------------|
-| [Whitepaper](docs/velo-world-model-whitepaper.md) | Two core problems explained |
-| [Positioning](docs/architecture/velo-technical-positioning.md) | Comparison with other tools |
-| [Technical Spec](docs/architecture/velo-technical-deep-dive.md) | Implementation details |
+| [Technical Positioning](docs/architecture/velo-technical-positioning.md) | How we compare to other tools |
+| [Technical Deep Dive](docs/architecture/velo-technical-deep-dive.md) | Implementation specification |
 
 ---
 
@@ -71,11 +75,12 @@ Velo Rift:    10 projects × same dependency = 1 copy (shared)
 **Yes:**
 - Large dependency trees (1000+ packages)
 - Cold start latency matters (serverless, CI/CD)
+- Multi-tenant workloads
 
 **No:**
+- POSIX-perfect semantics required
 - Write-heavy mutable workloads
 - Bottleneck is CPU, not I/O
-- < 100 dependencies
 
 ---
 
