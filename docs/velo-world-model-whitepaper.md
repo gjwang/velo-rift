@@ -1,75 +1,55 @@
-# Velo Rift — One‑Page Whitepaper
+# Velo Rift VFS — Whitepaper
 
-## The Problem
+## Two Problems, One Solution
 
-Modern runtimes are fast. Disks are not.
+Velo Rift VFS solves exactly **two problems**:
 
-```text
-Python startup:  95% time = loading files from disk
-Node.js startup: 90% time = resolving node_modules
-Rust build:      80% time = waiting for I/O
-```
-
-The filesystem is the bottleneck.
-
----
-
-## The Solution
-
-**Remove the filesystem from the critical path.**
+### 1. Read-Only File Access is Too Slow
 
 ```text
-Before:  open() → disk seek → read → copy to memory → use
-After:   open() → mmap pointer → use
+Traditional:  open() → disk seek → read → copy → use
+Velo Rift:    open() → mmap pointer → use
 ```
+
+**Result**: Microseconds instead of milliseconds.
+
+### 2. Duplicate Files Waste Storage
+
+```text
+Traditional:  10 projects × same dependency = 10 copies
+Velo Rift:    10 projects × same dependency = 1 copy (shared)
+```
+
+**Result**: 10x storage reduction.
 
 ---
 
 ## How It Works
 
-| Step | What Happens |
-|------|-------------|
-| 1. Content-address everything | Files identified by content hash, not path |
-| 2. Deduplicate globally | Same bytes = stored once, regardless of location |
-| 3. mmap on access | Zero-copy, no extraction, no disk I/O |
+| Mechanism | Purpose |
+|-----------|---------|
+| Content-Addressable Storage | Same bytes = same hash = stored once |
+| Memory-Mapped I/O | Zero-copy access, no disk reads |
 
 ---
 
-## What Velo Rift Does
+## What We Don't Do
 
-> **Make file access instant.**
-
-That's it.
-
----
-
-## What Velo Rift Does NOT Do
-
-| Not Our Job | Whose Job |
-|-------------|-----------|
-| Build graphs | Bazel |
+| Not Our Job | Use Instead |
+|-------------|-------------|
+| Build orchestration | Bazel |
 | Package resolution | uv, npm, cargo |
 | Process isolation | Docker |
-| Distributed consensus | etcd |
-
-We integrate with these tools. We don't replace them.
+| Mutable file storage | Filesystem |
 
 ---
 
-## Result
+## Summary
 
-| Metric | Before | After |
-|--------|--------|-------|
-| `npm install` | 2 min | < 1 sec |
-| Python cold start | 500ms | 50ms |
-| Disk usage (10 projects) | 10 GB | 1 GB |
+> **Fast read-only access. Zero duplication.**
+
+That's Velo Rift.
 
 ---
 
-## One Sentence
-
-> **Velo Rift makes file access instant by eliminating disk I/O.**
-
----
-
-*Version 3.0 — 2026-01-29*
+*v4.0 — 2026-01-29*
