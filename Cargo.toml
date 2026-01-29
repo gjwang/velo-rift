@@ -4,7 +4,9 @@ members = [
     "crates/velo-cas",
     "crates/velo-manifest",
     "crates/velo-pack",
+    "crates/velo-runtime",
     "crates/velo-shim",
+    "crates/velo-fuse",
     "crates/velo-cli",
 ]
 
@@ -36,3 +38,7 @@ memmap2 = "0.9"
 # Internal crates
 velo-cas = { path = "crates/velo-cas" }
 velo-manifest = { path = "crates/velo-manifest" }
+velo-pack = { path = "crates/velo-pack" }
+velo-runtime = { path = "crates/velo-runtime" }
+velo-shim = { path = "crates/velo-shim" }
+velo-fuse = { path = "crates/velo-fuse" }

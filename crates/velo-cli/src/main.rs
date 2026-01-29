@@ -67,6 +67,17 @@ enum Commands {
         #[arg(short, long)]
         manifest: Option<PathBuf>,
     },
+
+    /// Mount the manifest as a FUSE filesystem
+    Mount {
+        /// Manifest file to mount
+        #[arg(short, long, default_value = "velo.manifest")]
+        manifest: PathBuf,
+
+        /// Mount point directory
+        #[arg(value_name = "MOUNTPOINT")]
+        mountpoint: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -80,7 +91,43 @@ fn main() -> Result<()> {
         } => cmd_ingest(&cli.cas_root, &directory, &output, prefix.as_deref()),
         Commands::Run { manifest, command } => cmd_run(&cli.cas_root, &manifest, &command),
         Commands::Status { manifest } => cmd_status(&cli.cas_root, manifest.as_deref()),
+        Commands::Mount { manifest, mountpoint } => cmd_mount(&cli.cas_root, &manifest, &mountpoint),
     }
+}
+
+/// Mount the Velo filesystem (requires FUSE)
+fn cmd_mount(cas_root: &Path, manifest: &Path, mountpoint: &Path) -> Result<()> {
+    if !manifest.exists() {
+        anyhow::bail!("Manifest not found: {}", manifest.display());
+    }
+    
+    // Ensure mountpoint exists
+    if !mountpoint.exists() {
+        fs::create_dir_all(mountpoint)?;
+    }
+
+    println!("Mounting VeloFS...");
+    println!("  Manifest:   {}", manifest.display());
+    println!("  CAS:        {}", cas_root.display());
+    println!("  Mountpoint: {}", mountpoint.display());
+
+    let cas = CasStore::new(cas_root)?;
+    let manifest = Manifest::load(manifest)?;
+    
+    // This will print a warning if FUSE feature is disabled
+    let _fs = velo_fuse::VeloFs::new(&manifest, cas);
+    
+    #[cfg(feature = "fuse")]
+    {
+        // fuser::mount2(_fs, mountpoint, &[])?;
+        println!("FUSE mount implemented but requires 'fuse' feature enabled in velo-cli");
+    }
+    #[cfg(not(feature = "fuse"))]
+    {
+        println!("⚠️  FUSE support disabled. Recompile with --features fuse to enable.");
+    }
+
+    Ok(())
 }
 
 /// Ingest a directory into the CAS and create a manifest

@@ -15,3 +15,9 @@ anyhow.workspace = true
 walkdir.workspace = true
 velo-cas.workspace = true
 velo-manifest.workspace = true
+velo-shim.workspace = true
+velo-fuse.workspace = true
+
+[features]
+default = []
+fuse = ["velo-fuse/fuse"]
