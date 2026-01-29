@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 use walkdir::WalkDir;
 
 mod isolation;
+mod daemon;
 
 use velo_cas::CasStore;
 use velo_manifest::{Manifest, VnodeEntry};
@@ -106,9 +107,22 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+
+    /// Daemon management
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
 }
 
-fn main() -> Result<()> {
+#[derive(Subcommand)]
+enum DaemonCommands {
+    /// Check daemon status (ping)
+    Status,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -133,6 +147,9 @@ fn main() -> Result<()> {
             delete,
             verbose,
         } => cmd_gc(&cli.cas_root, &manifests, delete, verbose),
+        Commands::Daemon { command } => match command {
+            DaemonCommands::Status => daemon::check_status().await,
+        },
     }
 }
 

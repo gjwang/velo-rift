@@ -9,7 +9,7 @@ members = [
     "crates/velo-fuse",
     "crates/velo-lock",
     "crates/velo-cli",
-    "crates/velo-daemon",
+    "crates/velo-daemon", "crates/velo-ipc",
 ]
 
 [workspace.package]
@@ -48,3 +48,4 @@ velo-runtime = { path = "crates/velo-runtime" }
 velo-shim = { path = "crates/velo-shim" }
 velo-fuse = { path = "crates/velo-fuse" }
 velo-lock = { path = "crates/velo-lock" }
+velo-ipc = { path = "crates/velo-ipc" }

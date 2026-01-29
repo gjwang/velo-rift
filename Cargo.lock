@@ -1189,11 +1189,14 @@ name = "velo-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "clap",
  "nix 0.28.0",
  "tempfile",
+ "tokio",
  "velo-cas",
  "velo-fuse",
+ "velo-ipc",
  "velo-lock",
  "velo-manifest",
  "velo-runtime",
@@ -1206,10 +1209,12 @@ name = "velo-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "clap",
  "serde",
  "thiserror 1.0.69",
  "tokio",
+ "velo-ipc",
 ]
 
 [[package]]
@@ -1223,6 +1228,15 @@ dependencies = [
  "log",
  "velo-cas",
  "velo-manifest",
+]
+
+[[package]]
+name = "velo-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
