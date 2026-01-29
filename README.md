@@ -47,17 +47,30 @@ Velo Rift:    open("/node_modules/...") → mmap pointer → done
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
+
+Experience Velo Rift in seconds with our automated demo script:
 
 ```bash
-# Install (coming soon)
-curl -fsSL https://velo.dev/install.sh | sh
-
-# Accelerate your project
-cd my-project
-velo init
-velo run npm start
+./scripts/demo.sh
 ```
+
+This script will:
+1. Build the project (release mode).
+2. Create a temporary CAS and Manifest.
+3. Drop you into a shell where `/velo/hello_velo.txt` exists via the Shim.
+
+## ⚡️ Performance & Benchmarking
+
+We use **Criterion** for high-precision benchmarking.
+
+Run CAS micro-benchmarks:
+
+```bash
+cargo bench -p velo-cas
+```
+
+This measures the nanosecond-latency of `store`, `get`, and `get_mmap` operations.
 
 ---
 

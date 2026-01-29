@@ -11,9 +11,30 @@ use std::fs;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use thiserror::Error;
 use velo_cas::CasStore;
 use velo_manifest::Manifest;
+
+#[derive(Error, Debug)]
+pub enum RuntimeError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    
+    #[error("CAS error: {0}")]
+    Cas(#[from] velo_cas::CasError),
+    
+    #[error("Blob not found in CAS: {0}")]
+    BlobNotFound(String),
+    
+    #[cfg(target_os = "linux")]
+    #[error("Nix system error: {0}")]
+    Nix(#[from] nix::Error),
+    
+    #[error("OverlayFS error: {0}")]
+    Overlay(String),
+}
+
+pub type Result<T> = std::result::Result<T, RuntimeError>;
 
 #[cfg(target_os = "linux")]
 use nix::mount::{mount, MsFlags};
@@ -49,8 +70,7 @@ impl LinkFarm {
             let dest_path = target.join(relative_path);
 
             if entry.is_dir() {
-                fs::create_dir_all(&dest_path)
-                    .with_context(|| format!("Failed to create directory: {}", dest_path.display()))?;
+                fs::create_dir_all(&dest_path)?;
                 continue;
             }
 
@@ -62,7 +82,7 @@ impl LinkFarm {
             if entry.is_file() {
                 // Find source blob in CAS
                 let src_path = self.cas.blob_path_for_hash(&entry.content_hash)
-                    .ok_or_else(|| anyhow::anyhow!("Blob not found in CAS: {:?}", entry.content_hash))?;
+                    .ok_or_else(|| RuntimeError::BlobNotFound(format!("{:?}", entry.content_hash)))?;
 
                 // Create hard link: src (CAS) -> dest (Link Farm)
                 // Remove existing file if present (idempotency)
@@ -70,8 +90,7 @@ impl LinkFarm {
                     fs::remove_file(&dest_path)?;
                 }
 
-                fs::hard_link(&src_path, &dest_path)
-                    .with_context(|| format!("Failed to link {:?} -> {:?}", src_path, dest_path))?;
+                fs::hard_link(&src_path, &dest_path)?;
             } else if (entry.flags & 2) != 0 { // Check if symlink
                  // Manifest VnodeEntry doesn't currently store symlink target separately
                  // For now, assuming symlink target is stored in content? 
@@ -128,7 +147,7 @@ impl OverlayManager {
             Some("overlay"),
             MsFlags::empty(),
             Some(options.as_str()),
-        ).context("Failed to mount OverlayFS")?;
+        )?;
 
         Ok(())
     }
@@ -171,7 +190,7 @@ impl NamespaceManager {
                 | CloneFlags::CLONE_NEWIPC
                 | CloneFlags::CLONE_NEWUTS
                 | CloneFlags::CLONE_NEWNET,
-        ).context("Failed to unshare namespaces")?;
+        )?;
 
         // Remount / as private to avoid propagation
         use nix::mount::{mount, MsFlags};
@@ -181,7 +200,7 @@ impl NamespaceManager {
             None::<&str>,
             MsFlags::MS_PRIVATE | MsFlags::MS_REC,
             None::<&str>,
-        ).context("Failed to remount / as private")?;
+        )?;
 
         Ok(())
     }
@@ -198,11 +217,11 @@ impl NamespaceManager {
     pub fn pivot_root(new_root: &Path, put_old: &Path) -> Result<()> {
         use nix::unistd::pivot_root;
 
-        pivot_root(new_root, put_old).context("Failed to pivot_root")?;
+        pivot_root(new_root, put_old)?;
         
         // Unmount old root
         use nix::mount::{umount2, MntFlags};
-        umount2(put_old, MntFlags::MNT_DETACH).context("Failed to unmount old root")?;
+        umount2(put_old, MntFlags::MNT_DETACH)?;
 
         Ok(())
     }
@@ -230,7 +249,7 @@ impl NamespaceManager {
                 Some("proc"),
                 MsFlags::empty(),
                 None::<&str>,
-            ).context("Failed to mount /proc")?;
+            )?;
         }
 
         if sys_path.exists() {
@@ -240,7 +259,7 @@ impl NamespaceManager {
                 Some("sysfs"),
                 MsFlags::empty(),
                 None::<&str>,
-            ).context("Failed to mount /sys")?;
+            )?;
         }
 
          // bind mount /dev
@@ -253,7 +272,7 @@ impl NamespaceManager {
                 None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REC,
                 None::<&str>,
-            ).context("Failed to bind mount /dev")?;
+            )?;
          }
 
         Ok(())

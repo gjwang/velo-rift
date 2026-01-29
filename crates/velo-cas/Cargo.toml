@@ -9,6 +9,12 @@ license.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
 memmap2.workspace = true
+tracing = "0.1.44"
 
 [dev-dependencies]
 tempfile = "3.14"
+criterion = "0.5"
+
+[[bench]]
+name = "cas_bench"
+harness = false

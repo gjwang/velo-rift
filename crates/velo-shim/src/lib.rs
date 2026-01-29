@@ -93,9 +93,9 @@ struct ShimState {
     cas: CasStore,
     /// Virtual path prefix (paths starting with this are intercepted)
     vfs_prefix: String,
-    /// Debug mode enabled
-    debug: bool,
 }
+
+use tracing::{debug, info, error};
 
 impl ShimState {
     fn init() -> Option<Self> {
@@ -104,13 +104,15 @@ impl ShimState {
             .unwrap_or_else(|_| "/var/velo/the_source".to_string());
         let vfs_prefix = std::env::var("VELO_VFS_PREFIX")
             .unwrap_or_else(|_| "/velo".to_string());
-        let debug = std::env::var("VELO_DEBUG").is_ok();
+        
+        // Initialize tracing if not already initialized
+        // We use try_init because this might be called multiple times or conflict with app
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
 
-        if debug {
-            eprintln!("[velo-shim] Initializing with manifest: {}", manifest_path);
-            eprintln!("[velo-shim] CAS root: {}", cas_root);
-            eprintln!("[velo-shim] VFS prefix: {}", vfs_prefix);
-        }
+        debug!(manifest = %manifest_path, cas = %cas_root, prefix = %vfs_prefix, "Initializing Velo Shim");
 
         let manifest = Manifest::load(&manifest_path).ok()?;
         let cas = CasStore::new(&cas_root).ok()?;
@@ -119,7 +121,6 @@ impl ShimState {
             manifest,
             cas,
             vfs_prefix,
-            debug,
         })
     }
 
@@ -130,7 +131,6 @@ impl ShimState {
                 manifest: Manifest::new(),
                 cas: CasStore::new("/tmp/velo-shim-dummy").unwrap(),
                 vfs_prefix: "/nonexistent-velo-prefix".to_string(),
-                debug: false,
             }
         }));
         let state = SHIM_STATE.get()?;
@@ -144,12 +144,6 @@ impl ShimState {
 
     fn should_intercept(&self, path: &str) -> bool {
         path.starts_with(&self.vfs_prefix)
-    }
-
-    fn debug_log(&self, msg: &str) {
-        if self.debug {
-            eprintln!("[velo-shim] {}", msg);
-        }
     }
 }
 
@@ -227,18 +221,21 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
     if !state.should_intercept(&path_str) {
         return real_open(path, flags, mode);
     }
+    
+    let span = tracing::trace_span!("open", path = %path_str);
+    let _enter = span.enter();
 
-    state.debug_log(&format!("open({})", path_str));
+    debug!("Intercepting open call");
 
     // Look up in manifest
     let Some(entry) = state.manifest.get(&path_str) else {
-        state.debug_log("  -> not in manifest");
+        debug!("Path not found in manifest");
         set_errno(libc::ENOENT);
         return -1;
     };
 
     if entry.is_dir() {
-        state.debug_log("  -> is directory");
+        debug!("Path is a directory");
         set_errno(libc::EISDIR);
         return -1;
     }
@@ -247,7 +244,7 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
     let content = match state.cas.get(&entry.content_hash) {
         Ok(data) => data,
         Err(e) => {
-            state.debug_log(&format!("  -> CAS error: {}", e));
+            error!(error = %e, "Failed to get content from CAS");
             set_errno(libc::EIO);
             return -1;
         }
@@ -290,7 +287,7 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
         });
     });
 
-    state.debug_log(&format!("  -> fd={}", velo_fd));
+    debug!(fd = velo_fd, "Opened virtual file");
     velo_fd
 }
 
@@ -397,7 +394,11 @@ pub unsafe extern "C" fn stat(path: *const c_char, statbuf: *mut libc::stat) -> 
         return real_stat(path, statbuf);
     }
 
-    state.debug_log(&format!("stat({})", path_str));
+
+    let span = tracing::trace_span!("stat", path = %path_str);
+    let _enter = span.enter();
+    
+    debug!("Intercepting stat call");
 
     let Some(entry) = state.manifest.get(&path_str) else {
         set_errno(libc::ENOENT);

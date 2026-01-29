@@ -19,6 +19,8 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use tracing::instrument;
+
 use thiserror::Error;
 
 /// BLAKE3 hash type (32 bytes)
@@ -97,6 +99,7 @@ impl CasStore {
     /// Store bytes in the CAS, returning the content hash.
     ///
     /// If the content already exists, this is a no-op (deduplication).
+    #[instrument(skip(self, data), level = "debug")]
     pub fn store(&self, data: &[u8]) -> Result<Blake3Hash> {
         let hash = Self::compute_hash(data);
         let path = self.blob_path(&hash);
@@ -128,6 +131,7 @@ impl CasStore {
     }
 
     /// Retrieve bytes from the CAS by hash.
+    #[instrument(skip(self), level = "debug")]
     pub fn get(&self, hash: &Blake3Hash) -> Result<Vec<u8>> {
         let path = self.blob_path(hash);
         if !path.exists() {
@@ -213,6 +217,7 @@ impl CasStore {
     /// This is more efficient than `get()` for large files as it avoids copying
     /// the data into memory. The file is mapped directly from the filesystem,
     /// leveraging the page cache for sharing across processes.
+    #[instrument(skip(self), level = "debug")]
     pub fn get_mmap(&self, hash: &Blake3Hash) -> Result<memmap2::Mmap> {
         let path = self.blob_path(hash);
         if !path.exists() {
