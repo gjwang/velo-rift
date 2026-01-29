@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 mod isolation;
 mod daemon;
 mod mount;
+pub mod gc;
 
 use velo_cas::CasStore;
 use velo_manifest::{Manifest, VnodeEntry};
@@ -81,36 +82,16 @@ enum Commands {
     },
 
     /// Mount the manifest as a FUSE filesystem
-    Mount {
-        /// Manifest file to mount
-        #[arg(short, long, default_value = "velo.manifest")]
-        manifest: PathBuf,
+    Mount(mount::MountArgs),
 
-        /// Mount point directory
-        #[arg(value_name = "MOUNTPOINT")]
-        mountpoint: PathBuf,
-    },
+    /// Garbage Collect unreferenced blobs
+    Gc(gc::GcArgs),
 
     /// Resolve dependencies from a velo.lock file
     Resolve {
         /// Lockfile path
         #[arg(short, long, default_value = "velo.lock")]
         lockfile: PathBuf,
-    },
-
-    /// Garbage Collection
-    Gc {
-        /// Directory containing manifests to scan for active blobs
-        #[arg(long, value_name = "MANIFEST_DIR")]
-        manifests: PathBuf,
-
-        /// Delete garbage blobs (default: dry-run)
-        #[arg(long)]
-        delete: bool,
-
-        /// Print deleted blob hashes
-        #[arg(long)]
-        verbose: bool,
     },
 
     /// Daemon management
@@ -154,16 +135,9 @@ async fn main() -> Result<()> {
             daemon,
         } => cmd_run(&cli.cas_root, &manifest, &command, isolate, daemon),
         Commands::Status { manifest } => cmd_status(&cli.cas_root, manifest.as_deref()),
-        Commands::Mount {
-            manifest,
-            mountpoint,
-        } => cmd_mount(&cli.cas_root, &manifest, &mountpoint),
+        Commands::Mount(args) => mount::run(args),
+        Commands::Gc(args) => gc::run(args),
         Commands::Resolve { lockfile } => cmd_resolve(&cli.cas_root, &lockfile),
-        Commands::Gc {
-            manifests,
-            delete,
-            verbose,
-        } => cmd_gc(&cli.cas_root, &manifests, delete, verbose),
         Commands::Daemon { command } => match command {
             DaemonCommands::Status => daemon::check_status().await,
         },
@@ -171,104 +145,6 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Run Garbage Collection
-fn cmd_gc(cas_root: &Path, manifest_dir: &Path, delete: bool, verbose: bool) -> Result<()> {
-    use std::collections::HashSet;
-    use velo_cas::CasStore;
-
-    if !cas_root.exists() {
-        anyhow::bail!("CAS root not found: {}", cas_root.display());
-    }
-    if !manifest_dir.exists() {
-        anyhow::bail!("Manifest directory not found: {}", manifest_dir.display());
-    }
-
-    println!("Starting Garbage Collection...");
-    if !delete {
-        println!("Mode: DRY RUN (no files will be deleted)");
-    } else {
-        println!("Mode: DELETE (garbage files will be removed)");
-    }
-
-    // 1. Mark Phase: Scan manifests for active blobs
-    println!("Scanning manifests in {}...", manifest_dir.display());
-    let mut active_blobs = HashSet::new();
-    let mut manifest_count = 0;
-
-    for entry in fs::read_dir(manifest_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|ext| ext == "bin" || ext == "manifest")
-        {
-            // Try to load manifest
-            match Manifest::load(&path) {
-                Ok(manifest) => {
-                    manifest_count += 1;
-                    for (_, vnode) in manifest.iter() {
-                        active_blobs.insert(vnode.content_hash);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to load manifest {}: {}", path.display(), e);
-                }
-            }
-        }
-    }
-    println!("  Scanned {} manifests.", manifest_count);
-    println!("  Found {} active unique blobs.", active_blobs.len());
-
-    // 2. Sweep Phase: Scan CAS for unused blobs
-    println!("Scanning CAS {}...", cas_root.display());
-    let cas = CasStore::new(cas_root)?;
-
-    let mut garbage_count = 0;
-    let mut garbage_bytes = 0u64;
-    let mut kept_count = 0;
-
-    for blob_hash_res in cas.iter()? {
-        let blob_hash = blob_hash_res?;
-
-        if active_blobs.contains(&blob_hash) {
-            kept_count += 1;
-        } else {
-            // Garbage found!
-            // Get size for stats
-            let size = if let Some(path) = cas.blob_path_for_hash(&blob_hash) {
-                fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
-            } else {
-                0
-            };
-
-            garbage_count += 1;
-            garbage_bytes += size;
-
-            if verbose {
-                println!("  [GARBAGE] {}", CasStore::hash_to_hex(&blob_hash));
-            }
-
-            if delete {
-                if let Some(path) = cas.blob_path_for_hash(&blob_hash) {
-                    if let Err(e) = fs::remove_file(&path) {
-                        eprintln!("Failed to delete {}: {}", path.display(), e);
-                    }
-                }
-            }
-        }
-    }
-
-    println!("\nGC Summary:");
-    println!("  Active blobs:   {}", kept_count);
-    println!("  Garbage blobs:  {}", garbage_count);
-    println!("  Garbage size:   {}", format_bytes(garbage_bytes));
-
-    if !delete && garbage_count > 0 {
-        println!("\nRun with --delete to reclaim this space.");
-    }
-
-    Ok(())
-}
 
 /// Resolve dependencies from a lockfile
 fn cmd_resolve(cas_root: &Path, lockfile: &Path) -> Result<()> {
@@ -325,11 +201,6 @@ fn cmd_resolve(cas_root: &Path, lockfile: &Path) -> Result<()> {
     Ok(())
 }
 
-
-/// Mount the Velo filesystem (requires FUSE)
-fn cmd_mount(cas_root: &Path, manifest: &Path, mountpoint: &Path) -> Result<()> {
-    mount::run(cas_root, manifest, mountpoint)
-}
 
 /// Ingest a directory into the CAS and create a manifest
 async fn cmd_ingest(

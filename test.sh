@@ -238,6 +238,8 @@ if [ "$OS" == "Linux" ]; then
         exit 1
     fi
 
+
+
     # Cleanup
     kill $MOUNT_PID || true
     # Force unmount just in case
@@ -246,4 +248,48 @@ else
     echo "Skipping FUSE test on $OS (Linux only)"
 fi
 
+# 9. Test Garbage Collection
+echo "[*] Testing Garbage Collection..."
+# Create an orphan:
+# 1. Modify file1.txt content
+echo "New Content" > "$DATA_DIR/file1.txt"
+# 2. Ingest again (creates new blob, updates manifest, leaving old blob "Hello Velo" orphan)
+# Note: In a real scenario, we'd probably want to use a fresh manifest or update existing. 
+# `velo ingest` overwrites manifest by default.
+velo ingest "$DATA_DIR" --output "$MANIFEST" > /dev/null
+
+# 3. List blobs to find the orphan
+# "Hello Velo" hash is roughly known or we can just count.
+# Before: 5 files + 1 dir = 6 blobs.
+# Now: 5 files (1 changed) + 1 dir = 6 active blobs.
+# Total in CAS: 6 (original) + 1 (new content) + 1 (new dir Vnode? actually old dir struct might be reused if same mtime, but likely new) = ~8 blobs.
+# Let's trust GC output parsing.
+
+# Test Dry Run (Default)
+GC_OUT=$(velo gc --manifest "$MANIFEST")
+if echo "$GC_OUT" | grep -q "Can Delete"; then
+    echo "[PASS] GC Dry Run detected garbage."
+else
+    echo "ERROR: GC Dry Run failed to detect garbage."
+    echo "$GC_OUT"
+    exit 1
+fi
+
+if echo "$GC_OUT" | grep -q "DELETING"; then
+     echo "ERROR: GC Dry Run attempted deletion!"
+     exit 1
+fi
+
+# Test Actual Delete
+GC_OUT_DEL=$(velo gc --manifest "$MANIFEST" --delete)
+if echo "$GC_OUT_DEL" | grep -q "Deleted:"; then
+     echo "[PASS] GC Delete executed."
+else
+     echo "ERROR: GC Delete failed."
+     echo "$GC_OUT_DEL"
+     exit 1
+fi
+
 echo "=== All Tests Passed ==="
+
+

@@ -161,6 +161,19 @@ impl CasStore {
         self.blob_path(hash).exists()
     }
 
+    /// Delete a blob from the CAS.
+    pub fn delete(&self, hash: &Blake3Hash) -> Result<()> {
+        let path = self.blob_path(hash);
+        if path.exists() {
+            fs::remove_file(path)?;
+            Ok(())
+        } else {
+            Err(CasError::NotFound {
+                hash: Self::hash_to_hex(hash),
+            })
+        }
+    }
+
     /// Get the root path of the CAS.
     pub fn root(&self) -> &Path {
         &self.root
