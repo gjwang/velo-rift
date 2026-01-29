@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
+#[cfg(feature = "fuse")]
 use velo_cas::CasStore;
+#[cfg(feature = "fuse")]
 use velo_manifest::Manifest;
 
 /// Execute the mount command

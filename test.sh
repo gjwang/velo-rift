@@ -122,4 +122,50 @@ else
     # but strictly speaking this should pass in a pure container.
 fi
 
+# 8. Test FUSE Mount
+echo "[*] Testing FUSE Mount..."
+MOUNT_DIR="$TEST_DIR/mnt"
+mkdir -p "$MOUNT_DIR"
+
+# Run velo mount in background
+# (Checking if platform supports it)
+OS="$(uname -s)"
+if [ "$OS" == "Linux" ]; then
+    velo mount --manifest "$MANIFEST" "$MOUNT_DIR" > "$TEST_DIR/mount.log" 2>&1 &
+    MOUNT_PID=$!
+    echo "Mount PID: $MOUNT_PID"
+
+    # Wait for mount
+    sleep 2
+
+    if ! ps -p $MOUNT_PID > /dev/null; then
+        echo "ERROR: Mount process died."
+        cat "$TEST_DIR/mount.log"
+        exit 1
+    fi
+
+    # Check content
+    echo "Checking mount content..."
+    if [ -f "$MOUNT_DIR/file1.txt" ]; then
+       CONTENT=$(cat "$MOUNT_DIR/file1.txt")
+       if [ "$CONTENT" == "Hello Velo" ]; then
+           echo "[PASS] FUSE read verified."
+       else
+           echo "ERROR: Content mismatch in FUSE mount. Got: '$CONTENT'"
+           exit 1
+       fi
+    else
+       echo "ERROR: Virtual file not found in mount."
+       ls -R "$MOUNT_DIR"
+       exit 1
+    fi
+
+    # Cleanup
+    kill $MOUNT_PID || true
+    # Force unmount just in case
+    umount -l "$MOUNT_DIR" 2>/dev/null || true
+else
+    echo "Skipping FUSE test on $OS (Linux only)"
+fi
+
 echo "=== All Tests Passed ==="

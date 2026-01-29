@@ -32,14 +32,27 @@ RUN mkdir -p crates/velo-cli/src && echo "fn main() {}" > crates/velo-cli/src/ma
     mkdir -p crates/velo-ipc/src && echo "pub fn lib() {}" > crates/velo-ipc/src/lib.rs
 
 # Build dependencies (this layer will be cached unless Cargo.toml changes)
-RUN cargo build --release
+# Build dependencies (this layer will be cached unless Cargo.toml changes)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/workspace/target \
+    cargo build --release
 
 # 2. Copy actual source code
 COPY . .
 ENV CI=true
 
 # Touch main files to force rebuild of the app (but not deps)
+# Touch main files to force rebuild of the app (but not deps)
 RUN touch crates/velo-cli/src/main.rs crates/velo-daemon/src/main.rs crates/velo-shim/src/lib.rs
+
+# Build release binaries (with cache)
+# 1. Build everything standard
+# 2. Re-build velo-cli with FUSE support
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/workspace/target \
+    cargo build --release && \
+    cargo build --release -p velo-cli --features fuse && \
+    cp target/release/velo target/release/velo-daemon target/release/libvelo_shim.so .
 
 # Run tests
 CMD ["./test.sh"]

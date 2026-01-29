@@ -18,7 +18,7 @@ if [[ "$MODE" == "docker" ]]; then
     docker build -t velo-ci-e2e -f Dockerfile.ci .
 
     echo "[*] Running Test Suite in Docker..."
-    docker run --rm --privileged velo-ci-e2e
+    docker run --rm --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined velo-ci-e2e
 else
     # Host Mode (macOS/Linux)
     echo "[*] Running Test Suite on Host..."
