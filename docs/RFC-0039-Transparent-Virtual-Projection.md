@@ -278,7 +278,199 @@ Example: `abcdef12345...` -> `ab/cd/ef12345...`
 - **Debuggability**: Extensions allow direct inspection (`cat`, `open`, `objdump`) without metadata lookup.
 - **Example**: `ab/cd/ef12345..._1024.rs`
 
-## 7. Implementation Notes
+## 7. Persistence & Crash Recovery
+
+Velo Rift must survive restarts without losing file mappings or corrupting project state.
+
+### 7.1 Manifest Architecture (Dual-Layer)
+
+The Manifest is the **Single Source of Truth** for path → hash mappings. It uses a two-layer structure for optimal performance.
+
+#### Layer Structure
+
+| Layer | Content | Storage | Properties |
+|-------|---------|---------|------------|
+| **Base Layer** | System libs, registry deps | LMDB (shared mmap) | Immutable, O(1) lookup |
+| **Delta Layer** | Tenant modifications | DashMap (per-project) | Mutable, Copy-on-Write |
+
+```rust
+struct ManifestLookup {
+    base: LmdbManifest,                           // Global, shared
+    delta: DashMap<PathBuf, DeltaEntry>,          // Per-project
+}
+
+enum DeltaEntry {
+    Modified(ManifestEntry),   // Points to new hash
+    Deleted,                   // Whiteout marker
+}
+
+struct ManifestEntry {
+    hash: Hash,
+    tier: Tier,
+    original_mode: u32,
+    ingest_time: u64,
+}
+```
+
+#### Lookup Algorithm
+
+```rust
+fn lookup(&self, path: &Path) -> Option<ManifestEntry> {
+    // 1. Check Delta Layer (project modifications)
+    if let Some(entry) = self.delta.get(path) {
+        return match entry.value() {
+            DeltaEntry::Modified(e) => Some(e.clone()),
+            DeltaEntry::Deleted => None,  // Whiteout
+        };
+    }
+    // 2. Check Base Layer (shared packages)
+    self.base.get(path)
+}
+```
+
+### 7.1.1 Storage Backend: LMDB
+
+**Why LMDB over JSON**:
+
+| Dimension | JSON | LMDB |
+|-----------|------|------|
+| Read | O(n) parse | **O(1) mmap** |
+| Write | O(n) serialize | **O(1) incremental** |
+| Concurrency | Exclusive | **MVCC (readers never block)** |
+| Crash Safety | Atomic rename | **ACID transactions** |
+| Memory | Full load | **Lazy mmap** |
+
+**Implementation**:
+
+```rust
+pub struct LmdbManifest {
+    env: heed::Env,
+    entries: Database<Str, SerdeBincode<ManifestEntry>>,
+}
+
+impl LmdbManifest {
+    fn open(path: &Path) -> Result<Self> {
+        let env = heed::EnvOpenOptions::new()
+            .map_size(1 << 30)  // 1GB max
+            .open(path)?;
+        let entries = env.create_database(Some("manifest"))?;
+        Ok(Self { env, entries })
+    }
+
+    fn get(&self, path: &Path) -> Option<ManifestEntry> {
+        let rtxn = self.env.read_txn().ok()?;
+        self.entries.get(&rtxn, path.to_str()?).ok().flatten()
+    }
+
+    fn put(&self, path: &Path, entry: &ManifestEntry) -> Result<()> {
+        let mut wtxn = self.env.write_txn()?;
+        self.entries.put(&mut wtxn, path.to_str()?, entry)?;
+        wtxn.commit()
+    }
+}
+```
+
+**Storage Location**: `.vrift/manifest.lmdb` (per-project)
+
+### 7.2 Startup Recovery
+
+On `vrift active` or daemon restart:
+
+```rust
+fn startup_recovery() -> Result<()> {
+    let manifest = Manifest::load()?;
+
+    for (path, entry) in &manifest.entries {
+        match entry.tier {
+            Tier::Tier1 => validate_tier1(path, entry)?,
+            Tier::Tier2 => validate_tier2(path, entry)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_tier1(path: &Path, entry: &ManifestEntry) -> Result<()> {
+    // Tier-1: Source should be symlink → CAS
+    if !path.is_symlink() {
+        // Restore symlink
+        symlink(get_cas_path(&entry.hash), path)?;
+    }
+    Ok(())
+}
+
+fn validate_tier2(path: &Path, entry: &ManifestEntry) -> Result<()> {
+    // Tier-2: Source should be hardlink to CAS (same inode)
+    let source_ino = fs::metadata(path)?.ino();
+    let cas_ino = fs::metadata(get_cas_path(&entry.hash))?.ino();
+    if source_ino != cas_ino {
+        // Hardlink broken, re-establish or warn
+        warn!("Tier-2 link broken for {:?}, re-ingesting", path);
+        ingest_mutable(path)?;
+    }
+    Ok(())
+}
+```
+
+### 7.3 Phantom Mode Recovery
+
+In Phantom Mode, source files are **moved** to CAS. On restart, paths may appear empty.
+
+```rust
+fn restore_phantom_projections(manifest: &Manifest) -> Result<()> {
+    for (path, entry) in manifest.phantom_entries() {
+        if !path.exists() {
+            // Restore visibility via symlink (lightweight)
+            // or FUSE mount (full fidelity)
+            symlink(get_cas_path(&entry.hash), path)?;
+        }
+    }
+    Ok(())
+}
+```
+
+### 7.4 Crash Recovery Matrix
+
+| Scenario | Detection | Recovery |
+|----------|-----------|----------|
+| **Clean shutdown** | Manifest valid | Normal startup |
+| **Manifest missing** | File not found | Scan CAS, rebuild from symlinks |
+| **Manifest corrupted** | Parse error | Restore from `.vrift/manifest.json.bak` |
+| **CAS entry missing** | Hash lookup fails | Remove from Manifest, warn user |
+| **Orphan CAS entries** | Not in any Manifest | GC candidates |
+
+### 7.5 Durability Guarantees
+
+| State | Durability | Recovery |
+|-------|------------|----------|
+| **Manifest** | Persisted atomically | Load from disk |
+| **Tier-1 symlinks** | Filesystem durable | Self-describing |
+| **Tier-2 hardlinks** | Filesystem durable | Verifiable via inode |
+| **CAS entries** | Filesystem durable | Content-addressable |
+
+### 7.6 WAL (Optional Enhancement)
+
+For high-frequency ingest scenarios, a Write-Ahead Log reduces fsync overhead:
+
+```rust
+fn ingest_with_wal(source: &Path) -> Result<()> {
+    let hash = blake3::hash_file(source)?;
+    
+    // Step 1: Append to WAL (fast, sequential write)
+    wal.append(WalEntry::Ingest { path: source, hash })?;
+    
+    // Step 2: Perform ingest
+    do_ingest(source, hash)?;
+    
+    // Step 3: Checkpoint WAL → Manifest periodically
+    if wal.size() > CHECKPOINT_THRESHOLD {
+        manifest.merge_wal(&wal)?;
+        wal.truncate()?;
+    }
+    Ok(())
+}
+```
+
+## 8. Implementation Notes
 - **Persistent State**: `vrift active` creates a long-lived Session.
 - **ABI Continuity**: The Session persists the **ABI_Context**, ensuring that a long-running development environment remains binary-consistent.
 - **Shim Performance**: Shadow capturing avoids the latency of synchronous hashing during small `write()` calls by deferring the ingest until `close()`.
