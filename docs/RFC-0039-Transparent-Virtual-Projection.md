@@ -86,7 +86,36 @@ fn ingest_phantom(source: Path) -> Result<()> {
 }
 ```
 
-## 6. Implementation Notes
+## 6. CAS Directory Structure (The Source)
+Velo Rift™ uses a sharded directory structure to optimize for filesystem performance and debuggability.
+
+### 6.1 Path Logic
+The CAS root resides at `VR_THE_SOURCE` (default: `~/.vrift/the_source`).
+
+**Structure:**
+```text
+the_source/
+  └── blake3/              <-- Algorithm Namespace
+       ├── ab/             <-- Shard L1 (Byte 0)
+       │   └── cd/         <-- Shard L2 (Byte 1)
+       │       └── efgh..._[Size].[Ext]  <-- Artifact (Remaining Hash)
+```
+
+### 6.2 Naming Convention
+Artifacts utilize a "Self-Describing" filename format:
+`[Remaining_Hash]_[Size_in_Bytes].[Original_Extension]`
+
+**Reconstruction:**
+`Full_Hash = Shard_L1 + Shard_L2 + Remaining_Hash`
+Example: `abcdef12345...` -> `ab/cd/ef12345...`
+
+**Benefits:**
+- **Sharding**: Prevents directory inode exhaustion (billions of files).
+- **Integrity Check**: `stat()` size matches filename size (O(1) corrupt check).
+- **Debuggability**: Extensions allow direct inspection (`cat`, `open`, `objdump`) without metadata lookup.
+- **Example**: `ab/cd/ef12345..._1024.rs`
+
+## 7. Implementation Notes
 - **Persistent State**: `vrift active` creates a long-lived Session.
 - **ABI Continuity**: The Session persists the **ABI_Context**, ensuring that a long-running development environment remains binary-consistent.
 - **Shim Performance**: Shadow capturing avoids the latency of synchronous hashing during small `write()` calls by deferring the ingest until `close()`.
