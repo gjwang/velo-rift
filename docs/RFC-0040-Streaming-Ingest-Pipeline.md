@@ -42,6 +42,191 @@
 
 ---
 
+## True Ring Buffer (Zero Allocation)
+
+Replace `crossbeam-channel` with a pre-allocated ring buffer for zero heap allocation during ingest:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              Pre-allocated Ring Buffer (Fixed Slots)                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐            │
+│  │  0  │  1  │  2  │  3  │  4  │  5  │  6  │  7  │ ... │ N-1 │ ← slots    │
+│  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘            │
+│       ↑                               ↑                                     │
+│      tail                            head                                   │
+│    (consumer)                      (producer)                               │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  PathSlot Structure (fixed 512 bytes per slot)                      │   │
+│  │  ┌──────────────────────────────────────────────────────────────┐   │   │
+│  │  │ state: AtomicU8 (Empty=0, Writing=1, Ready=2, Reading=3)     │   │   │
+│  │  │ path_len: u16                                                 │   │   │
+│  │  │ file_size: u64                                                │   │   │
+│  │  │ path_buf: [u8; 496]   ← inline path (covers 99% of cases)     │   │   │
+│  │  │ overflow: Option<Box<[u8]>>  ← heap fallback for long paths   │   │   │
+│  │  └──────────────────────────────────────────────────────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Backpressure: Producer spins/waits when (head + 1) % N == tail             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Long Path Handling Strategy
+
+| Approach | Description | Trade-off |
+|----------|-------------|-----------|
+| **Inline (default)** | Paths ≤ 496 bytes stored in slot | Zero allocation |
+| **Overflow heap** | Paths > 496 bytes use `Box<[u8]>` | Rare allocation |
+| **Truncate** | Hash the path, store hash | Lose path info |
+
+**Recommended: Inline + Overflow**
+
+```rust
+const PATH_INLINE_SIZE: usize = 496;  // Covers 99%+ of real paths
+const RING_SIZE: usize = 1024;        // Number of slots
+
+#[repr(C, align(64))]  // Cache-line aligned
+struct PathSlot {
+    state: AtomicU8,           // 1 byte
+    _pad1: [u8; 7],            // alignment
+    path_len: u16,             // 2 bytes
+    _pad2: [u8; 6],            // alignment
+    file_size: u64,            // 8 bytes
+    path_buf: [u8; PATH_INLINE_SIZE],  // 496 bytes (inline path)
+    overflow: AtomicPtr<u8>,   // 8 bytes (pointer to heap for long paths)
+}
+
+impl PathSlot {
+    fn set_path(&mut self, path: &Path) {
+        let bytes = path.as_os_str().as_bytes();
+        self.path_len = bytes.len() as u16;
+        
+        if bytes.len() <= PATH_INLINE_SIZE {
+            // Fast path: inline
+            self.path_buf[..bytes.len()].copy_from_slice(bytes);
+            self.overflow.store(std::ptr::null_mut(), Ordering::Release);
+        } else {
+            // Slow path: heap allocation (rare)
+            let boxed = bytes.to_vec().into_boxed_slice();
+            let ptr = Box::into_raw(boxed) as *mut u8;
+            self.overflow.store(ptr, Ordering::Release);
+        }
+    }
+    
+    fn get_path(&self) -> PathBuf {
+        let ptr = self.overflow.load(Ordering::Acquire);
+        if ptr.is_null() {
+            // Inline path
+            let bytes = &self.path_buf[..self.path_len as usize];
+            PathBuf::from(OsStr::from_bytes(bytes))
+        } else {
+            // Overflow path
+            let bytes = unsafe { 
+                std::slice::from_raw_parts(ptr, self.path_len as usize) 
+            };
+            PathBuf::from(OsStr::from_bytes(bytes))
+        }
+    }
+}
+
+struct PathRingBuffer {
+    slots: Box<[PathSlot; RING_SIZE]>,
+    head: AtomicUsize,  // Producer writes here
+    tail: AtomicUsize,  // Consumer reads here
+}
+
+impl PathRingBuffer {
+    /// Producer: write path to ring (blocks if full)
+    fn push(&self, path: &Path, size: u64) {
+        loop {
+            let head = self.head.load(Ordering::Acquire);
+            let tail = self.tail.load(Ordering::Acquire);
+            
+            // Backpressure: ring is full
+            if (head + 1) % RING_SIZE == tail {
+                std::hint::spin_loop();
+                continue;
+            }
+            
+            let slot = &self.slots[head];
+            
+            // Wait for slot to be empty
+            while slot.state.load(Ordering::Acquire) != State::Empty {
+                std::hint::spin_loop();
+            }
+            
+            // Write to slot
+            unsafe { 
+                let slot_mut = &mut *(slot as *const _ as *mut PathSlot);
+                slot_mut.set_path(path);
+                slot_mut.file_size = size;
+            }
+            
+            slot.state.store(State::Ready, Ordering::Release);
+            self.head.store((head + 1) % RING_SIZE, Ordering::Release);
+            break;
+        }
+    }
+    
+    /// Consumer: read path from ring (blocks if empty)
+    fn pop(&self) -> Option<(PathBuf, u64)> {
+        let tail = self.tail.load(Ordering::Acquire);
+        let head = self.head.load(Ordering::Acquire);
+        
+        // Ring is empty
+        if tail == head {
+            return None;
+        }
+        
+        let slot = &self.slots[tail];
+        
+        // Wait for slot to be ready
+        while slot.state.load(Ordering::Acquire) != State::Ready {
+            std::hint::spin_loop();
+        }
+        
+        let path = slot.get_path();
+        let size = slot.file_size;
+        
+        // Free overflow if any
+        let ptr = slot.overflow.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        if !ptr.is_null() {
+            unsafe { 
+                let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+                    ptr, slot.path_len as usize
+                )); 
+            }
+        }
+        
+        slot.state.store(State::Empty, Ordering::Release);
+        self.tail.store((tail + 1) % RING_SIZE, Ordering::Release);
+        
+        Some((path, size))
+    }
+}
+```
+
+### Memory Layout
+
+| Slots | Slot Size | Total Memory |
+|-------|-----------|--------------|
+| 1024 | 512 bytes | 512 KB |
+| 4096 | 512 bytes | 2 MB |
+| 16384 | 512 bytes | 8 MB |
+
+**Benefits:**
+- Zero heap allocation for 99%+ of paths
+- Natural backpressure via ring fullness
+- Cache-friendly: 64-byte aligned slots
+- Lock-free: atomic state transitions
+
+---
+
+---
+
 ## Stage 1: Watch-First Scanner
 
 ```rust
