@@ -23,7 +23,8 @@ mod mount;
 mod active;
 pub mod gc;
 
-use vrift_cas::{create_backend, CasStore};
+use vrift_cas::{create_backend, ingest_phantom, ingest_solid_tier1, ingest_solid_tier2, CasStore};
+use vrift_manifest::lmdb::{AssetTier, LmdbManifest};
 use vrift_manifest::{Manifest, VnodeEntry};
 
 /// Velo Rift™ - Content-Addressable Virtual Filesystem (Powered by VeloVFS)
@@ -41,7 +42,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Import files from a directory into the CAS
+    /// Import files from a directory into the CAS (RFC-0039 Zero-Copy)
     Ingest {
         /// Directory to ingest
         #[arg(value_name = "DIR")]
@@ -58,6 +59,14 @@ enum Commands {
         /// Enable parallel file ingestion for better performance
         #[arg(long, default_value = "true")]
         parallel: bool,
+
+        /// Ingest mode: solid (hard_link, preserves source) or phantom (rename, moves to CAS)
+        #[arg(long, default_value = "solid")]
+        mode: String,
+
+        /// Asset tier for solid mode: tier1 (immutable, symlink) or tier2 (mutable, keep original)
+        #[arg(long, default_value = "tier2")]
+        tier: String,
     },
 
     /// Execute a command with VeloVFS virtualization
@@ -193,7 +202,9 @@ async fn async_main(cli: Cli) -> Result<()> {
             output,
             prefix,
             parallel,
-        } => cmd_ingest(&cli.cas_root, &directory, &output, prefix.as_deref(), parallel).await,
+            mode,
+            tier,
+        } => cmd_ingest(&cli.cas_root, &directory, &output, prefix.as_deref(), parallel, &mode, &tier).await,
         Commands::Run {
             manifest,
             command,
@@ -285,14 +296,15 @@ fn cmd_resolve(cas_root: &Path, lockfile: &Path) -> Result<()> {
     Ok(())
 }
 
-
-/// Ingest a directory into the CAS and create a manifest
+/// Ingest a directory into the CAS using zero-copy operations (RFC-0039)
 async fn cmd_ingest(
     cas_root: &Path,
     directory: &Path,
     output: &Path,
     prefix: Option<&str>,
     parallel: bool,
+    mode: &str,
+    tier: &str,
 ) -> Result<()> {
     // Validate input directory
     if !directory.exists() {
@@ -302,19 +314,45 @@ async fn cmd_ingest(
         anyhow::bail!("Not a directory: {}", directory.display());
     }
 
-    // Initialize CAS store
-    let cas = CasStore::new(cas_root)
+    // Parse mode and tier
+    let is_phantom = mode.to_lowercase() == "phantom";
+    let is_tier1 = tier.to_lowercase() == "tier1";
+    let asset_tier = if is_tier1 {
+        AssetTier::Tier1Immutable
+    } else {
+        AssetTier::Tier2Mutable
+    };
+
+    // Resolve CAS root (expand ~)
+    let cas_root = if cas_root.starts_with("~") {
+        dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot resolve home directory"))?
+            .join(cas_root.strip_prefix("~").unwrap_or(cas_root))
+    } else {
+        cas_root.to_path_buf()
+    };
+    std::fs::create_dir_all(&cas_root)?;
+
+    // Initialize CAS store (still needed for legacy manifest + stats)
+    let cas = CasStore::new(&cas_root)
         .with_context(|| format!("Failed to initialize CAS at {}", cas_root.display()))?;
 
-    // Select I/O backend based on parallel flag
-    let backend = if parallel {
-        let b = create_backend();
-        println!("Using {} for parallel ingestion", b.name());
-        Some(b)
+    // Initialize LMDB manifest in project's .vrift directory
+    let vrift_dir = directory.join(".vrift");
+    std::fs::create_dir_all(&vrift_dir)?;
+    let lmdb_manifest = LmdbManifest::open(vrift_dir.join("manifest.lmdb"))
+        .with_context(|| "Failed to open LMDB manifest")?;
+
+    // Mode banner
+    let mode_str = if is_phantom {
+        "Phantom (rename → CAS)"
+    } else if is_tier1 {
+        "Solid Tier-1 (hard_link + symlink)"
     } else {
-        println!("Using serial ingestion mode");
-        None
+        "Solid Tier-2 (hard_link, keep original)"
     };
+    println!("Zero-Copy Ingest: {} mode", mode_str);
+    println!("CAS Root: {}", cas_root.display());
 
     // Determine path prefix
     let base_prefix = prefix.unwrap_or_else(|| {
@@ -324,16 +362,29 @@ async fn cmd_ingest(
             .unwrap_or("root")
     });
 
+    // Legacy bincode manifest (for backwards compatibility)
     let mut manifest = Manifest::new();
     let mut files_ingested = 0u64;
     let mut bytes_ingested = 0u64;
     let mut unique_blobs = 0u64;
+    let mut fallback_count = 0u64;
 
     println!("Ingesting {} into CAS...", directory.display());
 
-    for entry in WalkDir::new(directory).into_iter().filter_map(|e| e.ok()) {
+    // Collect files first for parallel processing
+    let entries: Vec<_> = WalkDir::new(directory)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .collect();
+
+    for entry in &entries {
         let path = entry.path();
         let relative = path.strip_prefix(directory).unwrap_or(path);
+
+        // Skip .vrift directory
+        if relative.starts_with(".vrift") {
+            continue;
+        }
 
         // Build manifest path
         let manifest_path = if relative.as_os_str().is_empty() {
@@ -352,51 +403,79 @@ async fn cmd_ingest(
 
         if metadata.is_dir() {
             let vnode = VnodeEntry::new_directory(mtime, metadata.mode());
-            manifest.insert(&manifest_path, vnode);
+            manifest.insert(&manifest_path, vnode.clone());
+            lmdb_manifest.insert(&manifest_path, vnode, asset_tier);
         } else if metadata.is_file() {
-            // Store file content in CAS
-            let content = fs::read(path)
-                .with_context(|| format!("Failed to read file: {}", path.display()))?;
-            
-            let hash = CasStore::compute_hash(&content);
-            let size = content.len() as u64;
+            // Zero-copy ingest based on mode
+            let result = if is_phantom {
+                ingest_phantom(path, &cas_root)
+            } else if is_tier1 {
+                ingest_solid_tier1(path, &cas_root)
+            } else {
+                ingest_solid_tier2(path, &cas_root)
+            };
 
-            // Daemon-First Query: Check if we already have this blob (in memory index)
-            let exists_in_daemon = daemon::check_blob(hash).await.unwrap_or(false);
+            match result {
+                Ok(ingest_result) => {
+                    let vnode = VnodeEntry::new_file(
+                        ingest_result.hash,
+                        ingest_result.size,
+                        mtime,
+                        metadata.mode(),
+                    );
+                    manifest.insert(&manifest_path, vnode.clone());
+                    lmdb_manifest.insert(&manifest_path, vnode, asset_tier);
 
-            if !exists_in_daemon {
-                let was_new = !cas.exists(&hash);
-                cas.store(&content)?;
+                    files_ingested += 1;
+                    bytes_ingested += ingest_result.size;
+                    unique_blobs += 1; // For zero-copy, each file creates a CAS entry
+                }
+                Err(e) => {
+                    // Check for cross-device error (EXDEV)
+                    if let vrift_cas::CasError::Io(ref io_err) = e {
+                        if io_err.raw_os_error() == Some(libc::EXDEV) {
+                            // Fallback to traditional copy
+                            let content = fs::read(path)
+                                .with_context(|| format!("Fallback read failed: {}", path.display()))?;
+                            let hash = CasStore::compute_hash(&content);
+                            let size = content.len() as u64;
+                            cas.store(&content)?;
 
-                if was_new {
-                    unique_blobs += 1;
-                    let _ = daemon::notify_blob(hash, size).await;
+                            let vnode = VnodeEntry::new_file(hash, size, mtime, metadata.mode());
+                            manifest.insert(&manifest_path, vnode.clone());
+                            lmdb_manifest.insert(&manifest_path, vnode, asset_tier);
+
+                            files_ingested += 1;
+                            bytes_ingested += size;
+                            fallback_count += 1;
+                            continue;
+                        }
+                    }
+                    return Err(e).with_context(|| format!("Failed to ingest: {}", path.display()));
                 }
             }
-
-            let vnode = VnodeEntry::new_file(hash, size, mtime, metadata.mode());
-            manifest.insert(&manifest_path, vnode);
-
-            files_ingested += 1;
-            bytes_ingested += size;
         } else if metadata.is_symlink() {
             let target = fs::read_link(path)?;
             let target_str = target.to_str().ok_or_else(|| {
                 anyhow::anyhow!("Non-UTF8 symlink target: {}", path.display())
             })?;
-            
+
             let content = target_str.as_bytes();
             let hash = CasStore::compute_hash(content);
-            
+
             // Store symlink target string as a blob in CAS
             cas.store(content)?;
-            
+
             let vnode = VnodeEntry::new_symlink(hash, content.len() as u64, mtime);
-            manifest.insert(&manifest_path, vnode);
+            manifest.insert(&manifest_path, vnode.clone());
+            lmdb_manifest.insert(&manifest_path, vnode, asset_tier);
         }
     }
 
-    // Save manifest
+    // Commit LMDB manifest
+    lmdb_manifest.commit().with_context(|| "Failed to commit LMDB manifest")?;
+
+    // Save legacy bincode manifest
     manifest
         .save(output)
         .with_context(|| format!("Failed to save manifest to {}", output.display()))?;
@@ -408,15 +487,20 @@ async fn cmd_ingest(
         0.0
     };
 
-    println!("\n✓ Ingestion complete");
+    println!("\n✓ Zero-Copy Ingestion complete");
+    println!("  Mode:        {}", mode_str);
     println!("  Files:       {}", stats.file_count);
     println!("  Directories: {}", stats.dir_count);
-    println!("  Total size:  {} bytes", format_bytes(bytes_ingested));
+    println!("  Total size:  {}", format_bytes(bytes_ingested));
     println!(
         "  Unique blobs: {} ({:.1}% dedup)",
         unique_blobs, dedup_ratio
     );
+    if fallback_count > 0 {
+        println!("  Fallbacks:   {} (cross-device)", fallback_count);
+    }
     println!("  Manifest:    {}", output.display());
+    println!("  LMDB:        {}", vrift_dir.join("manifest.lmdb").display());
 
     Ok(())
 }
@@ -701,7 +785,7 @@ async fn cmd_watch(cas_root: &Path, directory: &Path, output: &Path) -> Result<(
 
     // Initial ingest
     println!("\n[Initial Scan]");
-    cmd_ingest(cas_root, directory, output, None, true).await?;
+    cmd_ingest(cas_root, directory, output, None, true, "solid", "tier2").await?;
 
     // Create a channel to receive the events.
     let (tx, rx) = channel();
@@ -733,7 +817,7 @@ async fn cmd_watch(cas_root: &Path, directory: &Path, output: &Path) -> Result<(
                         // Simple debounce
                         if last_ingest.elapsed() > debounce_duration {
                             println!("\n[Change Detected] Re-ingesting...");
-                            if let Err(e) = cmd_ingest(cas_root, directory, output, None, true).await {
+                            if let Err(e) = cmd_ingest(cas_root, directory, output, None, true, "solid", "tier2").await {
                                 eprintln!("Ingest failed: {}", e);
                             }
                             last_ingest = std::time::Instant::now();
