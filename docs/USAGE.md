@@ -1,99 +1,98 @@
 # Velo Rift™: Comprehensive Usage Guide
 
-Velo Rift is a high-performance **data virtualization layer** designed for the AI-native era. Unlike traditional filesystems or containers, Velo Rift decouples "where a file lives" from "what a file contains."
+Velo Rift is a high-performance **data virtualization layer** designed for the AI-native era. It decouples "where a file lives" from "what a file contains," allowing you to run applications in virtualized environments with zero overhead.
 
 ---
 
-## 1. Core Principles & Why Velo?
+## 🚀 Quick Start (Zero-Config)
 
-### 🧠 The Core Equation: `Hash(Content) = Identity`
-In a traditional filesystem, path identity is tied to location. In Velo, identity is tied to **Content**.
+The fastest way to experience Velo Rift™ is to just run your code. No manual ingestion or manifest setup required.
 
-*   **Global Deduplication (CAS)**: If 100 projects use the same `libpython.so`, Velo Rift stores only **one** physical copy on disk in **TheSource**.
-*   **Zero-Copy Virtualization**: We don't "copy" environments; we "project" them. Whether using links or syscall interception, we provide a virtual view of data that is physically shared.
-*   **Absolute Determinism**: A Velo Rift Manifest (`.velo`) uniquely defines an entire environment. If the manifest hash is the same, the execution outcome is guaranteed to be reproducible across any machine.
-
----
-
-## 2. Two Ways Velo Rift Runs Your Code
-
-Velo Rift provides two distinct mechanisms to "project" your virtual environment into the real world.
-
-### A. Link Farm (The Physical Mirage) —— **Recommended for Isolation**
-Velo Rift creates a temporary directory structure filled with **Hard Links** back to the global CAS store (**TheSource**).
--   **When to use**: Rootless Linux containers, sandboxed execution, and when running statically linked binaries (Go, Rust).
--   **Pros**: 100% Native performance (Kernel handles it), compatible with all languages, enables OverlayFS layering.
--   **Cons**: Minor overhead of creating file inodes in a temporary path.
-
-### B. The Shim Interception (The Invisible Mirage) —— **Recommended for Local Dev**
-Velo Rift uses `LD_PRELOAD` to inject a small library (`velo-shim`) into your process, intercepting filesystem calls like `open()` and `stat()`.
--   **When to use**: MacOS development, rapid local testing, and when you want **zero** physical traces on the disk.
--   **Pros**: Instantaneous (no directory to create), no disk footprint.
--   **Cons**: Only works for dynamically linked programs; slight overhead on every syscall.
-
----
-
-## 3. Usage Modes & Scenarios
-
-### Mode 1: Local Development Acceleration
-**Scenario**: You have 10 separate AI projects sharing 90% of their dependencies (PyTorch, Transformers).
--   **Action**: Ingest shared dependencies once.
--   **Benefit**: Save 10x disk space; environments start in milliseconds.
--   **Command**:
-    ```bash
-    # Run locally with Shim interception
-    vrift run --manifest project.velo -- python main.py
-    ```
-
-### Mode 2: Secure Sandbox (Multi-Tenant)
-**Scenario**: Running untrusted code or a multi-user build platform.
--   **Action**: Use the Linux Namespace sandbox and project an isolated rootfs.
--   **Benefit**: Strong security (Rootless/Unprivileged), private modifiable layers (OverlayFS).
--   **Command**:
-    ```bash
-    # Prepare base tools (one time)
-    ./scripts/setup_busybox.sh
-    # Run in isolated sandbox (Mode A)
-    vrift run --isolate --base busybox.manifest --manifest app.velo -- /bin/sh -c "id -u"
-    ```
-
-### Mode 3: Reproducible CI/CD
-**Scenario**: You need to ensure the test environment on the CI runner is *exactly* the same as your local machine.
--   **Action**: Pass the Manifest file between nodes.
--   **Benefit**: "Hash-verified" consistency. No more "it works on my machine" bugs.
--   **Command**:
-    ```bash
-    vrift run --manifest release_v1.0.velo -- ./test_suite.sh
-    ```
-
----
-
-## 4. Comparison Summary
-
-| Feature | **Link Farm (Mode A)** | **Shim Interception (Mode B)** |
-| :--- | :--- | :--- |
-| **Sandbox Support** | Full (OverlayFS Compatible) | Minimal |
-| **Binary Compatibility** | **All binaries** (Static & Dynamic) | Dynamic only (No Go/Static Rust) |
-| **Performance** | Native | ~1-2% Syscall Overhead |
-| **Setup Cost** | Low (O(N) Link Creation) | **Zero (O(1))** |
-| **Primary Platform** | Linux (for isolation) | macOS / Linux |
-
----
-
-## 5. Standard Workflow
-
-### 1. Ingestion
-Take any folder and make it "Velo-native."
+In any project directory (Python, Node.js, or Rust):
 ```bash
-vrift ingest ./my_project --output vrift.manifest
+# Just run your command. Velo Rift™ will auto-detect your project.
+vrift run -- python3 main.py
+```
+Velo Rift™ will perform a **Transient Ingest** on the fly, creating a temporary virtual view of your project and executing it immediately.
+
+---
+
+## 🛠 Step 1: Project Initialization
+
+For professional projects, you may want a persistent configuration with custom filters (e.g., ignoring `node_modules` or `target/`).
+
+```bash
+# Run in your project root
+vrift init
+```
+*   **What it does**: Detects your project type (Cargo, npm, Pip) and creates a `vrift.manifest`.
+*   **Why use it**: It applies smart **LifeCode™ filters** to ensure only source code is virtualized, keeping your environment lean.
+
+---
+
+## 🏃 Step 2: Virtual Execution
+
+Once you have a manifest (or even if you don't), use `vrift run` to execute code inside the **VeloVFS** layer.
+
+### Basic Run
+```bash
+vrift run -- <command>
 ```
 
-### 2. Execution
-Run it using your preferred mode as described above.
-
-### 3. Maintenance
-Check your savings and clean up old versions.
+### Manual Manifest Selection
+If you have multiple manifests (e.g., for different environment versions):
 ```bash
-vrift status    # Monitor CAS health and dedup ratio
-vrift gc --delete # Cleanup orphaned blobs
+vrift run --manifest environments/stable.manifest -- ./deploy.sh
 ```
+
+---
+
+## 🛡 Step 3: Advanced Isolation (Linux Only)
+
+For multi-tenant environments or security-critical tasks, Velo Rift™ supports **Rootless Isolation** using Linux Namespaces.
+
+### Isolated Sandbox
+```bash
+vrift run --isolate -- python3 malicious_script.py
+```
+
+### Layered Manifests (Base Images)
+You can stack manifests to create a layered environment (similar to Docker layers but without the performance penalty):
+```bash
+# Run app.manifest on top of a static busybox toolchain
+vrift run --isolate --base busybox.manifest --manifest app.manifest -- /bin/sh
+```
+
+---
+
+## 📊 Step 4: Maintenance & Optimization
+
+### Monitor Savings
+Velo Rift™ provides global deduplication. See how much disk space you're saving across all projects:
+```bash
+vrift status
+```
+
+### Garbage Collection
+Cleanup blobs that are no longer referenced by any manifest:
+```bash
+# Perform a dry run first
+vrift gc
+# Actually delete orphaned data
+vrift gc --delete
+```
+
+---
+
+## 🧠 Under the Hood: Principles
+
+### 1. Hash(Content) = Identity
+In Velo, identity is tied to **Content**, not path. If 100 projects use the same `libpython.so`, Velo Rift stores only **one** copy in **TheSource** (CAS).
+
+### 2. Two Projection Modes
+Velo Rift chooses the best way to "project" the virtual world based on your OS:
+*   **The Shim (macOS/Linux)**: Uses `LD_PRELOAD` to intercept syscalls. Zero disk footprint. Best for local development.
+*   **Link Farm (Linux Isolation)**: Creates a temporary directory of hardlinks. Best for containers and static binaries.
+
+### 3. Absolute Determinism
+A `vrift.manifest` uniquely defines an entire environment. If the manifest hash is the same, the execution outcome is guaranteed to be reproducible.
