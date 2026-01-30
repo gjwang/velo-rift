@@ -239,9 +239,19 @@ fn ingest_phantom(source: Path) -> Result<()> {
 To ensure `VFS[path]` always returns the correct version, even during concurrent ingest:
 
 **Ingest Lock Mechanism:**
-- Each `ingest_solid()` call holds an **Ingest Lock** on the source path.
+
+> [!IMPORTANT]
+> **Ingest Lock = `flock(LOCK_SH)`** (shared read lock)
+>
+> **Purpose**: Prevent external writes during read, ensuring `hash(content) == content`.
+>
+> Without this lock, external programs could modify the file while we are reading,
+> causing the computed hash to not match the actual content (violates P0-a).
+
+- Each `ingest_solid()` call holds a shared lock (`flock(LOCK_SH)`) on the source file.
 - Lock is acquired BEFORE snapshot, released AFTER Manifest update.
-- This ensures: _"If Manifest says H, then CAS[H] is already committed."_
+- External writers are blocked while lock is held.
+- This ensures: _"If Manifest says H, then CAS[H] is already committed and H == hash(content)."_
 
 **VFS Read Priority:**
 ```rust
