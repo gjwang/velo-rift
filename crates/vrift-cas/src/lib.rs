@@ -265,6 +265,169 @@ impl CasStore {
             None
         }
     }
+
+    // ========================================================================
+    // Tiered Ingest Functions (RFC-0039)
+    // ========================================================================
+
+    /// Store data and create a symlink projection (Tier-1 Immutable).
+    ///
+    /// For immutable assets like registry deps or toolchains:
+    /// 1. Store content in CAS
+    /// 2. Create symlink from target_path → CAS blob
+    /// 3. (Linux only) Set immutable flag on CAS blob
+    ///
+    /// This provides zero-overhead VFS bypass for reads.
+    #[cfg(unix)]
+    pub fn store_and_link_immutable<P: AsRef<Path>>(
+        &self,
+        data: &[u8],
+        target_path: P,
+    ) -> Result<Blake3Hash> {
+        use std::os::unix::fs::symlink;
+
+        let hash = self.store(data)?;
+        let cas_path = self.blob_path(&hash);
+        let target = target_path.as_ref();
+
+        // Remove existing file/symlink if present
+        if target.exists() || target.symlink_metadata().is_ok() {
+            fs::remove_file(target).ok();
+        }
+
+        // Create parent directories
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Create symlink: target → CAS blob
+        symlink(&cas_path, target)?;
+
+        // (Linux) Try to set immutable flag on CAS blob (requires root)
+        #[cfg(target_os = "linux")]
+        {
+            Self::set_immutable_flag(&cas_path).ok(); // Best effort
+        }
+
+        Ok(hash)
+    }
+
+    /// Store data and create a hardlink projection (Tier-2 Mutable).
+    ///
+    /// For mutable assets like build outputs:
+    /// 1. Store content in CAS
+    /// 2. Create hardlink from target_path → CAS blob
+    /// 3. Set read-only permissions (chmod 444)
+    ///
+    /// Writes trigger Break-Before-Write in the VFS shim.
+    #[cfg(unix)]
+    pub fn store_and_link_mutable<P: AsRef<Path>>(
+        &self,
+        data: &[u8],
+        target_path: P,
+    ) -> Result<Blake3Hash> {
+        let hash = self.store(data)?;
+        let cas_path = self.blob_path(&hash);
+        let target = target_path.as_ref();
+
+        // Remove existing file if present
+        if target.exists() {
+            fs::remove_file(target)?;
+        }
+
+        // Create parent directories
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Create hardlink: target shares inode with CAS blob
+        fs::hard_link(&cas_path, target)?;
+
+        // Set read-only (chmod 444) to catch unintended writes
+        Self::set_readonly(target)?;
+
+        Ok(hash)
+    }
+
+    /// Create symlink projection without storing (blob already in CAS).
+    #[cfg(unix)]
+    pub fn link_immutable<P: AsRef<Path>>(&self, hash: &Blake3Hash, target_path: P) -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let cas_path = self.blob_path(hash);
+        if !cas_path.exists() {
+            return Err(CasError::NotFound {
+                hash: Self::hash_to_hex(hash),
+            });
+        }
+
+        let target = target_path.as_ref();
+
+        // Remove existing
+        if target.exists() || target.symlink_metadata().is_ok() {
+            fs::remove_file(target).ok();
+        }
+
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        symlink(&cas_path, target)?;
+        Ok(())
+    }
+
+    /// Create hardlink projection without storing (blob already in CAS).
+    #[cfg(unix)]
+    pub fn link_mutable<P: AsRef<Path>>(&self, hash: &Blake3Hash, target_path: P) -> Result<()> {
+        let cas_path = self.blob_path(hash);
+        if !cas_path.exists() {
+            return Err(CasError::NotFound {
+                hash: Self::hash_to_hex(hash),
+            });
+        }
+
+        let target = target_path.as_ref();
+
+        if target.exists() {
+            fs::remove_file(target)?;
+        }
+
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::hard_link(&cas_path, target)?;
+        Self::set_readonly(target)?;
+        Ok(())
+    }
+
+    /// Set file to read-only (chmod 444).
+    #[cfg(unix)]
+    fn set_readonly(path: &Path) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o444);
+        fs::set_permissions(path, perms)?;
+        Ok(())
+    }
+
+    /// Set immutable flag on Linux (chattr +i).
+    #[cfg(target_os = "linux")]
+    fn set_immutable_flag(path: &Path) -> Result<()> {
+        use std::os::unix::io::AsRawFd;
+        use std::process::Command;
+
+        // Try using chattr command (requires root)
+        let status = Command::new("chattr")
+            .arg("+i")
+            .arg(path)
+            .status();
+
+        match status {
+            Ok(s) if s.success() => Ok(()),
+            _ => Ok(()), // Silently fail if not root
+        }
+    }
 }
 
 /// Statistics about the CAS store
@@ -433,5 +596,72 @@ mod tests {
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains(&hash1));
         assert!(hashes.contains(&hash2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_store_and_link_immutable() {
+        let cas_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path()).unwrap();
+
+        let data = b"immutable content";
+        let target_path = target_dir.path().join("immutable_file.txt");
+
+        let hash = cas.store_and_link_immutable(data, &target_path).unwrap();
+
+        // Verify symlink exists
+        assert!(target_path.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Verify content via symlink
+        let read_content = fs::read(&target_path).unwrap();
+        assert_eq!(read_content, data);
+
+        // Verify hash matches
+        assert_eq!(hash, CasStore::compute_hash(data));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_store_and_link_mutable() {
+        use std::os::unix::fs::MetadataExt;
+
+        let cas_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path()).unwrap();
+
+        let data = b"mutable content";
+        let target_path = target_dir.path().join("mutable_file.txt");
+
+        let hash = cas.store_and_link_mutable(data, &target_path).unwrap();
+
+        // Verify hardlink exists (not symlink)
+        let meta = target_path.metadata().unwrap();
+        assert!(meta.file_type().is_file());
+        assert!(meta.nlink() >= 2); // At least 2 links (CAS + target)
+
+        // Verify content
+        let read_content = fs::read(&target_path).unwrap();
+        assert_eq!(read_content, data);
+
+        // Verify read-only permissions (mode 444)
+        assert_eq!(meta.mode() & 0o777, 0o444);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_link_immutable() {
+        let cas_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path()).unwrap();
+
+        let data = b"pre-stored content";
+        let hash = cas.store(data).unwrap();
+
+        let target_path = target_dir.path().join("linked_immutable.txt");
+        cas.link_immutable(&hash, &target_path).unwrap();
+
+        assert!(target_path.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&target_path).unwrap(), data);
     }
 }
