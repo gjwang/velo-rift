@@ -1,18 +1,18 @@
-//! # velo-cas
+//! # vrift-cas
 //!
 //! Content-Addressable Storage (CAS) implementation for Velo Rift.
 //!
-//! The CAS uses BLAKE3 hashing with a 2-character prefix fan-out directory layout
-//! for efficient file organization and lookup.
+//! The CAS uses BLAKE3 hashing with a 3-level fan-out directory layout
+//! for efficient file organization and lookup (RFC-0039 compliant).
 //!
-//! ## Directory Layout
+//! ## Directory Layout (RFC-0039 §6)
 //!
 //! ```text
-//! /var/vrift/the_source/
-//! ├── a8/
-//! │   └── f9c1d2e3...  # Full hash as filename
-//! └── b2/
-//!     └── d3e4f5a6...
+//! ~/.vrift/the_source/
+//! └── blake3/
+//!     └── ab/
+//!         └── cd/
+//!             └── abcd1234...efgh_12345.bin  # hash_size.ext
 //! ```
 
 use std::fs::{self, File};
@@ -59,9 +59,12 @@ impl CasStore {
         Ok(Self { root })
     }
 
-    /// Create a CAS store at the default location (`/var/vrift/the_source/`).
+    /// Create a CAS store at the default location (`~/.vrift/the_source/`).
+    /// 
+    /// Per RFC-0039 §3.4, the CAS is stored in the user's home directory.
     pub fn default_location() -> Result<Self> {
-        Self::new("/var/vrift/the_source")
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        Self::new(format!("{}/.vrift/the_source", home))
     }
 
     /// Compute the BLAKE3 hash of the given bytes.
@@ -90,10 +93,31 @@ impl CasStore {
     }
 
     /// Get the path where a blob with the given hash would be stored.
+    /// 
+    /// Uses RFC-0039 §6 layout: `blake3/ab/cd/hash_size.ext`
+    /// The simple version without size/ext (for backwards compat during transition).
     fn blob_path(&self, hash: &Blake3Hash) -> PathBuf {
         let hex = Self::hash_to_hex(hash);
-        let prefix = &hex[..2];
-        self.root.join(prefix).join(&hex)
+        let l1 = &hex[..2];   // First 2 chars
+        let l2 = &hex[2..4];  // Next 2 chars
+        self.root.join("blake3").join(l1).join(l2).join(&hex)
+    }
+
+    /// Get the path for a self-describing blob (RFC-0039 format).
+    /// 
+    /// Format: `blake3/ab/cd/hash_size.ext`
+    /// - O(1) integrity check via filename size
+    /// - Extension enables direct file type inspection
+    pub fn blob_path_with_metadata(&self, hash: &Blake3Hash, size: u64, ext: &str) -> PathBuf {
+        let hex = Self::hash_to_hex(hash);
+        let l1 = &hex[..2];
+        let l2 = &hex[2..4];
+        let filename = if ext.is_empty() {
+            format!("{}_{}", hex, size)
+        } else {
+            format!("{}_{}.{}", hex, size, ext)
+        };
+        self.root.join("blake3").join(l1).join(l2).join(filename)
     }
 
     /// Store bytes in the CAS, returning the content hash.
@@ -180,16 +204,36 @@ impl CasStore {
     }
 
     /// Get statistics about the CAS.
+    /// 
+    /// Traverses the 3-level structure: blake3/ab/cd/hash
     pub fn stats(&self) -> Result<CasStats> {
         let mut blob_count = 0u64;
         let mut total_bytes = 0u64;
         let mut size_histogram: std::collections::HashMap<&str, u64> =
             std::collections::HashMap::new();
 
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                for blob in fs::read_dir(entry.path())? {
+        // Level 0: blake3/ directory
+        let blake3_dir = self.root.join("blake3");
+        if !blake3_dir.exists() {
+            return Ok(CasStats::default());
+        }
+
+        // Level 1: ab/ directories
+        for l1_entry in fs::read_dir(&blake3_dir)? {
+            let l1_entry = l1_entry?;
+            if !l1_entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            // Level 2: cd/ directories
+            for l2_entry in fs::read_dir(l1_entry.path())? {
+                let l2_entry = l2_entry?;
+                if !l2_entry.file_type()?.is_dir() {
+                    continue;
+                }
+
+                // Level 3: hash files
+                for blob in fs::read_dir(l2_entry.path())? {
                     let blob = blob?;
                     if blob.file_type()?.is_file() {
                         // Skip temp files
@@ -248,11 +292,24 @@ impl CasStore {
     }
 
     /// Get an iterator over all blob hashes in the CAS.
+    /// 
+    /// Traverses the 3-level structure: blake3/ab/cd/hash
     pub fn iter(&self) -> Result<CasIterator> {
-        let root_iter = fs::read_dir(&self.root)?;
+        let blake3_dir = self.root.join("blake3");
+        if !blake3_dir.exists() {
+            // Return empty iterator if blake3 dir doesn't exist
+            return Ok(CasIterator {
+                l1_iter: fs::read_dir(&self.root)?, // Will be empty or invalid
+                l2_iter: None,
+                l3_iter: None,
+                blake3_exists: false,
+            });
+        }
         Ok(CasIterator {
-            root_iter,
-            current_prefix_iter: None,
+            l1_iter: fs::read_dir(&blake3_dir)?,
+            l2_iter: None,
+            l3_iter: None,
+            blake3_exists: true,
         })
     }
 
@@ -458,20 +515,26 @@ impl CasStats {
     }
 }
 
-/// Iterator over CAS hashes
+/// Iterator over CAS hashes (3-level: blake3/ab/cd/hash)
 pub struct CasIterator {
-    root_iter: fs::ReadDir,
-    current_prefix_iter: Option<fs::ReadDir>,
+    l1_iter: fs::ReadDir,      // Level 1: ab/ directories
+    l2_iter: Option<fs::ReadDir>,  // Level 2: cd/ directories
+    l3_iter: Option<fs::ReadDir>,  // Level 3: hash files
+    blake3_exists: bool,
 }
 
 impl Iterator for CasIterator {
     type Item = Result<Blake3Hash>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if !self.blake3_exists {
+            return None;
+        }
+
         loop {
-            // If we have an active prefix iterator, try to get the next file
-            if let Some(ref mut prefix_iter) = self.current_prefix_iter {
-                match prefix_iter.next() {
+            // Try to get next file from L3 (hash files)
+            if let Some(ref mut l3) = self.l3_iter {
+                match l3.next() {
                     Some(Ok(entry)) => {
                         let path = entry.path();
                         if path.is_file() {
@@ -480,9 +543,11 @@ impl Iterator for CasIterator {
                                 continue;
                             }
 
-                            // Parse filename as hash
+                            // Parse filename as hash (may include _size suffix)
                             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                                if let Some(hash) = CasStore::hex_to_hash(filename) {
+                                // Handle both "hash" and "hash_size.ext" formats
+                                let hash_part = filename.split('_').next().unwrap_or(filename);
+                                if let Some(hash) = CasStore::hex_to_hash(hash_part) {
                                     return Some(Ok(hash));
                                 }
                             }
@@ -490,26 +555,39 @@ impl Iterator for CasIterator {
                         continue;
                     }
                     Some(Err(e)) => return Some(Err(CasError::Io(e))),
-                    None => {
-                        // Prefix iterator exhausted, clear it and loop to get next prefix
-                        self.current_prefix_iter = None;
-                    }
+                    None => self.l3_iter = None,
                 }
             }
 
-            // No active prefix iterator, get next prefix directory from root
-            match self.root_iter.next() {
+            // L3 exhausted, try to get next L2 directory
+            if let Some(ref mut l2) = self.l2_iter {
+                match l2.next() {
+                    Some(Ok(entry)) => {
+                        if entry.file_type().ok()?.is_dir() {
+                            match fs::read_dir(entry.path()) {
+                                Ok(iter) => self.l3_iter = Some(iter),
+                                Err(e) => return Some(Err(CasError::Io(e))),
+                            }
+                        }
+                        continue;
+                    }
+                    Some(Err(e)) => return Some(Err(CasError::Io(e))),
+                    None => self.l2_iter = None,
+                }
+            }
+
+            // L2 exhausted, try to get next L1 directory
+            match self.l1_iter.next() {
                 Some(Ok(entry)) => {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        match fs::read_dir(path) {
-                            Ok(iter) => self.current_prefix_iter = Some(iter),
+                    if entry.file_type().ok()?.is_dir() {
+                        match fs::read_dir(entry.path()) {
+                            Ok(iter) => self.l2_iter = Some(iter),
                             Err(e) => return Some(Err(CasError::Io(e))),
                         }
                     }
                 }
                 Some(Err(e)) => return Some(Err(CasError::Io(e))),
-                None => return None, // Root iterator exhausted
+                None => return None, // All levels exhausted
             }
         }
     }

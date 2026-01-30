@@ -32,7 +32,7 @@ use vrift_manifest::{Manifest, VnodeEntry};
 #[command(version, about, long_about = None)]
 struct Cli {
     /// CAS storage root directory (TheSource)
-    #[arg(long, env = "VR_THE_SOURCE", default_value = "/var/vrift/the_source")]
+    #[arg(long, env = "VR_THE_SOURCE", default_value = "~/.vrift/the_source")]
     cas_root: PathBuf,
 
     #[command(subcommand)]

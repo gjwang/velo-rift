@@ -216,7 +216,7 @@ async fn handle_spawn(command: Vec<String>, env: Vec<(String, String)>, cwd: Str
 
 async fn scan_cas_root(state: &DaemonState) -> Result<()> {
     // Get path from env or default
-    let cas_root_str = std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| "/var/vrift/the_source".to_string());
+    let cas_root_str = std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| "~/.vrift/the_source".to_string());
     let cas_root = Path::new(&cas_root_str);
     
     if !cas_root.exists() {

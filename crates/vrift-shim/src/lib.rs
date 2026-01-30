@@ -9,7 +9,7 @@
 //!
 //! ```bash
 //! VRIFT_MANIFEST=/path/to/manifest.bin \
-//! VR_THE_SOURCE=/var/vrift/the_source \
+//! VR_THE_SOURCE=~/.vrift/the_source \
 //! LD_PRELOAD=/path/to/libvrift_shim.so \
 //! python -c "import numpy"
 //! ```
@@ -18,7 +18,7 @@
 //!
 //! ```bash
 //! VRIFT_MANIFEST=/path/to/manifest.bin \
-//! VR_THE_SOURCE=/var/vrift/the_source \
+//! VR_THE_SOURCE=~/.vrift/the_source \
 //! DYLD_INSERT_LIBRARIES=/path/to/libvrift_shim.dylib \
 //! python -c "import numpy"
 //! ```
@@ -26,7 +26,7 @@
 //! ## Environment Variables
 //!
 //! - `VRIFT_MANIFEST`: Path to the manifest file (required)
-//! - `VR_THE_SOURCE`: Path to CAS root directory (default: `/var/vrift/the_source`)
+//! - `VR_THE_SOURCE`: Path to CAS root directory (default: `~/.vrift/the_source`)
 //! - `VRIFT_VFS_PREFIX`: Virtual path prefix to intercept (default: `/vrift`)
 //! - `VRIFT_DEBUG`: Enable debug logging if set
 
@@ -109,8 +109,11 @@ use tracing::{debug, error};
 impl ShimState {
     fn init() -> Option<Self> {
         let manifest_path = std::env::var("VRIFT_MANIFEST").ok()?;
-        let cas_root =
-            std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| "/var/vrift/the_source".to_string());
+        let cas_root = std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| {
+            // RFC-0039: Default to ~/.vrift/the_source with runtime HOME expansion
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            format!("{}/.vrift/the_source", home)
+        });
         let vfs_prefix = std::env::var("VRIFT_VFS_PREFIX").unwrap_or_else(|_| "/vrift".to_string());
 
         // Initialize tracing if not already initialized
