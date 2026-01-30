@@ -1660,6 +1660,7 @@ dependencies = [
  "clap",
  "nix 0.28.0",
  "notify",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

@@ -123,6 +123,7 @@ impl CasStore {
     /// Store bytes in the CAS, returning the content hash.
     ///
     /// If the content already exists, this is a no-op (deduplication).
+    /// This method is thread-safe: uses unique temp file names to avoid race conditions.
     #[instrument(skip(self, data), level = "debug")]
     pub fn store(&self, data: &[u8]) -> Result<Blake3Hash> {
         let hash = Self::compute_hash(data);
@@ -139,11 +140,28 @@ impl CasStore {
         }
 
         // Write atomically using temp file + rename
-        let temp_path = path.with_extension("tmp");
+        // Use unique temp name to avoid race conditions in parallel mode
+        let temp_name = format!(
+            "{}.{}.{:?}.tmp",
+            path.file_name().unwrap().to_string_lossy(),
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let temp_path = path.with_file_name(&temp_name);
         let mut file = File::create(&temp_path)?;
         file.write_all(data)?;
         file.sync_all()?;
-        fs::rename(&temp_path, &path)?;
+
+        // Atomic rename - if another thread beat us, that's fine (same content)
+        if let Err(e) = fs::rename(&temp_path, &path) {
+            // Clean up orphaned temp file if rename failed
+            let _ = fs::remove_file(&temp_path);
+            // If the target exists now (race), that's OK - dedup succeeded
+            if path.exists() {
+                return Ok(hash);
+            }
+            return Err(CasError::Io(e));
+        }
 
         Ok(hash)
     }
