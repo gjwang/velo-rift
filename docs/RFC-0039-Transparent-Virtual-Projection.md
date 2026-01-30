@@ -336,3 +336,13 @@ For internal data structures and performance optimizations, see [ARCHITECTURE.md
 | VeloVFS Runtime | [§9](./ARCHITECTURE.md#9-velovfs-runtime-architecture) | LD_PRELOAD shim, Manifest lookup, Vnode structure |
 | Multi-Tenant Isolation | [§8](./ARCHITECTURE.md#8-multi-tenant-isolation-architecture) | Namespace isolation, OverlayFS mechanics |
 | Python Optimizations | [§10](./ARCHITECTURE.md#10-python-specific-optimizations) | PEP 683, import hooks, bytecode caching |
+
+## 10. Future Work
+
+| Topic | Priority | Description |
+|-------|----------|-------------|
+| **GC Strategy** | P2 | Orphan CAS entry cleanup via reference counting or mark-sweep |
+| **Multi-Project Sharing** | P2 | Shared Base Layer across projects, per-project Delta Layer |
+| **Performance Benchmarks** | P3 | Define I/O latency targets, throughput goals, memory bounds |
+| **Security Hardening** | P3 | Symlink attack mitigations, permission boundary audits |
+| **Remote CAS** | P3 | Network-backed CAS for distributed teams |
