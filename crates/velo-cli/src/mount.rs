@@ -20,7 +20,7 @@ pub struct MountArgs {
 
 /// Execute the mount command
 pub fn run(args: MountArgs) -> Result<()> {
-    let cas_root = std::env::var("VELO_CAS_ROOT").unwrap_or_else(|_| "/var/velo/the_source".to_string());
+    let cas_root = std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| "/var/vrift/the_source".to_string());
     let cas_root = Path::new(&cas_root);
     let manifest_path = &args.manifest;
     let mountpoint = &args.mountpoint;

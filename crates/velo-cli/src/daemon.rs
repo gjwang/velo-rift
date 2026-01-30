@@ -4,7 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use velo_ipc::{VeloRequest, VeloResponse};
 
-const SOCKET_PATH: &str = "/tmp/velo.sock";
+const SOCKET_PATH: &str = "/tmp/vrift.sock";
 
 pub async fn check_status() -> Result<()> {
     let mut stream = connect().await?;
@@ -123,17 +123,17 @@ fn spawn_daemon() -> Result<()> {
     let current_exe = std::env::current_exe()?;
     let bin_dir = current_exe.parent().context("Failed into get bin dir")?;
     
-    // Look for velod or velo-daemon
+    // Look for vriftd
     let candidate_names = if cfg!(target_os = "windows") {
-        vec!["velod.exe", "velo-daemon.exe"]
+        vec!["vriftd.exe"]
     } else {
-        vec!["velod", "velo-daemon"]
+        vec!["vriftd"]
     };
 
     let daemon_bin = candidate_names.iter()
         .map(|name| bin_dir.join(name))
         .find(|path| path.exists())
-        .context("Could not find velo-daemon binary")?;
+        .context("Could not find vriftd binary")?;
 
     tracing::info!("Spawning daemon: {:?}", daemon_bin);
 

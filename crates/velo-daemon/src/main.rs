@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use tokio::signal;
 
 #[derive(Parser)]
-#[command(name = "velod")]
+#[command(name = "vriftd")]
 #[command(version, about = "Velo Rift Daemon", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -48,9 +48,9 @@ struct DaemonState {
 }
 
 async fn start_daemon() -> Result<()> {
-    tracing::info!("velod: Starting daemon...");
+    tracing::info!("vriftd: Starting daemon...");
 
-    let socket_path = "/tmp/velo.sock";
+    let socket_path = "/tmp/vrift.sock";
     let path = Path::new(socket_path);
 
     if path.exists() {
@@ -58,7 +58,7 @@ async fn start_daemon() -> Result<()> {
     }
 
     let listener = UnixListener::bind(path)?;
-    tracing::info!("velod: Listening on {}", socket_path);
+    tracing::info!("vriftd: Listening on {}", socket_path);
 
     // Initialize shared state
     let state = Arc::new(DaemonState {
@@ -68,12 +68,12 @@ async fn start_daemon() -> Result<()> {
     // Start background scan (Warm-up)
     let scan_state = state.clone();
     tokio::spawn(async move {
-        tracing::info!("velod: Starting CAS warm-up scan...");
+        tracing::info!("vriftd: Starting CAS warm-up scan...");
         if let Err(e) = scan_cas_root(&scan_state).await {
-            tracing::error!("velod: CAS scan failed: {}", e);
+            tracing::error!("vriftd: CAS scan failed: {}", e);
         } else {
             let count = scan_state.cas_index.lock().await.len();
-            tracing::info!("velod: CAS warm-up complete. Indexed {} blobs.", count);
+            tracing::info!("vriftd: CAS warm-up complete. Indexed {} blobs.", count);
         }
     });
 
@@ -86,18 +86,18 @@ async fn start_daemon() -> Result<()> {
                         tokio::spawn(handle_connection(stream, state));
                     }
                     Err(err) => {
-                        tracing::error!("velod: Accept error: {}", err);
+                        tracing::error!("vriftd: Accept error: {}", err);
                     }
                 }
             }
             _ = signal::ctrl_c() => {
-                println!("velod: Shutdown signal received");
+                println!("vriftd: Shutdown signal received");
                 break;
             }
         }
     }
 
-    println!("velod: Shutting down");
+    println!("vriftd: Shutting down");
     if path.exists() {
         tokio::fs::remove_file(path).await?;
     }
@@ -216,11 +216,11 @@ async fn handle_spawn(command: Vec<String>, env: Vec<(String, String)>, cwd: Str
 
 async fn scan_cas_root(state: &DaemonState) -> Result<()> {
     // Get path from env or default
-    let cas_root_str = std::env::var("VELO_CAS_ROOT").unwrap_or_else(|_| "/var/velo/the_source".to_string());
+    let cas_root_str = std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| "/var/vrift/the_source".to_string());
     let cas_root = Path::new(&cas_root_str);
     
     if !cas_root.exists() {
-        println!("velod: CAS root not found at {:?}, skipping scan.", cas_root);
+        println!("vriftd: CAS root not found at {:?}, skipping scan.", cas_root);
         return Ok(());
     }
 

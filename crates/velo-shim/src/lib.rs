@@ -9,7 +9,7 @@
 //!
 //! ```bash
 //! VELO_MANIFEST=/path/to/manifest.bin \
-//! VELO_CAS_ROOT=/var/velo/the_source \
+//! VR_THE_SOURCE=/var/vrift/the_source \
 //! LD_PRELOAD=/path/to/libvelo_shim.so \
 //! python -c "import numpy"
 //! ```
@@ -18,7 +18,7 @@
 //!
 //! ```bash
 //! VELO_MANIFEST=/path/to/manifest.bin \
-//! VELO_CAS_ROOT=/var/velo/the_source \
+//! VR_THE_SOURCE=/var/vrift/the_source \
 //! DYLD_INSERT_LIBRARIES=/path/to/libvelo_shim.dylib \
 //! python -c "import numpy"
 //! ```
@@ -26,7 +26,7 @@
 //! ## Environment Variables
 //!
 //! - `VELO_MANIFEST`: Path to the manifest file (required)
-//! - `VELO_CAS_ROOT`: Path to CAS root directory (default: `/var/velo/the_source`)
+//! - `VR_THE_SOURCE`: Path to CAS root directory (default: `/var/vrift/the_source`)
 //! - `VELO_VFS_PREFIX`: Virtual path prefix to intercept (default: `/velo`)
 //! - `VELO_DEBUG`: Enable debug logging if set
 
@@ -106,7 +106,7 @@ impl ShimState {
     fn init() -> Option<Self> {
         let manifest_path = std::env::var("VELO_MANIFEST").ok()?;
         let cas_root =
-            std::env::var("VELO_CAS_ROOT").unwrap_or_else(|_| "/var/velo/the_source".to_string());
+            std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| "/var/vrift/the_source".to_string());
         let vfs_prefix = std::env::var("VELO_VFS_PREFIX").unwrap_or_else(|_| "/velo".to_string());
 
         // Initialize tracing if not already initialized

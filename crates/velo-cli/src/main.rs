@@ -1,12 +1,12 @@
-//! # velo CLI
+//! # vrift CLI
 //!
 //! Command-line interface for Velo Rift content-addressable filesystem.
 //!
 //! ## Commands
 //!
-//! - `velo ingest <dir>` - Import files to CAS and generate manifest
-//! - `velo run <cmd>` - Execute command with LD_PRELOAD (placeholder)
-//! - `velo status` - Display CAS statistics
+//! - `vrift ingest <dir>` - Import files to CAS and generate manifest
+//! - `vrift run <cmd>` - Execute command with VeloVFS virtualization
+//! - `vrift status` - Display CAS statistics
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -25,13 +25,13 @@ pub mod gc;
 use velo_cas::CasStore;
 use velo_manifest::{Manifest, VnodeEntry};
 
-/// Velo Rift - Content-Addressable Virtual Filesystem
+/// Velo Rift™ - Content-Addressable Virtual Filesystem (Powered by VeloVFS)
 #[derive(Parser)]
-#[command(name = "velo")]
+#[command(name = "vrift")]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// CAS storage root directory
-    #[arg(long, env = "VELO_CAS_ROOT", default_value = "/var/velo/the_source")]
+    /// CAS storage root directory (TheSource)
+    #[arg(long, env = "VR_THE_SOURCE", default_value = "/var/vrift/the_source")]
     cas_root: PathBuf,
 
     #[command(subcommand)]
@@ -55,7 +55,7 @@ enum Commands {
         prefix: Option<String>,
     },
 
-    /// Execute a command with Velo VFS (placeholder)
+    /// Execute a command with VeloVFS virtualization
     Run {
         /// Manifest file to use
         #[arg(short, long, default_value = "velo.manifest")]

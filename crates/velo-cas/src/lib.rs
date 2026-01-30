@@ -8,7 +8,7 @@
 //! ## Directory Layout
 //!
 //! ```text
-//! /var/velo/the_source/
+//! /var/vrift/the_source/
 //! ├── a8/
 //! │   └── f9c1d2e3...  # Full hash as filename
 //! └── b2/
@@ -59,9 +59,9 @@ impl CasStore {
         Ok(Self { root })
     }
 
-    /// Create a CAS store at the default location (`/var/velo/the_source/`).
+    /// Create a CAS store at the default location (`/var/vrift/the_source/`).
     pub fn default_location() -> Result<Self> {
-        Self::new("/var/velo/the_source")
+        Self::new("/var/vrift/the_source")
     }
 
     /// Compute the BLAKE3 hash of the given bytes.

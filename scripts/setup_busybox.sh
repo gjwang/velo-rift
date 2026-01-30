@@ -22,8 +22,8 @@ for cmd in sh ls cat cp mv rm mkdir echo id whoami; do
     ln -sf busybox "$DEST_DIR/bin/$cmd"
 done
 
-echo "[*] Ingesting busybox into Velo..."
-velo ingest "$DEST_DIR" --output "$MANIFEST_PATH" --prefix "/"
+echo "[*] Ingesting busybox into Velo Rift..."
+vrift ingest "$DEST_DIR" --output "$MANIFEST_PATH" --prefix "/"
 
 echo "✓ Busybox base image created: $MANIFEST_PATH"
-echo "  Usage: velo run --isolate --base $MANIFEST_PATH -- <command>"
+echo "  Usage: vrift run --isolate --base $MANIFEST_PATH -- <command>"

@@ -1,6 +1,6 @@
-# Velo Rift: Comprehensive Usage Guide
+# Velo Rift™: Comprehensive Usage Guide
 
-Velo Rift is a high-performance **data virtualization layer** designed for the AI-native era. Unlike traditional filesystems or containers, Velo decouples "where a file lives" from "what a file contains."
+Velo Rift™ is a high-performance **data virtualization layer** designed for the AI-native era. Unlike traditional filesystems or containers, Velo Rift™ decouples "where a file lives" from "what a file contains."
 
 ---
 
@@ -9,24 +9,24 @@ Velo Rift is a high-performance **data virtualization layer** designed for the A
 ### 🧠 The Core Equation: `Hash(Content) = Identity`
 In a traditional filesystem, path identity is tied to location. In Velo, identity is tied to **Content**.
 
-*   **Global Deduplication (CAS)**: If 100 projects use the same `libpython.so`, Velo stores only **one** physical copy on disk.
+*   **Global Deduplication (CAS)**: If 100 projects use the same `libpython.so`, Velo Rift™ stores only **one** physical copy on disk in **TheSource**.
 *   **Zero-Copy Virtualization**: We don't "copy" environments; we "project" them. Whether using links or syscall interception, we provide a virtual view of data that is physically shared.
-*   **Absolute Determinism**: A Velo Manifest (`.velo`) uniquely defines an entire environment. If the manifest hash is the same, the execution outcome is guaranteed to be reproducible across any machine.
+*   **Absolute Determinism**: A Velo Rift™ Manifest (`.velo`) uniquely defines an entire environment. If the manifest hash is the same, the execution outcome is guaranteed to be reproducible across any machine.
 
 ---
 
-## 2. Two Ways Velo Runs Your Code
+## 2. Two Ways Velo Rift™ Runs Your Code
 
-Velo provides two distinct mechanisms to "project" your virtual environment into the real world.
+Velo Rift™ provides two distinct mechanisms to "project" your virtual environment into the real world.
 
 ### A. Link Farm (The Physical Mirage) —— **Recommended for Isolation**
-Velo creates a temporary directory structure filled with **Hard Links** back to the global CAS store.
+Velo Rift™ creates a temporary directory structure filled with **Hard Links** back to the global CAS store (**TheSource**).
 -   **When to use**: Rootless Linux containers, sandboxed execution, and when running statically linked binaries (Go, Rust).
 -   **Pros**: 100% Native performance (Kernel handles it), compatible with all languages, enables OverlayFS layering.
 -   **Cons**: Minor overhead of creating file inodes in a temporary path.
 
 ### B. The Shim Interception (The Invisible Mirage) —— **Recommended for Local Dev**
-Velo uses `LD_PRELOAD` to inject a small library (`velo-shim`) into your process, intercepting filesystem calls like `open()` and `stat()`.
+Velo Rift™ uses `LD_PRELOAD` to inject a small library (`velo-shim`) into your process, intercepting filesystem calls like `open()` and `stat()`.
 -   **When to use**: MacOS development, rapid local testing, and when you want **zero** physical traces on the disk.
 -   **Pros**: Instantaneous (no directory to create), no disk footprint.
 -   **Cons**: Only works for dynamically linked programs; slight overhead on every syscall.
@@ -42,7 +42,7 @@ Velo uses `LD_PRELOAD` to inject a small library (`velo-shim`) into your process
 -   **Command**:
     ```bash
     # Run locally with Shim interception
-    velo run --manifest project.velo -- python main.py
+    vrift run --manifest project.velo -- python main.py
     ```
 
 ### Mode 2: Secure Sandbox (Multi-Tenant)
@@ -54,7 +54,7 @@ Velo uses `LD_PRELOAD` to inject a small library (`velo-shim`) into your process
     # Prepare base tools (one time)
     ./scripts/setup_busybox.sh
     # Run in isolated sandbox (Mode A)
-    velo run --isolate --base busybox.manifest --manifest app.velo -- /bin/sh -c "id -u"
+    vrift run --isolate --base busybox.manifest --manifest app.velo -- /bin/sh -c "id -u"
     ```
 
 ### Mode 3: Reproducible CI/CD
@@ -63,7 +63,7 @@ Velo uses `LD_PRELOAD` to inject a small library (`velo-shim`) into your process
 -   **Benefit**: "Hash-verified" consistency. No more "it works on my machine" bugs.
 -   **Command**:
     ```bash
-    velo run --manifest release_v1.0.velo -- ./test_suite.sh
+    vrift run --manifest release_v1.0.velo -- ./test_suite.sh
     ```
 
 ---
@@ -85,7 +85,7 @@ Velo uses `LD_PRELOAD` to inject a small library (`velo-shim`) into your process
 ### 1. Ingestion
 Take any folder and make it "Velo-native."
 ```bash
-velo ingest ./my_project --output my.velo
+vrift ingest ./my_project --output my.velo
 ```
 
 ### 2. Execution
@@ -94,6 +94,6 @@ Run it using your preferred mode as described above.
 ### 3. Maintenance
 Check your savings and clean up old versions.
 ```bash
-velo status    # Monitor CAS health and dedup ratio
-velo gc --run  # Cleanup orphaned blobs
+vrift status    # Monitor CAS health and dedup ratio
+vrift gc --delete # Cleanup orphaned blobs
 ```

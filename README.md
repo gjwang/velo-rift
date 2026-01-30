@@ -1,27 +1,27 @@
-# Velo Rift
+# Velo Rift™
 
 > **Modern runtimes are fast. Disks are not.**  
-> Velo Rift removes the filesystem from the critical path of computation.
+> Velo Rift™ removes the filesystem from the critical path of computation.
 
 ---
 
-## What is Velo Rift?
+## What is Velo Rift™?
 
-Velo Rift is a **virtual file system layer** that solves two problems:
+Velo Rift™ is a **virtual file system layer** (powered by VeloVFS) that solves two problems:
 
 1. **Read-only file access is too slow** → mmap from content-addressable storage
 2. **Duplicate files waste storage** → global deduplication
 
 ```text
 Traditional:  open("/node_modules/...") → disk seek → read → copy
-Velo Rift:    open("/node_modules/...") → mmap pointer → done
+Velo Rift™:   open("/node_modules/...") → mmap pointer → done
 ```
 
 **Result**: Cold start in milliseconds, not minutes.
 
 ---
 
-## What Velo Rift IS
+## What Velo Rift™ IS
 
 - ✅ A **virtual file system** for read-only content
 - ✅ A **content-addressable store** with global deduplication  
@@ -50,8 +50,8 @@ Velo Rift:    open("/node_modules/...") → mmap pointer → done
 ## 🚀 Quick Start (Local)
 
 1. **Build**: `cargo build --release`
-2. **Ingest**: `velo ingest ./path/to/folder --output app.velo`
-3. **Run**: `velo run --manifest app.velo -- ls -R`
+2. **Ingest**: `vrift ingest ./path/to/folder --output app.velo`
+3. **Run**: `vrift run --manifest app.velo -- ls -R`
 
 For more advanced scenarios, see the [Full Usage Guide](docs/USAGE.md).
 
@@ -59,26 +59,26 @@ For more advanced scenarios, see the [Full Usage Guide](docs/USAGE.md).
 
 ## 🛠 Usage Modes
 
-Velo Rift supports three primary execution modes depending on your needs:
+Velo Rift™ supports three primary execution modes depending on your needs:
 
 ### 1. Local Development (Mode B: Library Interception)
 Uses `LD_PRELOAD` to transparently virtualize files without creating physical links.
 ```bash
-velo run --manifest app.velo -- python main.py
+vrift run --manifest app.velo -- python main.py
 ```
 
 ### 2. High-Performance Sharing (Mode A: Link Farm)
 Instantly creates a directory of hard links back to the global CAS. The default for non-SANDBOX Linux tasks.
 ```bash
 # Default behavior for standard runs
-velo run --manifest app.velo -- ./my_binary
+vrift run --manifest app.velo -- ./my_binary
 ```
 
 ### 3. Secure Isolation (Mode A + Sandboxing)
 Creates a rootless Linux Namespace container with a layered rootfs (Multi-manifest support).
 ```bash
 ./scripts/setup_busybox.sh
-velo run --isolate --base busybox.manifest --manifest app.velo -- /bin/sh
+vrift run --isolate --base busybox.manifest --manifest app.velo -- /bin/sh
 ```
 
 ## ⚡️ Performance & Benchmarking
@@ -105,7 +105,7 @@ This measures the nanosecond-latency of `store`, `get`, and `get_mmap` operation
 
 ---
 
-## Who Should Use Velo Rift
+## Who Should Use Velo Rift™
 
 **Yes:**
 - Large dependency trees (1000+ packages)

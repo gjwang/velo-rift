@@ -9,7 +9,7 @@ if [ "$SKIP_BUILD" == "true" ]; then
     echo "Skipping build (SKIP_BUILD=true). assuming binaries are in PATH."
 else
     # Only rebuild if binary is missing, explicitly requested, or in CI
-    if [ ! -f "target/release/velo" ] || [ "$1" == "--rebuild" ] || [ -n "$CI" ]; then
+    if [ ! -f "target/release/vrift" ] || [ "$1" == "--rebuild" ] || [ -n "$CI" ]; then
         BUILD_ARGS="--release"
         if [ "$(uname -s)" == "Linux" ]; then
              echo "[*] Enabling FUSE feature for Linux build..."
@@ -17,7 +17,7 @@ else
         fi
         cargo build $BUILD_ARGS
     else
-        echo "Skipping build (target/release/velo exists). Use --rebuild to force."
+        echo "Skipping build (target/release/vrift exists). Use --rebuild to force."
     fi
 fi
 
@@ -32,7 +32,7 @@ MANIFEST="$TEST_DIR/manifest.velo"
 
 rm -rf "$TEST_DIR"
 mkdir -p "$CAS_DIR" "$DATA_DIR"
-export VELO_CAS_ROOT="$CAS_DIR"
+export VR_THE_SOURCE="$CAS_DIR"
 
 # Create test data
 echo "Hello Velo" > "$DATA_DIR/file1.txt"
@@ -61,9 +61,9 @@ EOF
 # 3. Test Daemon Auto-Start & Ingest
 echo "[*] Testing Daemon Auto-Start & Ingest..."
 # Note: we don't start daemon manually. CLI should do it.
-velo ingest "$DATA_DIR" --output "$MANIFEST"
+vrift ingest "$DATA_DIR" --output "$MANIFEST"
 
-if [ ! -S "/tmp/velo.sock" ]; then
+if [ ! -S "/tmp/vrift.sock" ]; then
     echo "ERROR: Daemon socket not found. Auto-start failed."
     exit 1
 fi
@@ -71,14 +71,13 @@ fi
 echo "[PASS] Daemon auto-started."
 
 # 4. Test Status
-echo "[*] Testing Status..."
-velo status --manifest "$MANIFEST"
-velo daemon status
+vrift status --manifest "$MANIFEST"
+vrift daemon status
 echo "[PASS] Status commands work."
 
 # 5. Test Delegated Execution
 echo "[*] Testing Delegated Execution..."
-OUTPUT=$(velo run --daemon -- /bin/echo "Delegated Works")
+OUTPUT=$(vrift run --daemon -- /bin/echo "Delegated Works")
 if [[ "$OUTPUT" != *"Delegated Works"* ]]; then
     echo "ERROR: Delegated execution output mismatch: $OUTPUT"
     # exit 1 
@@ -95,10 +94,10 @@ echo "[PASS] Delegated execution command succeeded."
 
 # 6. Test Persistence (Restart)
 echo "[*] Testing Persistence..."
-pkill velo-daemon
+pkill vriftd
 sleep 1
 # Daemon should be dead
-if [ -S "/tmp/velo.sock" ]; then
+if [ -S "/tmp/vrift.sock" ]; then
     echo "Warning: Socket still exists after pkill."
 fi
 
@@ -109,10 +108,10 @@ if [ ! -d "$CAS_DIR" ]; then
 fi
 
 # Restart and check warm-up
-velo daemon status
+vrift daemon status
 # Provide time for warm-up if needed (it's async but fast for 2 files)
 sleep 1
-STATUS=$(velo daemon status)
+STATUS=$(vrift daemon status)
 if [[ "$STATUS" != *"Indexed: 2 blobs"* ]]; then
     echo "WARNING: Expected 2 blobs indexed, got: $STATUS"
     # Don't fail hard on this timing-sensitive check in script unless we add retry logic
@@ -129,7 +128,7 @@ mkdir -p "$WATCH_DIR"
 echo "v1" > "$WATCH_DIR/start.txt"
 
 # Run watch in background
-velo watch "$WATCH_DIR" --output "$TEST_DIR/watch.manifest" > "$TEST_DIR/watch.log" 2>&1 &
+vrift watch "$WATCH_DIR" --output "$TEST_DIR/watch.manifest" > "$TEST_DIR/watch.log" 2>&1 &
 WATCH_PID=$!
 echo "Watch PID: $WATCH_PID"
 
@@ -156,11 +155,11 @@ echo "[*] Testing FUSE Mount..."
 MOUNT_DIR="$TEST_DIR/mnt"
 mkdir -p "$MOUNT_DIR"
 
-# Run velo mount in background
+# Run vrift mount in background
 # (Checking if platform supports it)
 OS="$(uname -s)"
 if [ "$OS" == "Linux" ]; then
-    velo mount --manifest "$MANIFEST" "$MOUNT_DIR" > "$TEST_DIR/mount.log" 2>&1 &
+    vrift mount --manifest "$MANIFEST" "$MOUNT_DIR" > "$TEST_DIR/mount.log" 2>&1 &
     MOUNT_PID=$!
     echo "Mount PID: $MOUNT_PID"
 
@@ -238,10 +237,9 @@ if [ "$OS" == "Linux" ]; then
         exit 1
     fi
 
-
-
-    # Cleanup
-    kill $MOUNT_PID || true
+    # 10. Final Cleanup
+    pkill vriftd || true
+    pkill vrift || true
     # Force unmount just in case
     umount -l "$MOUNT_DIR" 2>/dev/null || true
 else
@@ -262,7 +260,7 @@ if [ "$OS" == "Linux" ]; then
     # Therefore, executing them SHOULD FAIL. This is proof of isolation!
     
     # Positive Proof of Isolation: Host binaries are NOT visible.
-    if velo run --isolate --manifest "$MANIFEST" -- /bin/ls > /dev/null 2>&1; then
+    if vrift run --isolate --manifest "$MANIFEST" -- /bin/ls > /dev/null 2>&1; then
         echo "ERROR: Isolation failed! Host /bin/ls was executable."
         exit 1
     else
@@ -276,7 +274,7 @@ if [ "$OS" == "Linux" ]; then
     # Use /bin/sh from the busybox base to run a command
     # Note: we use 'id -u' because 'whoami' requires /etc/passwd which we don't have.
     # Inside the user namespace, we should be UID 0 (root).
-    ISO_OUT=$(velo run --isolate --base busybox.manifest --manifest "$MANIFEST" -- /bin/sh -c "id -u")
+    ISO_OUT=$(vrift run --isolate --base busybox.manifest --manifest "$MANIFEST" -- /bin/sh -c "id -u")
     if [[ "$ISO_OUT" == *"0"* ]]; then
         echo "[PASS] Static binary (busybox) executed in isolate successfully."
     else
@@ -297,8 +295,8 @@ echo "=== All Tests Passed ==="
 echo "New Content" > "$DATA_DIR/file1.txt"
 # 2. Ingest again (creates new blob, updates manifest, leaving old blob "Hello Velo" orphan)
 # Note: In a real scenario, we'd probably want to use a fresh manifest or update existing. 
-# `velo ingest` overwrites manifest by default.
-velo ingest "$DATA_DIR" --output "$MANIFEST" > /dev/null
+# `vrift ingest` overwrites manifest by default.
+vrift ingest "$DATA_DIR" --output "$MANIFEST" > /dev/null
 
 # 3. List blobs to find the orphan
 # "Hello Velo" hash is roughly known or we can just count.
@@ -308,7 +306,7 @@ velo ingest "$DATA_DIR" --output "$MANIFEST" > /dev/null
 # Let's trust GC output parsing.
 
 # Test Dry Run (Default)
-GC_OUT=$(velo gc --manifest "$MANIFEST")
+GC_OUT=$(vrift gc --manifest "$MANIFEST")
 if echo "$GC_OUT" | grep -q "Can Delete"; then
     echo "[PASS] GC Dry Run detected garbage."
 else
@@ -323,7 +321,7 @@ if echo "$GC_OUT" | grep -q "DELETING"; then
 fi
 
 # Test Actual Delete
-GC_OUT_DEL=$(velo gc --manifest "$MANIFEST" --delete)
+GC_OUT_DEL=$(vrift gc --manifest "$MANIFEST" --delete)
 if echo "$GC_OUT_DEL" | grep -q "Deleted:"; then
      echo "[PASS] GC Delete executed."
 else
