@@ -22,7 +22,80 @@
 | **I-1** | CAS entry hash MUST equal content hash | Verify before rename |
 | **I-2** | Committed file MUST be durable (fsync) | Batch dir fsync |
 | **I-3** | Partial writes MUST NOT be visible | Atomic rename from tmp |
-| **I-4** | Modified file MUST be rejected | mtime check before/after |
+| **I-4** | Source file MUST be stable during read | **File locking (primary)** |
+
+### S1b: File Locking Strategy
+
+> [!IMPORTANT]
+> **Per [RFC-0039 §5.3](./RFC-0039-Transparent-Virtual-Projection.md#53-projection-consistency-protocol-p0-b-enforcement):**
+> - Ingest Lock acquired BEFORE snapshot
+> - Released AFTER Manifest update
+> - mtime is OPTIMISTIC only (programs can disable via `O_NOATIME`, `utimensat()`)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Two-Tier Consistency Model                                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Tier 1: OPTIMISTIC (mtime check)                                       │
+│  ┌───────────────────────────────────────┐                             │
+│  │ mtime_before = stat(path).mtime       │ ← Fast, no syscall overhead │
+│  │ content = read(path)                  │                             │
+│  │ mtime_after = stat(path).mtime        │                             │
+│  │ if mtime_before != mtime_after:       │                             │
+│  │     RETRY                             │                             │
+│  └───────────────────────────────────────┘                             │
+│  ⚠️  NOT RELIABLE: programs can disable mtime                          │
+│                                                                         │
+│  Tier 2: PESSIMISTIC (file lock)                                        │
+│  ┌───────────────────────────────────────┐                             │
+│  │ fd = open(path, O_RDONLY)             │                             │
+│  │ flock(fd, LOCK_SH)   ← shared read    │ ← Blocks if writer active   │
+│  │ content = read(fd)                    │                             │
+│  │ flock(fd, LOCK_UN)                    │                             │
+│  └───────────────────────────────────────┘                             │
+│  ✅ RELIABLE: kernel-enforced, cross-process                           │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Recommendation: mtime + flock**
+
+```rust
+fn ingest_file(path: &Path) -> Result<ProcessedFile> {
+    let file = File::open(path)?;
+    
+    // Tier 1: Optimistic check (fast reject)
+    let mtime_before = file.metadata()?.modified()?;
+    
+    // Tier 2: Acquire shared lock (blocks if writer has exclusive lock)
+    flock(file.as_raw_fd(), FlockArg::LockShared)?;
+    
+    // Read content while holding lock
+    let content = read_file(&file)?;
+    
+    // Verify mtime didn't change (paranoid check)
+    let mtime_after = file.metadata()?.modified()?;
+    
+    flock(file.as_raw_fd(), FlockArg::Unlock)?;
+    
+    if mtime_before != mtime_after {
+        return Err(CasError::FileModified);
+    }
+    
+    Ok(ProcessedFile { ... })
+}
+```
+
+**Lock Types:**
+
+| Lock | Syscall | Scope | NFS-safe |
+|------|---------|-------|----------|
+| `flock()` | BSD | Per-fd | ❌ |
+| `fcntl(F_SETLK)` | POSIX | Per-inode | ✅ |
+| `lockf()` | Wrapper | Per-region | ✅ |
+
+**Default: `flock()` (fast, suitable for local CAS)**
 
 ### S2: Event Ordering Guarantees
 
@@ -42,8 +115,8 @@
 │        ──happens-before──▶ dir.fsync()                                  │
 │        (crash-safe commit sequence)                                     │
 │                                                                         │
-│  [O-4] mtime_before ──read-before──▶ content ──read-before──▶ mtime_after│
-│        (detect modification during read)                                │
+│  [O-4] flock(LOCK_SH) ──read-before──▶ content ──read-before──▶ unlock │
+│        (file stability during read, kernel-enforced)                    │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -54,7 +127,7 @@
 |------------|-------|-----------|
 | **T-1** watch → scan gap | < 1ms | Minimize race window |
 | **T-2** batch timeout | 10ms | Balance latency vs batch size |
-| **T-3** mtime resolution | 1ms | Filesystem-dependent, usually ms |
+| **T-3** lock timeout | 100ms | Avoid deadlock on busy files |
 | **T-4** fsync budget | 2 per 100 files | 200x reduction vs naive |
 
 ### S4: Failure Modes & Recovery
@@ -63,6 +136,7 @@
 |---------|-----------|----------|
 | Crash during write | Temp file orphan | Cleanup tmp/ on startup |
 | Crash after fsync | Rename incomplete | Retry rename on startup |
+| File locked by writer | `flock()` blocks | Wait or skip with timeout |
 | File modified during read | mtime mismatch | Discard temp, re-queue path |
 | Hash collision | Impossible (BLAKE3) | N/A |
 | OOM | Semaphore blocks | Backpressure, not crash |
@@ -75,6 +149,7 @@ MemorySemaphore:    Mutex + Condvar (blocking acquire)
 DashSet<PathBuf>:   Lock-free concurrent set (dedup)
 PathRingBuffer:     Atomic state transitions (lock-free)
 BatchCommitter:     Single-threaded (main thread only)
+FileLock:           Kernel-enforced (flock/fcntl)
 ```
 
 ---
