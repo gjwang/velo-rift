@@ -2,6 +2,19 @@
 
 > **Parent Design**: [RFC-0039: Transparent Virtual Projection](./RFC-0039-Transparent-Virtual-Projection.md)
 
+## Implementation Status
+
+| Module | Purpose | Status |
+|--------|---------|--------|
+| `zero_copy_ingest.rs` | Primary ingest (hard_link/rename) | ✅ Active |
+| `streaming_pipeline.rs` | Watch-first scanner (retained for future) | 📦 Reserved |
+
+> [!NOTE]
+> **Current implementation uses `zero_copy_ingest.rs`** — O(1) metadata operations per RFC-0039.
+> The streaming_pipeline remains available for potential future enhancements like parallel I/O.
+
+---
+
 ## RFC-0039 Alignment
 
 This RFC extends RFC-0039 §3.2 (Live Ingest) and §5.3 (Projection Consistency Protocol).
@@ -11,7 +24,7 @@ This RFC extends RFC-0039 §3.2 (Live Ingest) and §5.3 (Projection Consistency 
 | **P0-a**: `CAS[hash].content == hash(content)` | Verify hash before atomic rename |
 | **P0-b**: `VFS[path]` returns correct version | Ingest Lock held during read → Manifest update |
 | **§3.2** Live Ingest: trigger on `close()` | Watch for `IN_CLOSE_WRITE` events |
-| **§5.3** Ingest Lock: before snapshot, after Manifest | Per-path lock in WorkerPool |
+| **§5.3** Ingest Lock: before snapshot, after Manifest | `flock(LOCK_SH)` per file |
 | **§7.1** LMDB Manifest | BatchCommitter updates Manifest atomically |
 | **§6** CAS sharding: `blake3/ab/cd/hash_size.bin` | 3-level sharded final path |
 
