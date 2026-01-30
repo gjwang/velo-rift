@@ -96,8 +96,8 @@ The CAS root resides at `VR_THE_SOURCE` (default: `~/.vrift/the_source`).
 ```text
 the_source/
   └── blake3/              <-- Algorithm Namespace
-       ├── ab/             <-- Shard L1 (Byte 0)
-       │   └── cd/         <-- Shard L2 (Byte 1)
+       ├── ab/             <-- Shard L1 (Hash 0-1)
+       │   └── cd/         <-- Shard L2 (Hash 2-3)
        │       └── efgh..._[Size].[Ext]  <-- Artifact (Remaining Hash)
 ```
 
