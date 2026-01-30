@@ -23,8 +23,10 @@
 //! - Fallback: Rayon thread pool
 
 mod io_backend;
+pub mod streaming_pipeline;
 
 pub use io_backend::{create_backend, rayon_backend, IngestBackend};
+pub use streaming_pipeline::{IngestPipeline, IngestStats, PipelineConfig};
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

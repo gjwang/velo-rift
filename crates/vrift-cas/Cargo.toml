@@ -20,6 +20,12 @@ rayon = "1.11.0"
 # Optional: io_uring for Linux high-performance I/O
 tokio-uring = { version = "0.5", optional = true }
 tokio = { version = "1", features = ["rt", "sync"], optional = true }
+notify.workspace = true
+crossbeam-channel = "0.5.15"
+dashmap = "6.1.0"
+num_cpus = "1.17.0"
+hex = "0.4.3"
+walkdir.workspace = true
 
 [dev-dependencies]
 tempfile = "3.14"
