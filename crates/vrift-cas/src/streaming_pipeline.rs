@@ -546,17 +546,34 @@ impl IngestPipeline {
         let mut committer = BatchCommitter::new(cas_root.to_owned(), self.config.batch_size);
 
         loop {
-            match commit_rx.recv_timeout(self.config.batch_timeout) {
+            // Wait for first item (with short timeout)
+            match commit_rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(item) => {
                     // Skip sentinel values
-                    if item.size == 0 && item.source_path.as_os_str().is_empty() {
-                        continue;
+                    if !(item.size == 0 && item.source_path.as_os_str().is_empty()) {
+                        stats.files_processed += 1;
+                        stats.bytes_processed += item.size;
+                        committer.add(item);
                     }
 
-                    stats.files_processed += 1;
-                    stats.bytes_processed += item.size;
-                    committer.add(item);
+                    // Drain all immediately available items (non-blocking)
+                    while let Ok(item) = commit_rx.try_recv() {
+                        if item.size == 0 && item.source_path.as_os_str().is_empty() {
+                            continue;
+                        }
+                        stats.files_processed += 1;
+                        stats.bytes_processed += item.size;
+                        committer.add(item);
 
+                        // Commit when batch is full
+                        if committer.should_commit() {
+                            let (_, deduped) = committer.commit()?;
+                            stats.files_deduplicated += deduped;
+                            stats.batches_committed += 1;
+                        }
+                    }
+
+                    // Commit remaining batch after drain
                     if committer.should_commit() {
                         let (_, deduped) = committer.commit()?;
                         stats.files_deduplicated += deduped;
@@ -564,6 +581,7 @@ impl IngestPipeline {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
+                    // Timeout - flush partial batch
                     if !committer.is_empty() {
                         let (_, deduped) = committer.commit()?;
                         stats.files_deduplicated += deduped;
@@ -571,7 +589,7 @@ impl IngestPipeline {
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    // Final flush
+                    // Channel closed - final flush
                     if !committer.is_empty() {
                         let (_, deduped) = committer.commit()?;
                         stats.files_deduplicated += deduped;
