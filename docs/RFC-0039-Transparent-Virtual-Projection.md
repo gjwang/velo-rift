@@ -33,6 +33,7 @@ Velo Rift™ provides two specific modes to balance safety and performance.
 - **Mechanism**: `Link-to-CAS` (Atomic).
 - **Implementation**: Instead of moving the file, Velo simply creates a hardlink in the CAS pointing to the existing project file. The inode remains identical.
 - **Rollback Experience**: **Perfect**. Since physical inodes never moved, deactivating Velo has zero impact on file availability.
+- **Safety Guarantee**: Even if the CAS (TheSource) is completely wiped or corrupted, project files remain 100% intact. They are independent references to the same data blocks.
 
 ### 4.2 Phantom Mode (幻影 / Advanced)
 - **Concept**: The environment is a "Phantom." Physical files are moved to CAS and replaced by the virtual projection.
