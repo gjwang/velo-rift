@@ -167,7 +167,7 @@ Velo uses a "Content-Addressable" everything approach. ID collision is impossibl
 
 ## 3. Data Structures & Protocols
 
-### 3.1 `velo.lock` (The Execution Spec)
+### 3.1 `vrift.lock` (The Execution Spec)
 This is the compiled "Bytecode" derived from `uv.lock`. It bridges the intent (Package Name) to the physical capability (Tree Hash).
 
 ```json
@@ -230,7 +230,7 @@ How Velo achieves "Instant Install" and "Zero-Copy Sharing" using Hard Links.
 The **Host Warehouse** (`/mnt/velo_ram_disk/pool`) and the **Tenant Directory** (`/mnt/velo_ram_disk/tenants/A`) **MUST** reside on the same filesystem (Mountpoint). This allows `link()` syscalls to work.
 
 ### 4.2 The Construction Algorithm (O(1) Install)
-When `velo.lock` says "Tenant A needs Numpy 1.26":
+When `vrift.lock` says "Tenant A needs Numpy 1.26":
 
 1.  **Lookup**: Velo checks `pool/numpy-1.26.0/`.
 2.  **Link Farm Generation**:
@@ -258,7 +258,7 @@ Details of the syscall sequence to build the "Standard VM Illusion".
 mkdir -p /mnt/velo_ram_disk/tenants/A/{upper,work,merged,lower}
 
 # 2. Populate Lower (The Link Farm) via Velo Engine
-velo-internal populate-links --lock velo.lock --target .../lower
+velo-internal populate-links --lock vrift.lock --target .../lower
 
 # 3. Mount OverlayFS
 mount -t overlay overlay \
@@ -3653,16 +3653,16 @@ Identity: BLAKE3 hash
 Operation: Sync hash → mmap
 ```
 
-### 57.2 velo.lock vs uv.lock
+### 57.2 vrift.lock vs uv.lock
 
-| Aspect | uv.lock | velo.lock |
+| Aspect | uv.lock | vrift.lock |
 |--------|---------|-----------|
 | **Purpose** | Human intent | Machine execution |
 | **Content** | Package names, versions | Hash → mount point |
 | **Portability** | Cross-platform | Velo-native only |
 | **Analogy** | Java source | Java bytecode |
 
-### 57.3 velo.lock Structure
+### 57.3 vrift.lock Structure
 
 ```json
 {
@@ -7742,7 +7742,7 @@ Phased delivery strategy to manage complexity.
 
 | Component | Deliverable |
 |-----------|-------------|
-| Lock Parser | Parse `velo.lock` (uv.lock derived) |
+| Lock Parser | Parse `vrift.lock` (uv.lock derived) |
 | Link Farm | Construct hardlink tree from CAS |
 | OverlayFS | Mount merged view for tenant |
 | Validation | `import numpy` works |

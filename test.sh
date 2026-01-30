@@ -25,7 +25,7 @@ fi
 export PATH=$PATH:$(pwd)/target/release
 
 # 2. Setup Test Environment
-TEST_DIR="/tmp/velo_test"
+TEST_DIR="/tmp/vrift_test"
 CAS_DIR="$TEST_DIR/cas"
 DATA_DIR="$TEST_DIR/data"
 MANIFEST="$TEST_DIR/vrift.manifest"
@@ -35,13 +35,13 @@ mkdir -p "$CAS_DIR" "$DATA_DIR"
 export VR_THE_SOURCE="$CAS_DIR"
 
 # Create test data
-echo "Hello Velo" > "$DATA_DIR/file1.txt"
+echo "Hello Velo Rift" > "$DATA_DIR/file1.txt"
 dd if=/dev/urandom of="$DATA_DIR/bigfile.bin" bs=1M count=10 2>/dev/null
 
 # Create an executable script to test execute permissions
 cat <<EOF > "$DATA_DIR/hello.sh"
 #!/bin/sh
-echo "Velo Exec Works"
+echo "Velo Rift Exec Works"
 EOF
 chmod +x "$DATA_DIR/hello.sh"
 
@@ -176,7 +176,7 @@ if [ "$OS" == "Linux" ]; then
     echo "Checking mount content..."
     if [ -f "$MOUNT_DIR/data/file1.txt" ]; then
        CONTENT=$(cat "$MOUNT_DIR/data/file1.txt")
-       if [ "$CONTENT" == "Hello Velo" ]; then
+       if [ "$CONTENT" == "Hello Velo Rift" ]; then
            echo "[PASS] FUSE read verified."
        else
            echo "ERROR: Content mismatch in FUSE mount. Got: '$CONTENT'"
@@ -192,7 +192,7 @@ if [ "$OS" == "Linux" ]; then
     echo "Checking execution permission..."
     if [ -x "$MOUNT_DIR/data/hello.sh" ]; then
         EXEC_OUTPUT=$("$MOUNT_DIR/data/hello.sh")
-        if [ "$EXEC_OUTPUT" == "Velo Exec Works" ]; then
+        if [ "$EXEC_OUTPUT" == "Velo Rift Exec Works" ]; then
             echo "[PASS] FUSE execution verified."
         else
             echo "ERROR: Execution output mismatch. Got: '$EXEC_OUTPUT'"
@@ -293,7 +293,7 @@ echo "=== All Tests Passed ==="
 # Create an orphan:
 # 1. Modify file1.txt content
 echo "New Content" > "$DATA_DIR/file1.txt"
-# 2. Ingest again (creates new blob, updates manifest, leaving old blob "Hello Velo" orphan)
+# 2. Ingest again (creates new blob, updates manifest, leaving old blob "Hello Velo Rift" orphan)
 # Note: In a real scenario, we'd probably want to use a fresh manifest or update existing. 
 # `vrift ingest` overwrites manifest by default.
 vrift ingest "$DATA_DIR" --output "$MANIFEST" > /dev/null

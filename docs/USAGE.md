@@ -85,7 +85,7 @@ Velo Rift uses `LD_PRELOAD` to inject a small library (`velo-shim`) into your pr
 ### 1. Ingestion
 Take any folder and make it "Velo-native."
 ```bash
-vrift ingest ./my_project --output my.velo
+vrift ingest ./my_project --output vrift.manifest
 ```
 
 ### 2. Execution
