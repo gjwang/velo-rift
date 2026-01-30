@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 mod isolation;
 mod daemon;
 mod mount;
+mod active;
 pub mod gc;
 
 use velo_cas::CasStore;
@@ -114,6 +115,24 @@ enum Commands {
         #[arg(short, long, default_value = "vrift.manifest")]
         output: PathBuf,
     },
+
+    /// Activate Velo projection mode (RFC-0039)
+    Active {
+        /// Use Phantom mode (pure virtual projection)
+        #[arg(long)]
+        phantom: bool,
+
+        /// Project directory (default: current directory)
+        #[arg(value_name = "DIR")]
+        directory: Option<PathBuf>,
+    },
+
+    /// Deactivate Velo projection
+    Deactivate {
+        /// Project directory (default: current directory)
+        #[arg(value_name = "DIR")]
+        directory: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -177,6 +196,20 @@ async fn async_main(cli: Cli) -> Result<()> {
             DaemonCommands::Status => daemon::check_status().await,
         },
         Commands::Watch { directory, output } => cmd_watch(&cli.cas_root, &directory, &output).await,
+        Commands::Active { phantom, directory } => {
+            let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
+            let mode = if phantom {
+                active::ProjectionMode::Phantom
+            } else {
+                active::ProjectionMode::Solid
+            };
+            active::activate(&dir, mode)?;
+            Ok(())
+        }
+        Commands::Deactivate { directory } => {
+            let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
+            active::deactivate(&dir)
+        }
     }
 }
 

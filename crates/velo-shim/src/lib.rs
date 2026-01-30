@@ -81,13 +81,17 @@ thread_local! {
 
 /// State for a Velo-managed file descriptor
 struct VeloFd {
-    /// Memory-mapped content
+    /// Memory-mapped content (for reads)
     mmap: Mmap,
     /// Current read position
     position: usize,
     /// Virtual path (for debugging)
     #[allow(dead_code)]
     vpath: String,
+    /// The actual underlying fd (for writes after break-before-write)
+    real_fd: Option<RawFd>,
+    /// Whether this fd was written to (needs re-ingest on close)
+    modified: bool,
 }
 
 /// Global shim state
@@ -161,6 +165,7 @@ impl ShimState {
 
 type OpenFn = unsafe extern "C" fn(*const c_char, c_int, mode_t) -> c_int;
 type ReadFn = unsafe extern "C" fn(c_int, *mut c_void, size_t) -> ssize_t;
+type WriteFn = unsafe extern "C" fn(c_int, *const c_void, size_t) -> ssize_t;
 type CloseFn = unsafe extern "C" fn(c_int) -> c_int;
 type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
 type FstatFn = unsafe extern "C" fn(c_int, *mut libc::stat) -> c_int;
@@ -169,6 +174,7 @@ type ReadlinkFn = unsafe extern "C" fn(*const c_char, *mut c_char, size_t) -> ss
 
 static REAL_OPEN: OnceLock<OpenFn> = OnceLock::new();
 static REAL_READ: OnceLock<ReadFn> = OnceLock::new();
+static REAL_WRITE: OnceLock<WriteFn> = OnceLock::new();
 static REAL_CLOSE: OnceLock<CloseFn> = OnceLock::new();
 static REAL_STAT: OnceLock<StatFn> = OnceLock::new();
 static REAL_FSTAT: OnceLock<FstatFn> = OnceLock::new();
@@ -334,6 +340,8 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
                     mmap,
                     position: 0,
                     vpath: path_str.clone(),
+                    real_fd: None,
+                    modified: false,
                 },
             );
         });
@@ -341,6 +349,78 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
         debug!(fd = velo_fd, "Opened virtual file (mmap)");
         velo_fd
     }
+}
+
+/// Intercept write() syscall with Break-Before-Write (RFC-0039)
+///
+/// For Tier-2 assets, this implements the BBW protocol:
+/// 1. Detect write to ingested file
+/// 2. Break hardlink (copy content to new file)
+/// 3. Allow write to proceed
+/// 4. Re-ingest on close()
+#[no_mangle]
+pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
+    let real_write = get_real_fn!(REAL_WRITE, "write", WriteFn);
+
+    // For Velo FDs that have been "broken" for writing
+    if is_velo_fd(fd) {
+        return FD_MAP.with(|map| {
+            let mut map = map.borrow_mut();
+            let Some(vfd) = map.get_mut(&fd) else {
+                set_errno(libc::EBADF);
+                return -1;
+            };
+
+            // If we have a real_fd (from BBW), write to it
+            if let Some(real_fd) = vfd.real_fd {
+                vfd.modified = true;
+                return real_write(real_fd, buf, count);
+            }
+
+            // Otherwise, break-before-write: copy content to temp file
+            debug!(path = %vfd.vpath, "Break-Before-Write triggered");
+
+            // Create temporary file for writing
+            let temp_path = format!("/tmp/vrift-bbw-{}-{}", std::process::id(), fd.abs());
+            let temp_cstr = CString::new(temp_path.clone()).unwrap();
+            let temp_fd = libc::open(
+                temp_cstr.as_ptr(),
+                libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                0o644,
+            );
+
+            if temp_fd < 0 {
+                error!("Failed to create temp file for BBW");
+                return -1;
+            }
+
+            // Copy existing content to temp file
+            let written = libc::write(
+                temp_fd,
+                vfd.mmap.as_ptr() as *const c_void,
+                vfd.mmap.len(),
+            );
+
+            if written != vfd.mmap.len() as ssize_t {
+                error!("Failed to copy content for BBW");
+                libc::close(temp_fd);
+                return -1;
+            }
+
+            // Seek to the current position
+            libc::lseek(temp_fd, vfd.position as libc::off_t, libc::SEEK_SET);
+
+            // Store the real fd and mark as modified
+            vfd.real_fd = Some(temp_fd);
+            vfd.modified = true;
+
+            // Now write to the real fd
+            real_write(temp_fd, buf, count)
+        });
+    }
+
+    // Not a Velo FD, pass through
+    real_write(fd, buf, count)
 }
 
 /// Intercept read() syscall
@@ -373,7 +453,7 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
     })
 }
 
-/// Intercept close() syscall
+/// Intercept close() syscall with re-ingest support (RFC-0039)
 #[no_mangle]
 pub unsafe extern "C" fn close(fd: c_int) -> c_int {
     let real_close = get_real_fn!(REAL_CLOSE, "close", CloseFn);
@@ -383,7 +463,23 @@ pub unsafe extern "C" fn close(fd: c_int) -> c_int {
     }
 
     FD_MAP.with(|map| {
-        map.borrow_mut().remove(&fd);
+        if let Some(vfd) = map.borrow_mut().remove(&fd) {
+            // If we broke the link and wrote, we need to re-ingest
+            if vfd.modified {
+                if let Some(real_fd) = vfd.real_fd {
+                    debug!(path = %vfd.vpath, "Closing modified file - re-ingest needed");
+                    // Close the temp fd
+                    real_close(real_fd);
+                    // TODO: Trigger re-ingest via manifest update
+                    // For now, we just log that re-ingest is needed
+                    // In full implementation, this would:
+                    // 1. Read the temp file
+                    // 2. Calculate new BLAKE3 hash
+                    // 3. Store in CAS
+                    // 4. Update manifest with new hash
+                }
+            }
+        }
     });
 
     0

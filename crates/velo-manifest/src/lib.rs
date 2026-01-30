@@ -4,6 +4,17 @@
 //!
 //! The manifest maps path hashes to VnodeEntry structs, providing
 //! O(1) lookup for any file path in the virtual filesystem.
+//!
+//! ## Storage Backends
+//!
+//! - `Manifest`: In-memory HashMap with bincode persistence (legacy)
+//! - `LmdbManifest`: LMDB-backed with ACID transactions (RFC-0039)
+
+pub mod lmdb;
+pub mod tier;
+
+pub use lmdb::{AssetTier, LmdbManifest, ManifestEntry, LmdbError, LmdbResult};
+pub use tier::classify_tier;
 
 use std::collections::HashMap;
 use std::fs::File;
