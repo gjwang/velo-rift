@@ -34,6 +34,9 @@
                 "@storybook/nextjs": "^7.6.0",
                 "@storybook/addon-essentials": "^7.6.0"
             }
+        },
+        "automation": {
+            "extends": "../xlarge_package.json"
         }
     },
     "_note": "This is a template for monorepo testing. To use: create packages/ subdirectories and install deps in each."

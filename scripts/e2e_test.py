@@ -66,11 +66,14 @@ DATASETS = {
     },
 }
 
-# Monorepo config: packages with their dependencies
+# Monorepo config: packages with their dependencies (matches monorepo_package.json)
 MONOREPO_PACKAGES = {
-    "web": "large_package.json",      # Heavy frontend
-    "api": "medium_package.json",     # Backend
-    "shared": "small_package.json",   # Shared utilities
+    "web": "large_package.json",       # Heavy frontend
+    "mobile": "medium_package.json",   # Mobile app
+    "shared": "small_package.json",    # Shared utilities
+    "docs": "medium_package.json",     # Documentation site
+    "storybook": "medium_package.json", # Storybook
+    "automation": "xlarge_package.json", # Browser automation (puppeteer)
 }
 
 
@@ -397,7 +400,8 @@ def test_monorepo_dedup(work_dir: Path, cas_dir: Path) -> TestResult:
     package_stats = {}
     
     # Create each package with its own node_modules
-    for pkg_name, pkg_json in MONOREPO_PACKAGES.items():
+    pkg_count = len(MONOREPO_PACKAGES)
+    for idx, (pkg_name, pkg_json) in enumerate(MONOREPO_PACKAGES.items(), 1):
         pkg_dir = monorepo_dir / "packages" / pkg_name
         pkg_dir.mkdir(parents=True, exist_ok=True)
         
@@ -405,15 +409,20 @@ def test_monorepo_dedup(work_dir: Path, cas_dir: Path) -> TestResult:
         src_pkg = BENCHMARKS_DIR / pkg_json
         if not src_pkg.exists():
             continue
+        
+        # Show progress
+        print(f"       📦 [{idx}/{pkg_count}] Installing {pkg_name} ({pkg_json})...", flush=True)
             
         shutil.copy(src_pkg, pkg_dir / "package.json")
         
         # Install dependencies independently (NO hoisting)
+        install_start = time.time()
         code, _, stderr = run_cmd(
             ["npm", "install", "--legacy-peer-deps", "--silent"],
             cwd=pkg_dir,
             timeout=300,
         )
+        install_time = time.time() - install_start
         
         if code != 0:
             return TestResult(
@@ -429,6 +438,7 @@ def test_monorepo_dedup(work_dir: Path, cas_dir: Path) -> TestResult:
         file_count = count_files(node_modules)
         total_files += file_count
         package_stats[pkg_name] = file_count
+        print(f"       ✓ {pkg_name}: {file_count:,} files ({install_time:.1f}s)", flush=True)
     
     if total_files == 0:
         return TestResult(
