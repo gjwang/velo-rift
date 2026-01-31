@@ -32,7 +32,8 @@ pub use io_backend::{create_backend, rayon_backend, IngestBackend};
 pub use link_strategy::{get_strategy, is_binary_sensitive, LinkStrategy};
 pub use parallel_ingest::{
     default_thread_count, parallel_ingest, parallel_ingest_with_fallback,
-    parallel_ingest_with_threads, IngestMode, ParallelIngestStats, MAX_INGEST_THREADS,
+    parallel_ingest_with_progress, parallel_ingest_with_threads, IngestMode, ParallelIngestStats,
+    MAX_INGEST_THREADS,
 };
 pub use streaming_pipeline::{IngestPipeline, IngestStats, PipelineConfig};
 pub use zero_copy_ingest::{

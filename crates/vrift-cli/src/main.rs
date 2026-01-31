@@ -11,10 +11,13 @@
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
 
 mod isolation;
@@ -360,10 +363,6 @@ async fn cmd_ingest(
     } else {
         "Solid Tier-2 (hard_link, keep original)"
     };
-    println!("Zero-Copy Ingest: {} mode", mode_str);
-    println!("CAS Root: {}", cas_root.display());
-    println!("Threads:  {} (use -j to adjust)", thread_count);
-
     // Determine path prefix
     let base_prefix = prefix.unwrap_or_else(|| {
         directory
@@ -377,15 +376,38 @@ async fn cmd_ingest(
     let mut files_ingested = 0u64;
     let mut bytes_ingested = 0u64;
     let mut unique_blobs = 0u64;
+    let mut new_bytes = 0u64;  // Track bytes from NEW blobs only
     let mut fallback_count = 0u64;
 
-    println!("Ingesting {} into CAS...", directory.display());
+    // Print header
+    println!("\n⚡ VRift Ingest");
+    println!("   Mode:    {} ", mode_str);
+    println!("   CAS:     {}", cas_root.display());
+    println!("   Threads: {}", thread_count);
 
-    // Collect entries and classify them
+    // Collect entries with spinner feedback
+    let scan_spinner = ProgressBar::new_spinner();
+    scan_spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("   {spinner:.cyan} Scanning files... {msg}")
+            .unwrap()
+    );
+    scan_spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+    
+    let mut entry_count = 0u64;
     let entries: Vec<_> = WalkDir::new(directory)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            if let Ok(ref entry) = e {
+                entry_count += 1;
+                if entry_count % 5000 == 0 {
+                    scan_spinner.set_message(format!("{} entries", entry_count));
+                }
+            }
+            e.ok()
+        })
         .collect();
+    scan_spinner.finish_and_clear();
 
     // Phase 1: Process directories and symlinks (must be serial for manifest order)
     // Also collect file paths for parallel processing
@@ -448,8 +470,10 @@ async fn cmd_ingest(
         }
     }
 
-    // Phase 2: Parallel file ingest
+    // Phase 2: Parallel file ingest with progress bar
     let file_count = file_entries.len();
+    let ingest_start = Instant::now();
+    
     if file_count > 0 {
         let file_paths: Vec<PathBuf> = file_entries.iter().map(|(p, _, _, _)| p.clone()).collect();
         
@@ -462,12 +486,69 @@ async fn cmd_ingest(
             vrift_cas::IngestMode::SolidTier2
         };
 
-        // Run parallel ingest
-        let ingest_results = vrift_cas::parallel_ingest_with_threads(
+        // Create progress bar
+        let pb = ProgressBar::new(file_count as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("   [{bar:40.cyan/blue}] {pos:>7}/{len:7} ({percent}%) • {msg}")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        pb.set_message("Processing...");
+
+        // Shared counters for real-time stats
+        let processed_bytes = Arc::new(AtomicU64::new(0));
+        let new_blobs = Arc::new(AtomicU64::new(0));
+        let pb_clone = pb.clone();
+        let processed_bytes_clone = processed_bytes.clone();
+        let new_blobs_clone = new_blobs.clone();
+        let ingest_start_clone = ingest_start;
+        let last_update = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        // Run parallel ingest with real-time progress callback
+        let ingest_results = vrift_cas::parallel_ingest_with_progress(
             &file_paths,
             &cas_root,
             ingest_mode,
             Some(thread_count),
+            move |result, idx| {
+                // Update stats atomically
+                if let Ok(ref r) = result {
+                    processed_bytes_clone.fetch_add(r.size, Ordering::Relaxed);
+                    if r.was_new {
+                        new_blobs_clone.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                
+                // Throttle: update every 100 files AND minimum 100ms since last update
+                let count = idx + 1;
+                if count % 100 == 0 {
+                    let now_ms = ingest_start_clone.elapsed().as_millis() as u64;
+                    let last_ms = last_update.load(Ordering::Relaxed);
+                    
+                    // 100ms throttle
+                    if now_ms >= last_ms + 100 {
+                        last_update.store(now_ms, Ordering::Relaxed);
+                        
+                        let elapsed = now_ms as f64 / 1000.0;
+                        let rate = if elapsed > 0.0 { count as f64 / elapsed } else { 0.0 };
+                        let total_bytes = processed_bytes_clone.load(Ordering::Relaxed);
+                        let new_count = new_blobs_clone.load(Ordering::Relaxed);
+                        let dedup_pct = if count > 0 {
+                            100.0 * (1.0 - (new_count as f64 / count as f64))
+                        } else { 0.0 };
+                        
+                        // Only update position when also updating message (saves resources)
+                        pb_clone.set_position(count as u64);
+                        pb_clone.set_message(format!(
+                            "{:.0} files/s • {} • {:.0}% dedup",
+                            rate,
+                            format_bytes(total_bytes),
+                            dedup_pct
+                        ));
+                    }
+                }
+            },
         );
 
         // Phase 3: Update manifests from results (serial, but fast)
@@ -487,8 +568,10 @@ async fn cmd_ingest(
 
                     files_ingested += 1;
                     bytes_ingested += ingest_result.size;
+                    
                     if ingest_result.was_new {
                         unique_blobs += 1;
+                        new_bytes += ingest_result.size;  // Track actual new storage
                     }
                 }
                 Err(e) => {
@@ -510,15 +593,20 @@ async fn cmd_ingest(
                             files_ingested += 1;
                             bytes_ingested += size;
                             fallback_count += 1;
+                            pb.inc(1);
                             continue;
                         }
                     }
+                    pb.abandon();
                     let path = &file_entries[i].0;
                     return Err(e).with_context(|| format!("Failed to ingest: {}", path.display()));
                 }
             }
         }
+        pb.finish_and_clear();
     }
+    
+    let ingest_elapsed = ingest_start.elapsed();
 
     // Commit LMDB manifest
     lmdb_manifest.commit().with_context(|| "Failed to commit LMDB manifest")?;
@@ -528,27 +616,68 @@ async fn cmd_ingest(
         .save(output)
         .with_context(|| format!("Failed to save manifest to {}", output.display()))?;
 
-    let stats = manifest.stats();
+    let _stats = manifest.stats();
     let dedup_ratio = if files_ingested > 0 {
         100.0 * (1.0 - (unique_blobs as f64 / files_ingested as f64))
     } else {
         0.0
     };
+    
+    // Calculate speed metrics
+    let elapsed_secs = ingest_elapsed.as_secs_f64();
+    let files_per_sec = if elapsed_secs > 0.0 { files_ingested as f64 / elapsed_secs } else { 0.0 };
+    let bytes_per_sec = if elapsed_secs > 0.0 { bytes_ingested as f64 / elapsed_secs } else { 0.0 };
+    
+    // Calculate REAL space savings: original size - new bytes added to CAS
+    // Only was_new blobs add to CAS, duplicates are free!
+    let saved_bytes = bytes_ingested.saturating_sub(new_bytes);
+    let saved_pct = if bytes_ingested > 0 { 100.0 * saved_bytes as f64 / bytes_ingested as f64 } else { 0.0 };
 
-    println!("\n✓ Zero-Copy Ingestion complete");
-    println!("  Mode:        {}", mode_str);
-    println!("  Files:       {}", stats.file_count);
-    println!("  Directories: {}", stats.dir_count);
-    println!("  Total size:  {}", format_bytes(bytes_ingested));
-    println!(
-        "  Unique blobs: {} ({:.1}% dedup)",
-        unique_blobs, dedup_ratio
+    // ANSI color codes
+    const GREEN: &str = "\x1b[32m";
+    const CYAN: &str = "\x1b[36m";
+    const YELLOW: &str = "\x1b[33m";
+    const MAGENTA: &str = "\x1b[35m";
+    const BOLD: &str = "\x1b[1m";
+    const RESET: &str = "\x1b[0m";
+
+    // Pretty output with colors
+    println!();
+    println!("{}{}╔════════════════════════════════════════╗{}", BOLD, GREEN, RESET);
+    println!("{}{}║  ✅ VRift Complete in {:.2}s          {}{}", BOLD, GREEN, elapsed_secs, "║", RESET);
+    println!("{}{}╚════════════════════════════════════════╝{}", BOLD, GREEN, RESET);
+    println!();
+    
+    // Files -> Blobs conversion (the key metric)
+    println!("   {}{}📁 {} files → {} blobs{}", 
+        BOLD, CYAN,
+        format_number(files_ingested), 
+        format_number(unique_blobs),
+        RESET
     );
-    if fallback_count > 0 {
-        println!("  Fallbacks:   {} (cross-device)", fallback_count);
+    
+    // Dedup ratio - highlight if significant
+    if dedup_ratio > 10.0 {
+        println!("   {}{}🔥 {:.1}% DEDUP{} - Content-Addressable Magic!", BOLD, MAGENTA, dedup_ratio, RESET);
+    } else {
+        println!("   {}📊 {:.1}% dedup{}", CYAN, dedup_ratio, RESET);
     }
-    println!("  Manifest:    {}", output.display());
-    println!("  LMDB:        {}", vrift_dir.join("manifest.lmdb").display());
+    
+    // Speed
+    println!("   {}⚡ {:.0} files/sec • {}/s{}", YELLOW, files_per_sec, format_bytes(bytes_per_sec as u64), RESET);
+    
+    // Space savings - prominent if significant
+    if saved_bytes > 1024 * 1024 {  // > 1MB
+        println!("   {}{}💾 SAVED {} ({:.1}% reduction){}", BOLD, GREEN, format_bytes(saved_bytes), saved_pct, RESET);
+    } else if saved_bytes > 0 {
+        println!("   💾 Saved {} ({:.1}% reduction)", format_bytes(saved_bytes), saved_pct);
+    }
+    
+    println!("   📄 Manifest: {}", output.display());
+    if fallback_count > 0 {
+        println!("   {}⚠️  {} cross-device fallbacks{}", YELLOW, fallback_count, RESET);
+    }
+    println!();
 
     Ok(())
 }
@@ -816,6 +945,14 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Format number with comma separators (e.g., 1,234,567)
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let chars: Vec<char> = s.chars().rev().collect();
+    let chunks: Vec<String> = chars.chunks(3).map(|c| c.iter().collect()).collect();
+    chunks.join(",").chars().rev().collect()
 }
 
 /// Watch a directory and auto-ingest on changes

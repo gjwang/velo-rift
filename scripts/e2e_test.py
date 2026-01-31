@@ -42,38 +42,38 @@ BENCHMARKS_DIR = PROJECT_ROOT / "examples" / "benchmarks"
 # Persistent CAS for incremental mode
 PERSISTENT_CAS = Path.home() / ".vrift" / "e2e_test_cas"
 
-# Test datasets
+# Test datasets (xsmall=extra-small lib, small=app, medium=standard, large=monorepo)
 DATASETS = {
-    "small": {
-        "package": "small_package.json",
+    "xsmall": {
+        "package": "xsmall_package.json",
         "min_files": 10000,
         "max_time_sec": 10,
     },
-    "medium": {
-        "package": "medium_package.json",
+    "small": {
+        "package": "small_package.json",
         "min_files": 20000,
         "max_time_sec": 15,
     },
-    "large": {
-        "package": "large_package.json",
+    "medium": {
+        "package": "medium_package.json",
         "min_files": 50000,
         "max_time_sec": 30,
     },
-    "xlarge": {
-        "package": "xlarge_package.json",
-        "min_files": 100000,
-        "max_time_sec": 60,
+    "large": {
+        "package": "large_package.json",
+        "min_files": 200000,
+        "max_time_sec": 120,
     },
 }
 
-# Monorepo config: packages with their dependencies (matches monorepo_package.json)
+# Monorepo config: packages with their dependencies (matches large_package.json)
+# Note: large_package.json is the monorepo, this maps package names to sub-dependencies
 MONOREPO_PACKAGES = {
-    "web": "large_package.json",       # Heavy frontend
-    "mobile": "medium_package.json",   # Mobile app
-    "shared": "small_package.json",    # Shared utilities
-    "docs": "medium_package.json",     # Documentation site
-    "storybook": "medium_package.json", # Storybook
-    "automation": "xlarge_package.json", # Browser automation (puppeteer)
+    "web": "medium_package.json",      # Heavy frontend
+    "mobile": "small_package.json",    # Mobile app
+    "shared": "xsmall_package.json",   # Shared utilities
+    "docs": "small_package.json",      # Documentation site
+    "storybook": "small_package.json", # Storybook
 }
 
 
