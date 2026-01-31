@@ -80,11 +80,33 @@ rm -f ~/.vrift/registry/manifests.json
 
 mkdir -p "$DEMO_DIR/proj1" "$DEMO_DIR/proj2" "$CAS_DIR"
 
-# Use xsmall for proj1 (~5K files) and small for proj2 (~30K files)
+# proj1: Frontend (Next.js stack) - ~16K files
 cp "$VRIFT_ROOT/examples/benchmarks/xsmall_package.json" "$DEMO_DIR/proj1/package.json"
-cp "$VRIFT_ROOT/examples/benchmarks/small_package.json" "$DEMO_DIR/proj2/package.json"
 
-print_success "Created demo directories"
+# proj2: Backend (Express/MongoDB stack) - completely different deps
+cat > "$DEMO_DIR/proj2/package.json" << 'EOF'
+{
+    "name": "vrift-backend-demo",
+    "description": "Backend stack - different deps for GC demo",
+    "dependencies": {
+        "express": "^4.18.2",
+        "mongoose": "^8.0.0",
+        "jsonwebtoken": "^9.0.2",
+        "bcryptjs": "^2.4.3",
+        "dotenv": "^16.3.1",
+        "cors": "^2.8.5",
+        "helmet": "^7.1.0",
+        "morgan": "^1.10.0",
+        "winston": "^3.11.0",
+        "ioredis": "^5.3.2",
+        "bull": "^4.12.0",
+        "socket.io": "^4.7.4",
+        "uuid": "^9.0.1"
+    }
+}
+EOF
+
+print_success "Created demo directories (Frontend + Backend stacks)"
 
 # ============================================================================
 # npm install (can be skipped)
