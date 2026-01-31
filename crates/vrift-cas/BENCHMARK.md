@@ -83,10 +83,10 @@ All datasets share common dependencies for dedup testing:
 
 | Dataset | Time | Throughput |
 |---------|------|------------|
-| Small | 2.57s | **6,464 files/s** |
-| Medium | 3.67s | **6,530 files/s** |
-| Large | 10.30s | **5,993 files/s** |
-| XLarge | 28.0s | **4,936 files/s** |
+| Small | 2.55s | **6,521 files/s** |
+| Medium | 3.57s | **6,698 files/s** |
+| Large | 10.24s | **6,026 files/s** |
+| XLarge | 26.37s | **5,233 files/s** |
 
 ### Parallel Speedup
 
