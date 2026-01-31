@@ -13,6 +13,7 @@ doctest = false  # Also disable doctests to prevent any test harness loading
 
 [dependencies]
 libc = "0.2"
+nix = { workspace = true, features = ["mman"] }
 vrift-cas.workspace = true
 vrift-manifest.workspace = true
 memmap2.workspace = true

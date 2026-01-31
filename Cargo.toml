@@ -46,7 +46,7 @@ anyhow = "1.0"
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
 tokio = { version = "1.36", features = ["full"] }
-nix = { version = "0.28", features = ["fs", "mount", "sched", "signal", "user"] }
+nix = { version = "0.28", features = ["fs", "mount", "sched", "signal", "user", "mman"] }
 
 # File operations
 walkdir = "2.5"

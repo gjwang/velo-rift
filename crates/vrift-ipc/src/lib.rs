@@ -60,6 +60,22 @@ pub fn default_socket_path() -> &'static str {
     "/tmp/vrift.sock"
 }
 
+pub const BLOOM_SIZE: usize = 128 * 1024;
+
+pub fn bloom_hashes(s: &str) -> (usize, usize) {
+    let mut h1: usize = 5381;
+    let mut h2: usize = 0;
+    for &b in s.as_bytes() {
+        h1 = h1.wrapping_shl(5).wrapping_add(h1).wrapping_add(b as usize);
+        h2 = h2
+            .wrapping_shl(6)
+            .wrapping_add(h2)
+            .wrapping_add(b as usize)
+            .wrapping_sub(h1);
+    }
+    (h1, h2)
+}
+
 /// Check if daemon is running (socket exists and connectable)
 pub fn is_daemon_running() -> bool {
     std::path::Path::new(default_socket_path()).exists()

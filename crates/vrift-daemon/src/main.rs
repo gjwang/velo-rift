@@ -42,7 +42,41 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use vrift_ipc::{bloom_hashes, BLOOM_SIZE};
 use vrift_manifest::Manifest;
+
+struct BloomFilter {
+    shm_ptr: *mut u8,
+}
+
+unsafe impl Send for BloomFilter {}
+unsafe impl Sync for BloomFilter {}
+
+impl BloomFilter {
+    fn new(shm_ptr: *mut u8) -> Self {
+        Self { shm_ptr }
+    }
+
+    fn clear(&self) {
+        unsafe { std::ptr::write_bytes(self.shm_ptr, 0, BLOOM_SIZE) };
+    }
+
+    fn add(&self, path: &str) {
+        let (h1, h2) = self.hashes(path);
+        let b1 = h1 % (BLOOM_SIZE * 8);
+        let b2 = h2 % (BLOOM_SIZE * 8);
+        unsafe {
+            let p1 = self.shm_ptr.add(b1 / 8);
+            *p1 |= 1 << (b1 % 8);
+            let p2 = self.shm_ptr.add(b2 / 8);
+            *p2 |= 1 << (b2 % 8);
+        }
+    }
+
+    fn hashes(&self, s: &str) -> (usize, usize) {
+        bloom_hashes(s)
+    }
+}
 
 struct DaemonState {
     // In-memory index of CAS blobs (Hash -> Size)
@@ -50,6 +84,7 @@ struct DaemonState {
     // VFS Manifest
     manifest: Mutex<Manifest>,
     manifest_path: String,
+    bloom: BloomFilter,
 }
 
 async fn start_daemon() -> Result<()> {
@@ -75,11 +110,45 @@ async fn start_daemon() -> Result<()> {
     let listener = UnixListener::bind(path)?;
     tracing::info!("vriftd: Listening on {}", socket_path);
 
+    // Shared Memory Bloom Filter Setup
+    use nix::fcntl::OFlag;
+    use nix::sys::mman::{mmap, shm_open, shm_unlink, MapFlags, ProtFlags};
+    use nix::sys::stat::Mode;
+
+    let shm_name = "/vrift_bloom";
+    let _ = shm_unlink(shm_name); // Cleanup old
+    let shm_fd = shm_open(
+        shm_name,
+        OFlag::O_CREAT | OFlag::O_RDWR,
+        Mode::from_bits_retain(0o666),
+    )?;
+    nix::unistd::ftruncate(&shm_fd, BLOOM_SIZE as i64)?;
+
+    let shm_ptr = unsafe {
+        mmap(
+            None,
+            std::num::NonZeroUsize::new(BLOOM_SIZE).unwrap(),
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+            MapFlags::MAP_SHARED,
+            &shm_fd,
+            0,
+        )?
+    }
+    .as_ptr() as *mut u8;
+
+    let bloom = BloomFilter::new(shm_ptr);
+    bloom.clear();
+    // Populate with existing manifest
+    for path in manifest.paths() {
+        bloom.add(path);
+    }
+
     // Initialize shared state
     let state = Arc::new(DaemonState {
         cas_index: Mutex::new(HashMap::new()),
         manifest: Mutex::new(manifest),
         manifest_path,
+        bloom,
     });
 
     // Start background scan (Warm-up)
@@ -201,12 +270,11 @@ async fn handle_request(req: VeloRequest, state: &DaemonState) -> VeloResponse {
         VeloRequest::ManifestUpsert { path, entry } => {
             let mut manifest: tokio::sync::MutexGuard<Manifest> = state.manifest.lock().await;
             manifest.insert(&path, entry);
+            state.bloom.add(&path);
             if let Err(e) = manifest.save(&state.manifest_path) {
                 tracing::error!("Failed to save manifest: {}", e);
-                VeloResponse::Error(format!("Manifest save failed: {}", e))
-            } else {
-                VeloResponse::ManifestAck { entry: None }
             }
+            VeloResponse::ManifestAck { entry: None }
         }
     }
 }

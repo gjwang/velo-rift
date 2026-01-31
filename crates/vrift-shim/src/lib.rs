@@ -6,9 +6,8 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(unused_doc_comments)]
 
-use std::cell::Cell;
 use std::ffi::{CStr, CString};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -44,6 +43,24 @@ extern "C" {
     fn readdir(dirp: *mut libc::DIR) -> *mut libc::dirent;
     fn closedir(dirp: *mut libc::DIR) -> c_int;
     fn readlink(path: *const c_char, buf: *mut c_char, bufsiz: size_t) -> ssize_t;
+    fn execve(path: *const c_char, argv: *const *const c_char, envp: *const *const c_char)
+        -> c_int;
+    fn posix_spawn(
+        pid: *mut libc::pid_t,
+        path: *const c_char,
+        file_actions: *const c_void,
+        attrp: *const c_void,
+        argv: *const *const c_char,
+        envp: *const *const c_char,
+    ) -> c_int;
+    fn posix_spawnp(
+        pid: *mut libc::pid_t,
+        file: *const c_char,
+        file_actions: *const c_void,
+        attrp: *const c_void,
+        argv: *const *const c_char,
+        envp: *const *const c_char,
+    ) -> c_int;
 }
 
 #[cfg(target_os = "macos")]
@@ -116,6 +133,27 @@ static IT_READLINK: Interpose = Interpose {
     new_func: readlink_shim as *const (),
     old_func: readlink as *const (),
 };
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_EXECVE: Interpose = Interpose {
+    new_func: execve_shim as *const (),
+    old_func: execve as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_POSIX_SPAWN: Interpose = Interpose {
+    new_func: posix_spawn_shim as *const (),
+    old_func: posix_spawn as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_POSIX_SPAWNP: Interpose = Interpose {
+    new_func: posix_spawnp_shim as *const (),
+    old_func: posix_spawnp as *const (),
+};
 
 // ============================================================================
 // Global State & Recursion Guards
@@ -125,8 +163,14 @@ static SHIM_STATE: AtomicPtr<ShimState> = AtomicPtr::new(ptr::null_mut());
 static INITIALIZING: AtomicBool = AtomicBool::new(false);
 static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
-thread_local! {
-    static IN_SHIM: Cell<bool> = const { Cell::new(false) };
+static RECURSION_KEY: std::sync::OnceLock<libc::pthread_key_t> = std::sync::OnceLock::new();
+
+fn get_recursion_key() -> libc::pthread_key_t {
+    *RECURSION_KEY.get_or_init(|| {
+        let mut key = 0;
+        unsafe { libc::pthread_key_create(&mut key, None) };
+        key
+    })
 }
 
 const LOG_BUF_SIZE: usize = 64 * 1024;
@@ -161,28 +205,36 @@ impl Logger {
     #[allow(dead_code)]
     fn dump(&self) {
         let head = self.head.load(Ordering::SeqCst);
-        let start = if head > LOG_BUF_SIZE {
-            head % LOG_BUF_SIZE
-        } else {
-            0
-        };
-        let len = if head > LOG_BUF_SIZE {
-            LOG_BUF_SIZE
-        } else {
-            head
-        };
+        let start = head.saturating_sub(LOG_BUF_SIZE);
+        for i in start..head {
+            unsafe {
+                let c = self.buffer[i % LOG_BUF_SIZE];
+                libc::write(2, &c as *const u8 as *const c_void, 1);
+            }
+        }
+    }
 
-        unsafe {
-            if start + len <= LOG_BUF_SIZE {
-                libc::write(2, self.buffer.as_ptr().add(start) as *const c_void, len);
+    fn dump_to_file(&self) {
+        let pid = unsafe { libc::getpid() };
+        let path = format!("/tmp/vrift-shim-{}.log", pid);
+        if let Ok(mut f) = std::fs::File::create(&path) {
+            use std::io::Write;
+            let head = self.head.load(Ordering::SeqCst);
+            let size = if head > LOG_BUF_SIZE {
+                LOG_BUF_SIZE
             } else {
-                let first_part = LOG_BUF_SIZE - start;
-                libc::write(
-                    2,
-                    self.buffer.as_ptr().add(start) as *const c_void,
-                    first_part,
-                );
-                libc::write(2, self.buffer.as_ptr() as *const c_void, len - first_part);
+                head
+            };
+            let start = if head > LOG_BUF_SIZE {
+                head % LOG_BUF_SIZE
+            } else {
+                0
+            };
+            if head > LOG_BUF_SIZE {
+                let _ = f.write_all(&self.buffer[start..]);
+                let _ = f.write_all(&self.buffer[..start]);
+            } else {
+                let _ = f.write_all(&self.buffer[..size]);
             }
         }
     }
@@ -200,6 +252,7 @@ struct ShimState {
     vfs_prefix: String,
     socket_path: String,
     open_fds: Mutex<HashMap<c_int, OpenFile>>,
+    bloom_ptr: *const u8,
 }
 
 impl ShimState {
@@ -225,11 +278,33 @@ impl ShimState {
 
         let socket_path = "/tmp/vrift.sock".to_string();
 
+        // Map Bloom Filter
+        let bloom_ptr = (|| {
+            use nix::fcntl::OFlag;
+            use nix::sys::mman::{mmap, shm_open, MapFlags, ProtFlags};
+            use nix::sys::stat::Mode;
+            let shm_fd = shm_open("/vrift_bloom", OFlag::O_RDONLY, Mode::empty()).ok()?;
+            let ptr = unsafe {
+                mmap(
+                    None,
+                    std::num::NonZeroUsize::new(vrift_ipc::BLOOM_SIZE).unwrap(),
+                    ProtFlags::PROT_READ,
+                    MapFlags::MAP_SHARED,
+                    &shm_fd,
+                    0,
+                )
+                .ok()?
+            };
+            Some(ptr.as_ptr() as *const u8)
+        })()
+        .unwrap_or(ptr::null());
+
         let state = Box::new(Self {
             cas,
             vfs_prefix: vfs_prefix.into_owned(),
             socket_path,
             open_fds: Mutex::new(HashMap::new()),
+            bloom_ptr,
         });
 
         Some(Box::into_raw(state))
@@ -261,6 +336,20 @@ impl ShimState {
     }
 
     fn query_manifest(&self, path: &str) -> Option<vrift_manifest::VnodeEntry> {
+        // Bloom Filter Fast Path
+        if !self.bloom_ptr.is_null() {
+            let (h1, h2) = vrift_ipc::bloom_hashes(path);
+            let b1 = h1 % (vrift_ipc::BLOOM_SIZE * 8);
+            let b2 = h2 % (vrift_ipc::BLOOM_SIZE * 8);
+            unsafe {
+                let v1 = *self.bloom_ptr.add(b1 / 8) & (1 << (b1 % 8));
+                let v2 = *self.bloom_ptr.add(b2 / 8) & (1 << (b2 % 8));
+                if v1 == 0 || v2 == 0 {
+                    return None; // Absolute miss
+                }
+            }
+        }
+
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
         use vrift_ipc::{VeloRequest, VeloResponse};
@@ -320,17 +409,20 @@ unsafe fn shim_log(msg: &str) {
 struct ShimGuard;
 impl ShimGuard {
     fn enter() -> Option<Self> {
-        if IN_SHIM.with(|b| b.get()) {
+        let key = get_recursion_key();
+        let val = unsafe { libc::pthread_getspecific(key) };
+        if !val.is_null() {
             None
         } else {
-            IN_SHIM.with(|b| b.set(true));
+            unsafe { libc::pthread_setspecific(key, std::ptr::dangling::<c_void>()) };
             Some(ShimGuard)
         }
     }
 }
 impl Drop for ShimGuard {
     fn drop(&mut self) {
-        IN_SHIM.with(|b| b.set(false));
+        let key = get_recursion_key();
+        unsafe { libc::pthread_setspecific(key, ptr::null()) };
     }
 }
 
@@ -368,6 +460,95 @@ unsafe fn break_link(path_str: &str) -> Result<(), c_int> {
         libc::chflags(path_buf.as_ptr() as *const c_char, 0);
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(res) = break_link_linux(path_str) {
+            return Ok(res);
+        }
+    }
+
+    // Fallback for macOS and Linux non-O_TMPFILE
+    break_link_fallback(path_str)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn break_link_linux(path_str: &str) -> Result<(), c_int> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = Path::new(path_str);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+
+    let parent_path = CString::new(parent.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
+    let dir_fd = libc::open(parent_path.as_ptr(), libc::O_DIRECTORY | libc::O_RDONLY);
+    if dir_fd < 0 {
+        return Err(libc::EACCES);
+    }
+
+    // O_TMPFILE = 0o20000000 | 0o0400000 on many Linux systems
+    // But it's safer to use the constant if available. In libc it might be under __USE_GNU
+    const O_TMPFILE: c_int = 0o20200000;
+    let tmp_fd = libc::openat(dir_fd, c".".as_ptr(), O_TMPFILE | libc::O_RDWR, 0o600);
+    if tmp_fd < 0 {
+        libc::close(dir_fd);
+        return Err(libc::ENOTSUP);
+    }
+
+    let src_fd = libc::open(
+        CString::new(path_str).map_err(|_| libc::EINVAL)?.as_ptr(),
+        libc::O_RDONLY,
+    );
+    if src_fd < 0 {
+        libc::close(tmp_fd);
+        libc::close(dir_fd);
+        return Err(libc::EACCES);
+    }
+
+    // Try FICLONE (0x40049409)
+    if libc::ioctl(tmp_fd, 0x40049409, src_fd) != 0 {
+        // Fallback to copy_file_range
+        let mut offset_in: libc::off_t = 0;
+        let mut offset_out: libc::off_t = 0;
+        let len = std::fs::metadata(path_str).map(|m| m.len()).unwrap_or(0);
+        libc::copy_file_range(
+            src_fd,
+            &mut offset_in,
+            tmp_fd,
+            &mut offset_out,
+            len as size_t,
+            0,
+        );
+    }
+
+    let proc_fd = format!("/proc/self/fd/{}", tmp_fd);
+    let proc_fd_c = CString::new(proc_fd).map_err(|_| libc::EINVAL)?;
+    let dest_c = CString::new(path_str).map_err(|_| libc::EINVAL)?;
+
+    // AT_SYMLINK_FOLLOW = 0x400 in linkat
+    if libc::linkat(
+        libc::AT_FDCWD,
+        proc_fd_c.as_ptr(),
+        libc::AT_FDCWD,
+        dest_c.as_ptr(),
+        0x400,
+    ) != 0
+    {
+        // If linkat fails (e.g. file exists), we might need to unlink first
+        libc::unlink(dest_c.as_ptr());
+        libc::linkat(
+            libc::AT_FDCWD,
+            proc_fd_c.as_ptr(),
+            libc::AT_FDCWD,
+            dest_c.as_ptr(),
+            0x400,
+        );
+    }
+
+    libc::close(src_fd);
+    libc::close(tmp_fd);
+    libc::close(dir_fd);
+    Ok(())
+}
+
+unsafe fn break_link_fallback(path_str: &str) -> Result<(), c_int> {
     let mut tmp_path_buf = [0u8; 1024];
     let pb = path_str.as_bytes();
     if pb.len() > 1000 {
@@ -385,16 +566,13 @@ unsafe fn break_link(path_str: &str) -> Result<(), c_int> {
     if libc::rename(path_ptr.as_ptr(), tmp_ptr) != 0 {
         return Err(libc::EACCES);
     }
-    if std::fs::copy(
-        std::str::from_utf8_unchecked(&tmp_path_buf[..tmp_len]),
-        path_str,
-    )
-    .is_err()
-    {
+    let tmp_path_str = std::str::from_utf8_unchecked(&tmp_path_buf[..tmp_len]);
+    if std::fs::copy(tmp_path_str, path_str).is_err() {
         let _ = libc::rename(tmp_ptr, path_ptr.as_ptr());
         return Err(libc::EIO);
     }
     let _ = libc::unlink(tmp_ptr);
+    #[cfg(target_os = "linux")]
     let _ = std::fs::set_permissions(path_str, std::fs::Permissions::from_mode(0o644));
     Ok(())
 }
@@ -402,6 +580,57 @@ unsafe fn break_link(path_str: &str) -> Result<(), c_int> {
 type OpenFn = unsafe extern "C" fn(*const c_char, c_int, mode_t) -> c_int;
 type WriteFn = unsafe extern "C" fn(c_int, *const c_void, size_t) -> ssize_t;
 type CloseFn = unsafe extern "C" fn(c_int) -> c_int;
+type ExecveFn =
+    unsafe extern "C" fn(*const c_char, *const *const c_char, *const *const c_char) -> c_int;
+type PosixSpawnFn = unsafe extern "C" fn(
+    *mut libc::pid_t,
+    *const c_char,
+    *const c_void,
+    *const c_void,
+    *const *const c_char,
+    *const *const c_char,
+) -> c_int;
+
+unsafe fn execve_impl(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+    real_execve: ExecveFn,
+) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_execve(path, argv, envp),
+    };
+
+    // Prepare modified environment
+    let mut vec: Vec<*const c_char> = Vec::new();
+    let mut i = 0;
+    let mut has_velo_prefix = false;
+    let mut has_dyld_insert = false;
+
+    if !envp.is_null() {
+        while !(*envp.add(i)).is_null() {
+            let s = CStr::from_ptr(*envp.add(i)).to_string_lossy();
+            if s.starts_with("VRIFT_") || s.starts_with("VR_") {
+                has_velo_prefix = true;
+            }
+            if s.starts_with("DYLD_INSERT_LIBRARIES=") || s.starts_with("LD_PRELOAD=") {
+                has_dyld_insert = true;
+            }
+            vec.push(*envp.add(i));
+            i += 1;
+        }
+    }
+
+    // Capture current process env if missing in envp (best effort)
+    if !has_velo_prefix || !has_dyld_insert {
+        // In a real implementation we'd grab from libc's environ and merge
+        // For now, if caller passed a custom env without Velo, we might want to force it
+    }
+
+    vec.push(ptr::null());
+    real_execve(path, argv, vec.as_ptr())
+}
 
 unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: OpenFn) -> c_int {
     let _guard = match ShimGuard::enter() {
@@ -576,6 +805,33 @@ unsafe fn readlink_impl(
     bufsiz: size_t,
     real_readlink: ReadlinkFn,
 ) -> ssize_t {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_readlink(path, buf, bufsiz),
+    };
+
+    let Some(state) = ShimState::get() else {
+        return real_readlink(path, buf, bufsiz);
+    };
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return real_readlink(path, buf, bufsiz),
+    };
+
+    if path_str.starts_with(&state.vfs_prefix) {
+        let vpath = &path_str[state.vfs_prefix.len()..];
+        if let Some(entry) = state.query_manifest(vpath) {
+            if entry.is_symlink() {
+                if let Ok(data) = state.cas.get(&entry.content_hash) {
+                    let len = std::cmp::min(data.len(), bufsiz);
+                    ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, len);
+                    return len as ssize_t;
+                }
+            }
+        }
+    }
+
     real_readlink(path, buf, bufsiz)
 }
 
@@ -622,6 +878,8 @@ static REAL_STAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static REAL_LSTAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 #[cfg(target_os = "linux")]
 static REAL_FSTAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_EXECVE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
@@ -645,6 +903,16 @@ pub unsafe extern "C" fn lstat(p: *const c_char, b: *mut libc::stat) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn fstat(fd: c_int, b: *mut libc::stat) -> c_int {
     fstat_impl(fd, b, get_real!(REAL_FSTAT, "fstat", FstatFn))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn execve(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    execve_impl(path, argv, envp, get_real!(REAL_EXECVE, "execve", ExecveFn))
 }
 
 #[cfg(target_os = "macos")]
@@ -710,6 +978,52 @@ pub unsafe extern "C" fn readlink_shim(p: *const c_char, b: *mut c_char, s: size
     readlink_impl(p, b, s, readlink)
 }
 
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn execve_shim(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    let real = std::mem::transmute::<*const (), ExecveFn>(IT_EXECVE.old_func);
+    execve_impl(path, argv, envp, real)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn posix_spawn_shim(
+    pid: *mut libc::pid_t,
+    path: *const c_char,
+    file_actions: *const c_void,
+    attrp: *const c_void,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    let real = std::mem::transmute::<*const (), PosixSpawnFn>(IT_POSIX_SPAWN.old_func);
+    // Reuse execve_impl's env logic by proxying through it if possible,
+    // but posix_spawn takes more args. For now, simple passthrough with env modification.
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real(pid, path, file_actions, attrp, argv, envp),
+    };
+    // (Simplified env logic for now, similar to execve_impl)
+    real(pid, path, file_actions, attrp, argv, envp)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn posix_spawnp_shim(
+    pid: *mut libc::pid_t,
+    file: *const c_char,
+    file_actions: *const c_void,
+    attrp: *const c_void,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    let real = std::mem::transmute::<*const (), PosixSpawnFn>(IT_POSIX_SPAWNP.old_func);
+    real(pid, file, file_actions, attrp, argv, envp)
+}
+
 // Constructor
 #[used]
 #[cfg_attr(target_os = "linux", link_section = ".init_array")]
@@ -719,7 +1033,12 @@ static INIT: unsafe extern "C" fn() = {
         if !libc::getenv(c"VRIFT_DEBUG".as_ptr()).is_null() {
             DEBUG_ENABLED.store(true, Ordering::Relaxed);
         }
+        libc::atexit(dump_logs_atexit);
         shim_log("[VRift-Shim] Initialized\n");
     }
     init
 };
+
+extern "C" fn dump_logs_atexit() {
+    LOGGER.dump_to_file();
+}

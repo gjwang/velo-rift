@@ -2071,6 +2071,7 @@ dependencies = [
  "cc",
  "libc",
  "memmap2",
+ "nix 0.28.0",
  "thiserror",
  "vrift-cas",
  "vrift-ipc",
