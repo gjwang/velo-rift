@@ -10,8 +10,16 @@
 //!
 //! When processing files in parallel, uses DashSet for in-memory dedup
 //! to skip filesystem writes for already-seen hashes.
+//!
+//! # Tiered Fallback Strategy (Pattern 987)
+//!
+//! For macOS code-signed bundles (.app, .framework), hard_link fails with EPERM.
+//! Strategy: hard_link → clonefile (APFS CoW) → copy
+//!
+//! This provides optimal performance while handling all edge cases.
 
 use std::fs::{self, File};
+use std::io;
 use std::os::unix::fs as unix_fs;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -20,6 +28,48 @@ use dashmap::DashSet;
 use nix::fcntl::{Flock, FlockArg};
 
 use crate::{Blake3Hash, CasError, Result};
+
+// ============================================================================
+// Tiered Link Strategy: hard_link → clonefile → copy
+// ============================================================================
+
+/// Tiered file linking strategy for CAS storage
+///
+/// Attempts operations in order of efficiency:
+/// 1. hard_link() - zero-copy, shares inode
+/// 2. clonefile() - zero-copy on APFS, separate inode (works with code-signed)
+/// 3. copy() - full copy fallback
+///
+/// # Arguments
+/// * `source` - Source file path
+/// * `target` - Target path in CAS
+///
+/// # Returns
+/// * Ok(()) on success
+/// * Err on all fallback methods failed
+fn link_or_clone_or_copy(source: &Path, target: &Path) -> io::Result<()> {
+    // Attempt 1: hard_link (most efficient)
+    match fs::hard_link(source, target) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            // EPERM: likely code-signed bundle, try clonefile
+        }
+        Err(e) => return Err(e),
+    }
+    
+    // Attempt 2: clonefile (CoW on APFS)
+    match reflink_copy::reflink(source, target) {
+        Ok(()) => return Ok(()),
+        Err(_) => {
+            // clonefile not supported or failed, fall back to copy
+        }
+    }
+    
+    // Attempt 3: full copy (last resort)
+    fs::copy(source, target)?;
+    Ok(())
+}
 
 // ============================================================================
 // Configuration
@@ -80,19 +130,8 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
         fs::create_dir_all(parent)?;
     }
     
-    // Hard link (zero-copy!) - handle EEXIST and EPERM for parallel dedup / code-signed files
-    match fs::hard_link(source, &cas_target) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another thread already created this blob - dedup success!
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            // macOS EPERM: code-signed bundles (e.g., Chromium.app) cannot be hard-linked
-            // Fallback to copy (Pattern 987: macOS EPERM remediation)
-            fs::copy(source, &cas_target)?;
-        }
-        Err(e) => return Err(e.into()),
-    }
+    // Tiered link: hard_link → clonefile → copy (RFC-0040)
+    link_or_clone_or_copy(source, &cas_target)?;
     
     // Drop the lock guard before modifying source
     drop(locked_file);
@@ -144,16 +183,8 @@ pub fn ingest_solid_tier1_dedup(
             fs::create_dir_all(parent)?;
         }
         
-        // Hard link (zero-copy!) - handle EPERM
-        match fs::hard_link(source, &cas_target) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                // macOS EPERM: code-signed bundles fallback to copy
-                fs::copy(source, &cas_target)?;
-            }
-            Err(e) => return Err(e.into()),
-        }
+        // Tiered link: hard_link → clonefile → copy (RFC-0040)
+        link_or_clone_or_copy(source, &cas_target)?;
     }
     
     // Drop the lock guard before modifying source
@@ -188,18 +219,8 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
         fs::create_dir_all(parent)?;
     }
     
-    // Hard link (zero-copy!) - handle EEXIST and EPERM
-    match fs::hard_link(source, &cas_target) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another thread already created this blob - dedup success!
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            // macOS EPERM: code-signed bundles fallback to copy
-            fs::copy(source, &cas_target)?;
-        }
-        Err(e) => return Err(e.into()),
-    }
+    // Tiered link: hard_link → clonefile → copy (RFC-0040)
+    link_or_clone_or_copy(source, &cas_target)?;
     
     // Lock guard auto-drops here
     Ok(IngestResult {
@@ -257,16 +278,8 @@ pub fn ingest_solid_tier2_dedup(
         fs::create_dir_all(parent)?;
     }
     
-    // Hard link (zero-copy!) - handle EEXIST and EPERM
-    match fs::hard_link(source, &cas_target) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            // macOS EPERM: code-signed bundles fallback to copy
-            fs::copy(source, &cas_target)?;
-        }
-        Err(e) => return Err(e.into()),
-    }
+    // Tiered link: hard_link → clonefile → copy (RFC-0040)
+    link_or_clone_or_copy(source, &cas_target)?;
     
     Ok(IngestResult {
         source_path: source.to_owned(),

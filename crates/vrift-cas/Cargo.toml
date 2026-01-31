@@ -27,6 +27,7 @@ num_cpus = "1.17.0"
 hex = "0.4.3"
 walkdir.workspace = true
 nix = { workspace = true, features = ["fs"] }
+reflink-copy = "0.1"
 
 [dev-dependencies]
 tempfile = "3.14"
