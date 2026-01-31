@@ -103,15 +103,78 @@ Clean up orphaned blobs that are no longer referenced by any manifest:
 # Dry run (default): show what would be deleted
 vrift gc
 
-# Actually delete orphaned blobs
+# Actually delete orphaned blobs (interactive confirmation)
 vrift gc --delete
+
+# Skip confirmation prompt (for scripts and CI)
+vrift gc --delete --yes
+# or short form:
+vrift gc --delete -y
 
 # Delete only orphans older than 2 hours (safest)
 vrift gc --delete --older-than 2h
 
 # Prune stale manifests (projects that were deleted)
 vrift gc --prune-stale
+
+# Full cleanup: prune stale + delete orphans
+vrift gc --prune-stale --delete --yes
 ```
+
+#### GC Options
+
+| Option | Description |
+|--------|-------------|
+| `--delete` | Actually delete orphaned blobs (default is dry-run) |
+| `--yes`, `-y` | Skip confirmation prompt (for automation) |
+| `--prune-stale` | Remove stale manifest entries (source paths deleted) |
+| `--older-than <DURATION>` | Only delete orphans older than this (e.g., "1h", "24h") |
+| `--immediate` | Skip grace period and delete immediately |
+
+#### GC Output Example
+
+```
+🗑️  VRift Garbage Collection
+   CAS:     /tmp/demo/cas
+
+  Registry Status:
+    📁 Registered manifests: 2 (1 active, 1 stale)
+
+  ⚠️  Stale Manifests (source path deleted):
+      abc12345 - "/path/to/deleted/project"
+
+  CAS Statistics:
+    📦 Total blobs:   16,180 (245.44 MB)
+    ✅ Referenced:    3,819
+    🗑️  Orphaned:      12,362 (217.03 MB)
+    💾 Reclaimable:   88.4% of CAS
+
+╔════════════════════════════════════════╗
+║  ✅ GC Complete in 1.22s              ║
+╚════════════════════════════════════════╝
+
+   🗑️  12,362 orphaned blobs deleted
+   💾 217.03 MB reclaimed
+   📉 CAS reduced by 88.4%
+   ⚡ 10,117 blobs/sec
+```
+
+#### GC Demo
+
+Experience the full GC lifecycle with a one-click demo:
+
+```bash
+./scripts/demo_gc.sh          # Full demo with npm install
+./scripts/demo_gc.sh --skip-npm  # Skip npm install (faster)
+```
+
+The demo shows:
+1. Ingest two projects (frontend + backend stacks)
+2. Cross-project deduplication  
+3. Stale manifest detection after project deletion
+4. Orphan blob identification with size stats
+5. Safe cleanup with progress bar
+6. **Safety verification** - re-ingest proves no false deletions
 
 ### Health Check
 

@@ -178,7 +178,7 @@ print_step "5" "GC now detects stale manifest and orphaned blobs"
 
 print_step "6" "GC --prune-stale --delete (cleanup orphans)"
 
-"$VRIFT" --the-source-root "$CAS_DIR" gc --prune-stale --delete
+"$VRIFT" --the-source-root "$CAS_DIR" gc --prune-stale --delete --yes
 
 # ============================================================================
 # Step 7: Final status

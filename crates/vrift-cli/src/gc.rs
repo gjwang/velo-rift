@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 use vrift_cas::CasStore;
@@ -34,6 +35,10 @@ pub struct GcArgs {
     /// Skip grace period and delete immediately (dangerous!)
     #[arg(long)]
     immediate: bool,
+
+    /// Skip confirmation prompt (for scripts and CI)
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 pub fn run(cas_root: &std::path::Path, args: GcArgs) -> Result<()> {
@@ -142,6 +147,22 @@ pub fn run(cas_root: &std::path::Path, args: GcArgs) -> Result<()> {
             println!("║  ✨ CAS is Clean - No Orphans!         ║");
             println!("╚════════════════════════════════════════╝");
         } else {
+            // Ask for confirmation unless --yes is specified
+            if !args.yes {
+                println!();
+                print!("  ⚠️  Delete {} blobs ({})? [y/N] ", 
+                    format_number(orphan_count), format_bytes(orphan_bytes));
+                io::stdout().flush()?;
+                
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("  Cancelled.");
+                    println!();
+                    return Ok(());
+                }
+            }
             let gc_start = Instant::now();
 
             // Create progress bar for deletion

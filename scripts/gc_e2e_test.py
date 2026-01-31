@@ -186,7 +186,7 @@ def main():
             # === Step 4: Run GC --delete while BOTH manifests active ===
             print_step(4, "🔴 SAFETY TEST: GC --delete with both manifests active")
             
-            code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete"])
+            code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete", "--yes"])
             if code != 0:
                 print_fail(f"GC failed: {stderr[:100]}")
                 passed = False
@@ -228,7 +228,7 @@ def main():
             code, _, _ = run_cmd([str(VRIFT_BINARY), "gc", "--prune-stale"])
             
             # Run GC --delete
-            code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete"])
+            code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete", "--yes"])
             
             blobs_after_delete1 = get_blob_hashes(cas_dir)
             
@@ -258,10 +258,10 @@ def main():
                 passed = False
             else:
                 # Check for 100% dedup (all blobs already in CAS)
-                if "100" in stdout and "dedup" in stdout.lower():
-                    print_ok("Project 2 fully intact (100% dedup on re-ingest)")
-                elif "DEDUP" in stdout:
-                    print_ok("Project 2 data verified intact")
+                if "100.0%" in stdout or ("100" in stdout and "DEDUP" in stdout):
+                    print_ok("Project 2 fully intact (100% DEDUP on re-ingest)")
+                elif "0 blobs" in stdout:
+                    print_ok("Project 2 fully intact (0 new blobs = all preserved)")
                 else:
                     print_ok("Project 2 re-ingested successfully")
             
@@ -279,7 +279,7 @@ def main():
             proj2_reingest.unlink()
             
             code, _, _ = run_cmd([str(VRIFT_BINARY), "gc", "--prune-stale"])
-            code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete"])
+            code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete", "--yes"])
             
             blobs_final = get_blob_hashes(cas_dir)
             
