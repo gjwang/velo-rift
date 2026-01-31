@@ -466,3 +466,178 @@ Sandboxed apps (App Store tools, some IDE plugins) may crash if:
 | cargo build | Sync Layer + FUSE COW |
 | C++ incremental | FUSE COW on write |
 | Signed .app access | Sync Layer (clonefile) |
+
+---
+
+# Appendix D: Async IO Optimization (io_uring / kqueue)
+
+## Goal
+
+Handle "silent downgrade" (link → clonefile) without adding latency.
+
+> **Key Insight**: Eliminate blocking + use heuristics for prediction
+
+---
+
+## Strategy 1: Path Pattern Fast-Path
+
+Maintain a Bloom Filter for known sensitive paths:
+
+```rust
+fn should_skip_hardlink(path: &Path) -> bool {
+    // O(1) lookup in memory
+    SENSITIVE_PATHS.probably_contains(path)
+        || path.to_string_lossy().contains(".app/")
+        || path.to_string_lossy().contains(".framework/")
+}
+```
+
+**Effect**: Skip doomed `link()` attempt → save kernel roundtrip
+
+---
+
+## Strategy 2: Optimistic Concurrent Execution
+
+```rust
+async fn link_with_fallback(src: &Path, dest: &Path) -> Result<()> {
+    // Dispatch to worker pool immediately
+    tokio::spawn_blocking(move || {
+        match fs::hard_link(&src, &dest) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                // EPERM: instant retry with clonefile
+                reflink_copy::reflink(&src, &dest)
+            }
+            Err(e) => Err(e),
+        }
+    }).await?
+}
+```
+
+**Key Point**: clonefile on APFS is metadata-only → nearly same speed as link
+
+---
+
+## Linux: io_uring — Revolutionary Performance
+
+### Why io_uring?
+
+| Feature | Traditional IO | io_uring |
+|---------|----------------|----------|
+| Context Switch | Every syscall | Zero (shared ring buffer) |
+| Batching | N syscalls | 1 submission |
+| Chaining | Manual | Kernel-native |
+
+### Application to FUSE Backend
+
+```rust
+// Submit batch of writes to CAS in one ring submission
+let mut ring = IoUring::new(256)?;
+
+for file in files_to_ingest {
+    ring.submission().push(
+        Write::new(file.fd, file.data)
+            .build()
+    )?;
+}
+
+// Single kernel entry for all writes
+ring.submit_and_wait(files.len())?;
+```
+
+### Linked Operations
+
+```rust
+// Atomic: write → fsync → hardlink (all in kernel)
+ring.submission()
+    .push(Write::new(fd, data).build())?
+    .push(Fsync::new(fd).build().flags(IOSQE_IO_LINK))?
+    .push(Link::new(src, dest).build().flags(IOSQE_IO_LINK))?;
+```
+
+---
+
+## macOS: kqueue — Event-Driven, Not Async
+
+### Fundamental Difference
+
+| Aspect | kqueue | io_uring |
+|--------|--------|----------|
+| Model | "IO ready" notification | "Execute IO for me" |
+| Role in FUSE | Listen for /dev/fuse events | Execute backend operations |
+| True Async | ❌ | ✅ |
+
+### macOS Optimization Strategy
+
+Since macOS lacks io_uring equivalent:
+
+```rust
+// Use tokio blocking pool to simulate async
+async fn macos_batch_ingest(files: Vec<PathBuf>) -> Result<()> {
+    let handles: Vec<_> = files.into_iter().map(|f| {
+        tokio::task::spawn_blocking(move || {
+            link_or_clone_or_copy(&f.src, &f.dest)
+        })
+    }).collect();
+    
+    futures::future::try_join_all(handles).await?;
+    Ok(())
+}
+```
+
+**macOS-specific APIs**:
+- `fcopyfile()` for fast cloning
+- `posix_spawn()` for subprocess parallelism
+
+---
+
+## Performance Comparison
+
+| Mode | Latency Source | Throughput |
+|------|----------------|------------|
+| **Sync FUSE** | Disk IO + context switch | Low |
+| **kqueue + Thread Pool** | Thread switch overhead | Medium (macOS best) |
+| **io_uring** | Physical IO only | High (Linux best) |
+
+---
+
+## Architecture: VfsBackend Trait
+
+Abstract platform differences:
+
+```rust
+#[async_trait]
+trait VfsBackend: Send + Sync {
+    /// Platform-optimal link or clone
+    async fn link_or_clone(&self, src: PathBuf, dest: PathBuf) -> Result<()>;
+    
+    /// Batch ingest with io_uring (Linux) or thread pool (macOS)
+    async fn batch_ingest(&self, files: Vec<FilePayload>) -> Result<()>;
+    
+    /// Ensure durability before returning to FUSE
+    async fn sync(&self) -> Result<()>;
+}
+
+// Implementations
+struct LinuxBackend { ring: IoUring }
+struct MacosBackend { pool: ThreadPool }
+```
+
+---
+
+## Edge Cases
+
+| Issue | Platform | Mitigation |
+|-------|----------|------------|
+| io_uring hardlink instability | Old Linux kernels | Check kernel version |
+| LMDB async data loss | Both | Chain fsync in io_uring |
+| OverlayFS symlink limits | Linux | Detect FS type |
+
+---
+
+## Summary
+
+| Platform | Async Engine | Silent Downgrade Strategy |
+|----------|--------------|---------------------------|
+| **Linux** | io_uring | Batched link+clone in kernel |
+| **macOS** | kqueue + tokio | Thread pool + path prediction |
