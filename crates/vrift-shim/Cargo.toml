@@ -8,6 +8,7 @@ license.workspace = true
 [lib]
 name = "velo_shim"
 crate-type = ["cdylib"]  # Shared library for LD_PRELOAD
+test = false  # cdylib shim causes hangs when tested (INIT constructor)
 
 [dependencies]
 libc = "0.2"
