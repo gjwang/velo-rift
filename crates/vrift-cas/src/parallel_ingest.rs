@@ -246,6 +246,7 @@ pub fn parallel_ingest_with_fallback(
                                         source_path: path.clone(),
                                         hash,
                                         size,
+                                        was_new: true, // Fallback always creates new blob
                                     })
                                 }
                                 Err(_) => {

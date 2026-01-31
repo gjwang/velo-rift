@@ -101,6 +101,8 @@ pub struct IngestResult {
     pub source_path: PathBuf,
     pub hash: Blake3Hash,
     pub size: u64,
+    /// True if this was a new blob (not a duplicate)
+    pub was_new: bool,
 }
 
 // ============================================================================
@@ -144,6 +146,7 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
         source_path: source.to_owned(),
         hash,
         size,
+        was_new: true, // Always new for tier1 (no dedup check)
     })
 }
 
@@ -198,6 +201,7 @@ pub fn ingest_solid_tier1_dedup(
         source_path: source.to_owned(),
         hash,
         size,
+        was_new: is_new, // is_new from insert() tells us if this was first time
     })
 }
 
@@ -227,6 +231,7 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
         source_path: source.to_owned(),
         hash,
         size,
+        was_new: true, // Always new for tier2 (no dedup check)
     })
 }
 
@@ -268,6 +273,7 @@ pub fn ingest_solid_tier2_dedup(
             source_path: source.to_owned(),
             hash,
             size,
+            was_new: false, // Duplicate - already processed
         });
     }
     
@@ -285,6 +291,7 @@ pub fn ingest_solid_tier2_dedup(
         source_path: source.to_owned(),
         hash,
         size,
+        was_new: true, // New blob created
     })
 }
 
@@ -323,6 +330,7 @@ pub fn ingest_phantom(source: &Path, cas_root: &Path) -> Result<IngestResult> {
         source_path: source.to_owned(),
         hash,
         size,
+        was_new: true, // Phantom always creates new (rename)
     })
 }
 

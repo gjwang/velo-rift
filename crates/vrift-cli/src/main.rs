@@ -479,7 +479,9 @@ async fn cmd_ingest(
 
                     files_ingested += 1;
                     bytes_ingested += ingest_result.size;
-                    unique_blobs += 1;
+                    if ingest_result.was_new {
+                        unique_blobs += 1;
+                    }
                 }
                 Err(e) => {
                     // Check for cross-device error (EXDEV)
