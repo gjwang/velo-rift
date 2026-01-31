@@ -23,7 +23,7 @@ mod mount;
 mod active;
 pub mod gc;
 
-use vrift_cas::{create_backend, ingest_phantom, ingest_solid_tier1, ingest_solid_tier2, CasStore};
+use vrift_cas::{ingest_phantom, ingest_solid_tier1, ingest_solid_tier2, CasStore};
 use vrift_manifest::lmdb::{AssetTier, LmdbManifest};
 use vrift_manifest::{Manifest, VnodeEntry};
 
@@ -302,7 +302,7 @@ async fn cmd_ingest(
     directory: &Path,
     output: &Path,
     prefix: Option<&str>,
-    parallel: bool,
+    _parallel: bool,
     mode: &str,
     tier: &str,
 ) -> Result<()> {

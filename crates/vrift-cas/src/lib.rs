@@ -744,7 +744,7 @@ mod tests {
         let data = b"mutable content";
         let target_path = target_dir.path().join("mutable_file.txt");
 
-        let hash = cas.store_and_link_mutable(data, &target_path).unwrap();
+        let _hash = cas.store_and_link_mutable(data, &target_path).unwrap();
 
         // Verify hardlink exists (not symlink)
         let meta = target_path.metadata().unwrap();

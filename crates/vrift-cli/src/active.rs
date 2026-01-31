@@ -236,6 +236,7 @@ pub fn deactivate(project_root: &Path) -> Result<()> {
 }
 
 /// Validation result for a single projection entry
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ValidationResult {
     pub path: PathBuf,
@@ -244,6 +245,7 @@ pub struct ValidationResult {
 }
 
 /// Projection tier classification
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionTier {
     /// Tier-1: Immutable assets (symlink to CAS)
@@ -253,6 +255,7 @@ pub enum ProjectionTier {
 }
 
 /// Validation status for a projection entry
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationStatus {
     /// Projection is valid
@@ -271,6 +274,7 @@ pub enum ValidationStatus {
 ///
 /// Called on `vrift active` to recover from crashes or unclean shutdowns.
 /// Validates existing projections and repairs if necessary.
+#[allow(dead_code)]
 pub fn startup_recovery(project_root: &Path, cas_root: &Path) -> Result<RecoveryReport> {
     let vrift = VriftDir::new(project_root);
     
@@ -332,6 +336,7 @@ pub fn startup_recovery(project_root: &Path, cas_root: &Path) -> Result<Recovery
 }
 
 /// Recovery report from startup_recovery
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct RecoveryReport {
     pub session_found: bool,
@@ -345,6 +350,7 @@ pub struct RecoveryReport {
     pub repaired_entries: usize,
 }
 
+#[allow(dead_code)]
 impl RecoveryReport {
     /// Check if repairs are needed
     pub fn needs_repair(&self) -> bool {

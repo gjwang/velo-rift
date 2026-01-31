@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
-use crate::{compute_path_hash, Blake3Hash, PathHash, VnodeEntry};
+use crate::{compute_path_hash, PathHash, VnodeEntry};
 
 /// LMDB Manifest errors
 #[derive(Error, Debug)]

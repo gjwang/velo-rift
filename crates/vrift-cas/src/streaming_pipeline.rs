@@ -13,7 +13,6 @@
 //! (no miss)     (backpressure) (zero-copy) (2 fsync/100 files)
 //! ```
 
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -21,9 +20,9 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{bounded, RecvTimeoutError, Sender};
 use dashmap::DashSet;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{RecursiveMode, Watcher};
 
 use crate::{Blake3Hash, CasError, CasStore, Result};
 

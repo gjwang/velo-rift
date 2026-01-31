@@ -10,9 +10,8 @@ use std::fs::{self, File};
 use std::os::unix::fs as unix_fs;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
-use nix::fcntl::{flock, FlockArg};
+use nix::fcntl::{Flock, FlockArg};
 
 use crate::{Blake3Hash, CasError, Result};
 
@@ -63,12 +62,12 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
     let metadata = file.metadata()?;
     let size = metadata.len();
     
-    // Acquire shared lock (blocks external writers)
-    flock(file.as_raw_fd(), FlockArg::LockShared)
-        .map_err(|e| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    // Acquire shared lock via Flock guard (auto-unlocks on drop)
+    let locked_file = Flock::lock(file, FlockArg::LockShared)
+        .map_err(|(_, e)| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     
-    // Stream hash (no full read)
-    let hash = stream_hash(&file)?;
+    // Stream hash (no full read) - deref Flock to get underlying File
+    let hash = stream_hash(&*locked_file)?;
     let cas_target = cas_path(cas_root, &hash, size);
     
     // Create CAS directory if needed
@@ -81,10 +80,8 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
         fs::hard_link(source, &cas_target)?;
     }
     
-    // Unlock before modifying source
-    flock(file.as_raw_fd(), FlockArg::Unlock)
-        .map_err(|e| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-    drop(file);
+    // Drop the lock guard before modifying source
+    drop(locked_file);
     
     // Replace source with symlink
     fs::remove_file(source)?;
@@ -103,12 +100,12 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
     let metadata = file.metadata()?;
     let size = metadata.len();
     
-    // Acquire shared lock
-    flock(file.as_raw_fd(), FlockArg::LockShared)
-        .map_err(|e| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    // Acquire shared lock via Flock guard (auto-unlocks on drop)
+    let locked_file = Flock::lock(file, FlockArg::LockShared)
+        .map_err(|(_, e)| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     
-    // Stream hash
-    let hash = stream_hash(&file)?;
+    // Stream hash - deref Flock to get underlying File
+    let hash = stream_hash(&*locked_file)?;
     let cas_target = cas_path(cas_root, &hash, size);
     
     // Create CAS directory if needed
@@ -121,9 +118,7 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
         fs::hard_link(source, &cas_target)?;
     }
     
-    flock(file.as_raw_fd(), FlockArg::Unlock)
-        .map_err(|e| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-    
+    // Lock guard auto-drops here
     Ok(IngestResult {
         source_path: source.to_owned(),
         hash,
@@ -137,18 +132,16 @@ pub fn ingest_phantom(source: &Path, cas_root: &Path) -> Result<IngestResult> {
     let metadata = file.metadata()?;
     let size = metadata.len();
     
-    // Acquire shared lock
-    flock(file.as_raw_fd(), FlockArg::LockShared)
-        .map_err(|e| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    // Acquire shared lock via Flock guard (auto-unlocks on drop)
+    let locked_file = Flock::lock(file, FlockArg::LockShared)
+        .map_err(|(_, e)| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     
-    // Stream hash
-    let hash = stream_hash(&file)?;
+    // Stream hash - deref Flock to get underlying File
+    let hash = stream_hash(&*locked_file)?;
     let cas_target = cas_path(cas_root, &hash, size);
     
-    // Unlock and close before rename
-    flock(file.as_raw_fd(), FlockArg::Unlock)
-        .map_err(|e| CasError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-    drop(file);
+    // Drop lock guard before rename
+    drop(locked_file);
     
     // Create CAS directory if needed
     if let Some(parent) = cas_target.parent() {
@@ -175,7 +168,8 @@ pub fn ingest_phantom(source: &Path, cas_root: &Path) -> Result<IngestResult> {
 // ============================================================================
 
 /// Stream hash using mmap (no full read into memory)
-fn stream_hash(file: &File) -> Result<Blake3Hash> {
+fn stream_hash<F: AsRawFd>(file: &F) -> Result<Blake3Hash> {
+    // SAFETY: mmap requires a valid file descriptor
     let mmap = unsafe { memmap2::Mmap::map(file)? };
     let hash = blake3::hash(&mmap);
     Ok(*hash.as_bytes())
@@ -214,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_solid_tier2_zero_copy() {
-        let (source_dir, cas_dir, test_file) = setup();
+        let (_source_dir, cas_dir, test_file) = setup();
         
         let result = ingest_solid_tier2(&test_file, cas_dir.path()).unwrap();
         
@@ -231,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_phantom_zero_copy() {
-        let (source_dir, cas_dir, test_file) = setup();
+        let (_source_dir, cas_dir, test_file) = setup();
         let original_content = fs::read(&test_file).unwrap();
         
         let result = ingest_phantom(&test_file, cas_dir.path()).unwrap();

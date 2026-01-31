@@ -16,10 +16,10 @@ use nix::{
 
 /// Run a command in an isolated environment
 pub fn run_isolated(
-    command: &[String],
-    manifest_path: &Path,
-    cas_root: &Path,
-    base_manifest_path: Option<&Path>,
+    _command: &[String],
+    _manifest_path: &Path,
+    _cas_root: &Path,
+    _base_manifest_path: Option<&Path>,
 ) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     #[allow(unused_variables)]

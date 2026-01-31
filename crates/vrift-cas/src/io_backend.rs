@@ -124,7 +124,6 @@ mod uring {
 mod gcd {
     use super::*;
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// GCD-inspired backend using Rayon with batch fsync optimization
     ///
@@ -132,13 +131,11 @@ mod gcd {
     /// 1. Parallel writes without immediate fsync
     /// 2. Single directory fsync after all writes
     /// 3. Batch renames
-    pub struct GcdBackend {
-        batch_size: usize,
-    }
+    pub struct GcdBackend;
 
     impl GcdBackend {
         pub fn new() -> Self {
-            Self { batch_size: 100 }
+            Self
         }
     }
 
@@ -260,6 +257,7 @@ pub fn rayon_backend() -> impl IngestBackend {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 pub fn macos_backend() -> impl IngestBackend {
     gcd::GcdBackend::new()
 }
