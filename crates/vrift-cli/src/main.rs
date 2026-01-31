@@ -171,12 +171,38 @@ enum Commands {
         #[arg(value_name = "DIR")]
         directory: Option<PathBuf>,
     },
+
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
 }
 
 #[derive(Subcommand)]
 enum DaemonCommands {
     /// Check daemon status (ping)
     Status,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Initialize default configuration file
+    Init {
+        /// Create global config (~/.vrift/config.toml)
+        #[arg(long)]
+        global: bool,
+        
+        /// Overwrite existing config
+        #[arg(long)]
+        force: bool,
+    },
+    
+    /// Show current configuration
+    Show,
+    
+    /// Show configuration file path
+    Path,
 }
 
 fn main() -> Result<()> {
@@ -257,11 +283,64 @@ async fn async_main(cli: Cli) -> Result<()> {
             let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
             active::deactivate(&dir)
         }
+        Commands::Config { command } => cmd_config(command),
+    }
+}
+
+/// Configuration management commands
+fn cmd_config(command: ConfigCommands) -> Result<()> {
+    match command {
+        ConfigCommands::Init { global, force } => {
+            let config_path = if global {
+                vrift_config::Config::global_config_path()
+                    .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+            } else {
+                PathBuf::from(".vrift/config.toml")
+            };
+            
+            if config_path.exists() && !force {
+                anyhow::bail!(
+                    "Config file already exists: {}\nUse --force to overwrite", 
+                    config_path.display()
+                );
+            }
+            
+            // Create parent directory if needed
+            if let Some(parent) = config_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            
+            // Generate default config
+            let default_config = vrift_config::Config::default_toml();
+            std::fs::write(&config_path, default_config)?;
+            
+            println!("Created config file: {}", config_path.display());
+            Ok(())
+        }
+        ConfigCommands::Show => {
+            let config = vrift_config::config();
+            let toml_str = toml::to_string_pretty(&*config)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
+            println!("{}", toml_str);
+            Ok(())
+        }
+        ConfigCommands::Path => {
+            // Show which config files are being used
+            if let Some(global_path) = vrift_config::Config::global_config_path() {
+                let exists = global_path.exists();
+                println!("Global: {} {}", global_path.display(), if exists { "[exists]" } else { "[not found]" });
+            }
+            
+            let project_path = PathBuf::from(".vrift/config.toml");
+            let exists = project_path.exists();
+            println!("Project: {} {}", project_path.display(), if exists { "[exists]" } else { "[not found]" });
+            
+            Ok(())
+        }
     }
 }
 
 
-/// Resolve dependencies from a lockfile
 fn cmd_resolve(cas_root: &Path, lockfile: &Path) -> Result<()> {
     if !lockfile.exists() {
         anyhow::bail!("Lockfile not found: {}", lockfile.display());

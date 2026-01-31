@@ -19,6 +19,7 @@ vrift-manifest.workspace = true
 vrift-shim.workspace = true
 vrift-fuse = { workspace = true, optional = true }
 vrift-lock.workspace = true
+vrift-config.workspace = true
 vrift-runtime.workspace = true
 nix.workspace = true
 tempfile.workspace = true
@@ -29,6 +30,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true }
 serde_json = "1.0"
+toml = "0.8"
 rayon = "1.11.0"
 libc = "0.2"
 dirs = "5"
