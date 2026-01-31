@@ -1,7 +1,22 @@
 # RFC-0039: Transparent Virtual Projection & In-place Transmutation
 
 ## 1. Status
-**Draft**
+**Partial Implementation** (Updated: 2026-02-01)
+
+### Implementation Status
+
+| Feature | Section | Status | Notes |
+|---------|---------|--------|-------|
+| Solid Tier-1 (immutable) | §5.1.1 | ✅ Done | `hard_link` + symlink replacement |
+| Solid Tier-2 (mutable) | §5.1.2 | ✅ Done | `hard_link`, keep original |
+| Phantom Mode | §5.2 | ✅ Done | Atomic `rename()` to CAS |
+| Ingest Lock (flock) | §5.3 | ✅ Done | `lock_with_retry()` |
+| CAS Sharding | §6 | ✅ Done | `blake3/ab/cd/hash_size.ext` |
+| Parallel Ingest | - | ✅ Done | Rayon, ~14,000 files/sec |
+| Break-Before-Write | §5.1.2 | ⏸️ Deferred | Requires VFS intercept |
+| Live Ingest on close() | §3.2 | ⏸️ Deferred | Requires VFS intercept |
+| Tier-1 chattr +i | §5.1.1 | ⏸️ Deferred | P1 feature |
+| Tier-1 chown | §5.1.1 | ⏸️ Deferred | Requires daemon |
 
 ## 2. Context & Objectives
 Velo Rift™ aims to eliminate the friction between "Project Content" and "Disk Storage." This RFC proposes a **Transparent Projection Model** where the VFS layer replaces heavy-duty physical directories (e.g., `node_modules`, `target`, `.venv`) with a dynamic virtual lens. The environment is intended to be **long-lived**, becoming the primary state of the workspace rather than a transient execution context.
