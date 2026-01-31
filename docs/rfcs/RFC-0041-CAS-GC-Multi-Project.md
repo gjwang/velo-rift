@@ -234,10 +234,226 @@ fn fix_permissions(cas_root: &Path) -> Result<()> {
 | `vrift gc` | Dry-run GC analysis | Safe |
 | `vrift gc --delete` | Delete orphaned blobs | Safe (only orphans) |
 | `vrift gc --only <manifests> --delete` | Keep only specified | Dangerous |
+| `vrift gc --older-than <duration>` | Only delete orphans older than threshold | Safe |
 | `vrift clean --unregister <project>` | Remove project registration | Safe |
 | `vrift clean --all --force` | Wipe entire CAS | Destructive |
 | `vrift clean --all --force --fix-perms` | Wipe with perm fix | Destructive |
 | `vrift status` | Show CAS and project status | Safe |
+| `vrift registry --rebuild` | Rebuild registry from discovered manifests | Safe |
+| `vrift doctor` | Health check (integrity, permissions, disk) | Safe |
+
+### Interactive Confirmations
+
+For destructive operations, require explicit user confirmation:
+
+```
+$ vrift clean --all --force
+
+⚠️  WARNING: This will delete the ENTIRE CAS!
+
+   Location: ~/.vrift/the_source
+   Size:     1.48 GB
+   Blobs:    115,363
+   Projects: 4 registered
+
+   Type 'DELETE ALL' to confirm: DELETE ALL
+
+   Deleting... Done.
+   Removed 115,363 blobs (1.48 GB)
+```
+
+**Bypass**: Use `--yes` flag for scripted usage (e.g., in CI):
+```bash
+vrift clean --all --force --yes
+```
+
+---
+
+## Concurrency & Locking
+
+### Problem
+Concurrent operations (e.g., `vrift ingest` and `vrift gc --delete`) could cause data corruption or premature blob deletion.
+
+### Solution: File-Based Locking
+
+```rust
+use fs2::FileExt;
+
+fn acquire_registry_lock() -> Result<File> {
+    let lock_path = PathBuf::from("~/.vrift/registry/.lock");
+    let lock_file = File::create(&lock_path)?;
+    
+    // Try to acquire exclusive lock (blocks if held by another process)
+    lock_file.lock_exclusive()?;
+    
+    Ok(lock_file)
+}
+
+// Usage in GC
+fn run_gc(delete: bool) -> Result<()> {
+    let _lock = acquire_registry_lock()?;
+    
+    // ... GC operations ...
+    
+    Ok(())
+    // Lock released when _lock goes out of scope
+}
+```
+
+### Lock Behavior
+
+| Operation | Lock Type | Behavior if Locked |
+|-----------|-----------|-------------------|
+| `vrift ingest` | Exclusive | Wait (with timeout) |
+| `vrift gc` | Exclusive | Wait (with timeout) |
+| `vrift status` | Shared | Proceed (read-only) |
+
+**Timeout**: Default 30s, configurable via `VRIFT_LOCK_TIMEOUT`.
+
+---
+
+## Atomic Operations
+
+### Registry Write Safety
+
+Prevent corruption from interrupted writes using write-rename pattern:
+
+```rust
+fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
+    let tmp_path = path.with_extension("json.tmp");
+    
+    // 1. Write to temp file
+    let file = File::create(&tmp_path)?;
+    serde_json::to_writer_pretty(file, data)?;
+    file.sync_all()?;
+    
+    // 2. Atomic rename (POSIX guarantees atomicity)
+    fs::rename(&tmp_path, path)?;
+    
+    Ok(())
+}
+```
+
+### Registry Directory Permissions
+
+Ensure user-private access at creation:
+
+```rust
+fn ensure_registry_dir() -> Result<PathBuf> {
+    let registry_dir = PathBuf::from("~/.vrift/registry");
+    fs::create_dir_all(&registry_dir)?;
+    
+    // Set 0700 permissions (owner-only)
+    fs::set_permissions(&registry_dir, Permissions::from_mode(0o700))?;
+    
+    Ok(registry_dir)
+}
+```
+
+---
+
+## Two-Phase GC Safety
+
+### Problem: TOCTOU Race Condition
+
+Between marking a blob as orphan and deletion, another process could reference it.
+
+### Solution: Mark-and-Sweep with Grace Period
+
+```
+Phase 1: Mark (vrift gc)
+  1. Scan all manifests
+  2. Identify orphan blobs
+  3. Record orphans with timestamp in ~/.vrift/registry/orphans.json
+  
+Phase 2: Sweep (vrift gc --delete)
+  1. Load orphans.json
+  2. Only delete blobs marked as orphan for > GRACE_PERIOD (default: 1 hour)
+  3. Re-verify each blob is still orphan before deletion
+```
+
+**orphans.json**:
+```json
+{
+  "version": 1,
+  "grace_period_seconds": 3600,
+  "orphans": {
+    "blake3:abc123...": {"marked_at": "2026-01-31T12:00:00Z"},
+    "blake3:def456...": {"marked_at": "2026-01-31T12:00:00Z"}
+  }
+}
+```
+
+**CLI Integration**:
+```bash
+# Immediate delete (skips grace period - dangerous)
+vrift gc --delete --immediate
+
+# Respect grace period (default - safe)
+vrift gc --delete
+
+# Custom grace period
+vrift gc --delete --older-than 2h
+```
+
+---
+
+## Recovery & Diagnostics
+
+### Registry Recovery
+
+If `manifests.json` is corrupted or deleted:
+
+```bash
+vrift registry --rebuild
+```
+
+**Algorithm**:
+1. Scan common locations for `.vrift.manifest` files:
+   - All project directories in `manifests/<uuid>.manifest` cache
+   - Optionally: search paths provided by user
+2. Rebuild `manifests.json` from discovered manifests
+3. Report discovered vs. expected manifests
+
+### Health Check
+
+```bash
+vrift doctor
+```
+
+**Checks**:
+- Registry file integrity (valid JSON, schema version)
+- Stale manifest detection
+- Orphan blob count
+- CAS directory permissions
+- Disk space availability
+- Lock file status
+
+**Output**:
+```
+VRift Doctor Report:
+
+  ✅ Registry: valid (3 manifests)
+  ⚠️  Stale manifests: 1 (run gc --prune-stale)
+  ✅ CAS permissions: OK
+  ✅ Disk space: 45 GB available
+  ✅ Lock: not held
+
+  Recommendations:
+  - Run `vrift gc --prune-stale` to clean stale manifests
+```
+
+### Audit Logging
+
+All destructive operations logged to `~/.vrift/gc.log`:
+
+```
+2026-01-31T12:00:00Z DELETE blob:blake3:abc123 size:1024 reason:orphan
+2026-01-31T12:00:01Z PRUNE manifest:a1b2c3d4-... path:/home/user/project1 reason:stale
+2026-01-31T12:00:02Z CLEAN_ALL blobs:45231 size:1.48GB
+```
+
+**Log Rotation**: Keep last 10 log files or 100MB total.
 
 ---
 
@@ -245,16 +461,21 @@ fn fix_permissions(cas_root: &Path) -> Result<()> {
 
 ### Phase 1: Basic GC (MVP)
 - [ ] Implement manifest registry (`~/.vrift/registry/manifests.json`)
+- [ ] File-based locking (`flock`) for concurrent operations
+- [ ] Atomic JSON writes (write-rename pattern)
 - [ ] `vrift ingest` auto-registers manifests
 - [ ] `vrift gc` scans and reports orphans
-- [ ] `vrift gc --delete` removes orphans
+- [ ] `vrift gc --delete` removes orphans (with grace period)
 
 ### Phase 2: Project Management
 - [ ] `vrift clean --unregister <project>`
 - [ ] `vrift status` with per-project breakdown
 - [ ] Permission fix utilities
+- [ ] Audit logging to `~/.vrift/gc.log`
 
-### Phase 3: Advanced Features
+### Phase 3: Recovery & Advanced Features
+- [ ] `vrift registry --rebuild` recovery command
+- [ ] `vrift doctor` health check
 - [ ] Reference counting per-blob
 - [ ] Incremental GC (track last GC time)
 - [ ] CAS compaction (defragmentation)
@@ -283,9 +504,21 @@ Track references at VFS level. **Rejected** because:
 
 ## Open Questions
 
-1. **Manifest discovery**: Should `vrift gc` auto-discover manifests in common locations?
-2. **Stale manifests**: How to handle manifests that point to deleted projects?
-3. **Concurrent access**: Locking strategy during GC?
+### Resolved
+
+1. ~~**Manifest discovery**: Should `vrift gc` auto-discover manifests in common locations?~~
+   - **Answer**: Yes, via `vrift registry --rebuild` command
+
+2. ~~**Stale manifests**: How to handle manifests that point to deleted projects?~~
+   - **Answer**: Auto-detect via `source_path` check, mark as `status: "stale"`, require explicit `--prune-stale`
+
+3. ~~**Concurrent access**: Locking strategy during GC?~~
+   - **Answer**: File-based `flock` with configurable timeout (default 30s)
+
+### Remaining
+
+4. **Cross-device CAS**: How to handle CAS on different filesystem/device from project?
+5. **Remote CAS**: Future support for network-attached CAS (NFS, S3)?
 
 ---
 
