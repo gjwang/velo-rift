@@ -6,6 +6,9 @@
 //!
 //! Pattern 987: macOS EPERM remediation - fallback to copy
 
+// Only compile this entire test file on macOS
+#![cfg(target_os = "macos")]
+
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
