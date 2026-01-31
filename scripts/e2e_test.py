@@ -6,12 +6,14 @@ Comprehensive end-to-end tests for zero-copy ingest functionality.
 Tests tiered datasets, dedup, EPERM handling, and cross-project dedup.
 
 Usage:
-    uv run python scripts/e2e_test.py
-    # or
-    python3 scripts/e2e_test.py
+    python3 scripts/e2e_test.py              # Default: shared mode
+    python3 scripts/e2e_test.py --isolated   # Each dataset gets independent CAS
+    python3 scripts/e2e_test.py --shared     # All datasets share CAS (default)
+    python3 scripts/e2e_test.py --incremental # Use persistent CAS, test re-ingest
+    python3 scripts/e2e_test.py --full       # Include large/xlarge datasets
 
 Requirements:
-    - Python 3.11+
+    - Python 3.10+
     - Node.js / npm (for dependency installation)
     - Built vrift binary (cargo build --release)
 """
@@ -24,6 +26,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +38,9 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 PROJECT_ROOT = SCRIPT_DIR.parent
 VRIFT_BINARY = PROJECT_ROOT / "target" / "release" / "vrift"
 BENCHMARKS_DIR = PROJECT_ROOT / "examples" / "benchmarks"
+
+# Persistent CAS for incremental mode
+PERSISTENT_CAS = Path.home() / ".vrift" / "e2e_test_cas"
 
 # Test datasets
 DATASETS = {
@@ -59,6 +65,19 @@ DATASETS = {
         "max_time_sec": 60,
     },
 }
+
+# Monorepo config: packages with their dependencies
+MONOREPO_PACKAGES = {
+    "web": "large_package.json",      # Heavy frontend
+    "api": "medium_package.json",     # Backend
+    "shared": "small_package.json",   # Shared utilities
+}
+
+
+class TestMode(Enum):
+    ISOLATED = "isolated"      # Each dataset gets independent CAS
+    SHARED = "shared"          # All datasets share CAS (cross-project dedup)
+    INCREMENTAL = "incremental"  # Persistent CAS, test re-ingest speed
 
 
 @dataclass
@@ -149,14 +168,15 @@ def test_binary_build() -> TestResult:
     )
 
 
-def test_dataset_ingest(name: str, config: dict, work_dir: Path, cas_dir: Path) -> TestResult:
+def test_dataset_ingest(name: str, config: dict, work_dir: Path, cas_dir: Path, is_reingest: bool = False) -> TestResult:
     """Test: Ingest a dataset and verify."""
     start = time.time()
+    test_name = f"Re-ingest {name}" if is_reingest else f"Ingest {name}"
     
     package_json = BENCHMARKS_DIR / config["package"]
     if not package_json.exists():
         return TestResult(
-            name=f"Ingest {name}",
+            name=test_name,
             passed=False,
             duration_sec=0,
             files=0,
@@ -166,41 +186,46 @@ def test_dataset_ingest(name: str, config: dict, work_dir: Path, cas_dir: Path) 
     # Setup work directory
     dataset_dir = work_dir / name
     dataset_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(package_json, dataset_dir / "package.json")
     
-    # Install dependencies
-    install_start = time.time()
-    code, _, stderr = run_cmd(
-        ["npm", "install", "--legacy-peer-deps", "--silent"],
-        cwd=dataset_dir,
-        timeout=300,
-    )
-    if code != 0:
-        # Try without legacy-peer-deps
+    node_modules = dataset_dir / "node_modules"
+    install_time = 0.0
+    
+    # Skip npm install for re-ingest if node_modules exists
+    if not node_modules.exists() or not is_reingest:
+        shutil.copy(package_json, dataset_dir / "package.json")
+        
+        # Install dependencies
+        install_start = time.time()
         code, _, stderr = run_cmd(
-            ["npm", "install", "--silent"],
+            ["npm", "install", "--legacy-peer-deps", "--silent"],
             cwd=dataset_dir,
             timeout=300,
         )
-    
-    if code != 0:
-        return TestResult(
-            name=f"Ingest {name}",
-            passed=False,
-            duration_sec=time.time() - start,
-            files=0,
-            message=f"npm install failed: {stderr[:100]}",
-        )
-    
-    install_time = time.time() - install_start
+        if code != 0:
+            # Try without legacy-peer-deps
+            code, _, stderr = run_cmd(
+                ["npm", "install", "--silent"],
+                cwd=dataset_dir,
+                timeout=300,
+            )
+        
+        if code != 0:
+            return TestResult(
+                name=test_name,
+                passed=False,
+                duration_sec=time.time() - start,
+                files=0,
+                message=f"npm install failed: {stderr[:100]}",
+            )
+        
+        install_time = time.time() - install_start
     
     # Count files
-    node_modules = dataset_dir / "node_modules"
     file_count = count_files(node_modules)
     
     if file_count < config["min_files"]:
         return TestResult(
-            name=f"Ingest {name}",
+            name=test_name,
             passed=False,
             duration_sec=time.time() - start,
             files=file_count,
@@ -212,18 +237,18 @@ def test_dataset_ingest(name: str, config: dict, work_dir: Path, cas_dir: Path) 
     if vrift_meta.exists():
         shutil.rmtree(vrift_meta)
     
-    # Run ingest
+    # Run ingest with new --the-source-root flag
     manifest_path = work_dir / f"{name}_manifest.bin"
     ingest_start = time.time()
     code, stdout, stderr = run_cmd(
-        [str(VRIFT_BINARY), "--cas-root", str(cas_dir), "ingest", str(node_modules), "-o", str(manifest_path)],
+        [str(VRIFT_BINARY), "--the-source-root", str(cas_dir), "ingest", str(node_modules), "-o", str(manifest_path)],
         timeout=config["max_time_sec"] * 2,
     )
     ingest_time = time.time() - ingest_start
     
     if code != 0:
         return TestResult(
-            name=f"Ingest {name}",
+            name=test_name,
             passed=False,
             duration_sec=time.time() - start,
             files=file_count,
@@ -233,27 +258,34 @@ def test_dataset_ingest(name: str, config: dict, work_dir: Path, cas_dir: Path) 
     # Verify manifest created
     if not manifest_path.exists():
         return TestResult(
-            name=f"Ingest {name}",
+            name=test_name,
             passed=False,
             duration_sec=time.time() - start,
             files=file_count,
             message="Manifest not created",
         )
     
-    # Check timing
-    passed = ingest_time <= config["max_time_sec"]
+    # Check timing (re-ingest should be faster)
+    max_time = config["max_time_sec"] / 2 if is_reingest else config["max_time_sec"]
+    passed = ingest_time <= max_time
     rate = int(file_count / ingest_time) if ingest_time > 0 else 0
     
+    msg_parts = [f"{rate:,} files/sec"]
+    if install_time > 0:
+        msg_parts.append(f"npm: {install_time:.1f}s")
+    if not passed:
+        msg_parts.append(f"SLOW: max {max_time:.1f}s")
+    
     return TestResult(
-        name=f"Ingest {name}",
+        name=test_name,
         passed=passed,
         duration_sec=ingest_time,
         files=file_count,
-        message=f"{rate:,} files/sec (npm: {install_time:.1f}s)" + ("" if passed else f" [SLOW: max {config['max_time_sec']}s]"),
+        message=" | ".join(msg_parts),
     )
 
 
-def test_dedup_efficiency(work_dir: Path, cas_dir: Path) -> TestResult:
+def test_dedup_efficiency(work_dir: Path, cas_dir: Path, mode: TestMode) -> TestResult:
     """Test: Cross-project deduplication."""
     start = time.time()
     
@@ -278,7 +310,14 @@ def test_dedup_efficiency(work_dir: Path, cas_dir: Path) -> TestResult:
         )
     
     dedup_ratio = 1 - (cas_blobs / total_files) if total_files > 0 else 0
-    passed = dedup_ratio > 0.1  # At least 10% dedup
+    
+    # Different thresholds for different modes
+    if mode == TestMode.ISOLATED:
+        min_dedup = 0.0  # No cross-project dedup expected
+    else:
+        min_dedup = 0.1  # At least 10% dedup for shared mode
+    
+    passed = dedup_ratio >= min_dedup
     
     return TestResult(
         name="Dedup Efficiency",
@@ -343,13 +382,126 @@ def test_link_strategy() -> TestResult:
     )
 
 
+def test_monorepo_dedup(work_dir: Path, cas_dir: Path) -> TestResult:
+    """Test: True monorepo cross-package deduplication.
+    
+    Creates independent packages/ subdirectories (not npm workspaces hoisting)
+    to test VRift's ability to deduplicate across separate npm installations.
+    """
+    start = time.time()
+    
+    monorepo_dir = work_dir / "monorepo"
+    monorepo_dir.mkdir(parents=True, exist_ok=True)
+    
+    total_files = 0
+    package_stats = {}
+    
+    # Create each package with its own node_modules
+    for pkg_name, pkg_json in MONOREPO_PACKAGES.items():
+        pkg_dir = monorepo_dir / "packages" / pkg_name
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy package.json
+        src_pkg = BENCHMARKS_DIR / pkg_json
+        if not src_pkg.exists():
+            continue
+            
+        shutil.copy(src_pkg, pkg_dir / "package.json")
+        
+        # Install dependencies independently (NO hoisting)
+        code, _, stderr = run_cmd(
+            ["npm", "install", "--legacy-peer-deps", "--silent"],
+            cwd=pkg_dir,
+            timeout=300,
+        )
+        
+        if code != 0:
+            return TestResult(
+                name="Monorepo Dedup",
+                passed=False,
+                duration_sec=time.time() - start,
+                files=0,
+                message=f"npm install failed for {pkg_name}: {stderr[:100]}",
+            )
+        
+        # Count files
+        node_modules = pkg_dir / "node_modules"
+        file_count = count_files(node_modules)
+        total_files += file_count
+        package_stats[pkg_name] = file_count
+    
+    if total_files == 0:
+        return TestResult(
+            name="Monorepo Dedup",
+            passed=False,
+            duration_sec=time.time() - start,
+            files=0,
+            message="No files installed",
+        )
+    
+    # Ingest entire packages/ directory at once
+    packages_dir = monorepo_dir / "packages"
+    manifest_path = work_dir / "monorepo_manifest.bin"
+    
+    ingest_start = time.time()
+    code, stdout, stderr = run_cmd(
+        [str(VRIFT_BINARY), "--the-source-root", str(cas_dir), "ingest", str(packages_dir), "-o", str(manifest_path)],
+        timeout=120,
+    )
+    ingest_time = time.time() - ingest_start
+    
+    if code != 0:
+        return TestResult(
+            name="Monorepo Dedup",
+            passed=False,
+            duration_sec=time.time() - start,
+            files=total_files,
+            message=f"Ingest failed: {stderr[:200]}",
+        )
+    
+    # Check CAS blob count
+    cas_blobs = count_files(cas_dir)
+    dedup_ratio = 1 - (cas_blobs / total_files) if total_files > 0 else 0
+    
+    # Expect significant dedup (packages share many common deps)
+    passed = dedup_ratio > 0.3  # At least 30% dedup expected
+    
+    pkg_summary = ", ".join(f"{k}={v:,}" for k, v in package_stats.items())
+    
+    return TestResult(
+        name="Monorepo Dedup",
+        passed=passed,
+        duration_sec=ingest_time,
+        files=cas_blobs,
+        message=f"[{pkg_summary}] → {total_files:,} files → {cas_blobs:,} blobs ({dedup_ratio*100:.1f}% dedup)",
+    )
+
+
 # ============================================================================
 # Main
 # ============================================================================
 
 def main():
+    # Parse arguments
+    mode = TestMode.SHARED  # Default
+    full_test = False
+    monorepo_test = False
+    
+    for arg in sys.argv[1:]:
+        if arg == "--isolated":
+            mode = TestMode.ISOLATED
+        elif arg == "--shared":
+            mode = TestMode.SHARED
+        elif arg == "--incremental":
+            mode = TestMode.INCREMENTAL
+        elif arg == "--full":
+            full_test = True
+        elif arg == "--monorepo":
+            monorepo_test = True
+    
     print("=" * 60)
     print("VRift E2E Regression Test Suite")
+    print(f"Mode: {mode.value.upper()}")
     print("=" * 60)
     print()
     
@@ -376,38 +528,100 @@ def main():
     print_result(result)
     results.append(result)
     
+    # Determine datasets to test
+    datasets_to_test = ["small", "medium"]
+    if full_test:
+        datasets_to_test = ["small", "medium", "large", "xlarge"]
+    
     # Create temp directories
     with tempfile.TemporaryDirectory(prefix="vrift-e2e-") as tmp:
         work_dir = Path(tmp) / "work"
-        cas_dir = Path(tmp) / "cas"
         work_dir.mkdir()
-        cas_dir.mkdir()
         
-        print(f"\n📁 Work dir: {work_dir}")
-        print(f"📁 CAS dir: {cas_dir}")
+        # Setup CAS based on mode
+        if mode == TestMode.INCREMENTAL:
+            cas_shared = PERSISTENT_CAS
+            cas_shared.mkdir(parents=True, exist_ok=True)
+            print(f"\n📁 Work dir: {work_dir}")
+            print(f"📁 CAS dir: {cas_shared} (PERSISTENT)")
+        else:
+            cas_shared = Path(tmp) / "cas"
+            cas_shared.mkdir()
+            print(f"\n📁 Work dir: {work_dir}")
+            print(f"📁 CAS dir: {cas_shared} (temporary)")
         
-        # Test 3-6: Dataset ingests (share same CAS for dedup testing)
-        datasets_to_test = ["small", "medium"]  # Fast tests
-        if "--full" in sys.argv:
-            datasets_to_test = ["small", "medium", "large", "xlarge"]
+        if mode == TestMode.ISOLATED:
+            # Each dataset gets its own CAS
+            for name in datasets_to_test:
+                print(f"\n📊 Test: Ingest {name.upper()} (Isolated CAS)")
+                cas_isolated = Path(tmp) / f"cas_{name}"
+                cas_isolated.mkdir()
+                config = DATASETS[name]
+                result = test_dataset_ingest(name, config, work_dir, cas_isolated)
+                print_result(result)
+                results.append(result)
+                
+                # Individual dedup check
+                print(f"\n🔗 Test: Dedup {name}")
+                result = test_dedup_efficiency(work_dir, cas_isolated, mode)
+                print_result(result)
+                results.append(result)
         
-        for name in datasets_to_test:
-            print(f"\n📊 Test: Ingest {name.upper()}")
-            config = DATASETS[name]
-            result = test_dataset_ingest(name, config, work_dir, cas_dir)
+        elif mode == TestMode.SHARED:
+            # All datasets share CAS
+            for name in datasets_to_test:
+                print(f"\n📊 Test: Ingest {name.upper()} (Shared CAS)")
+                config = DATASETS[name]
+                result = test_dataset_ingest(name, config, work_dir, cas_shared)
+                print_result(result)
+                results.append(result)
+            
+            # Cross-project dedup check
+            print("\n🔗 Test: Cross-Project Dedup")
+            result = test_dedup_efficiency(work_dir, cas_shared, mode)
             print_result(result)
             results.append(result)
         
-        # Test: Dedup efficiency
-        print("\n🔗 Test: Dedup Efficiency")
-        result = test_dedup_efficiency(work_dir, cas_dir)
-        print_result(result)
-        results.append(result)
+        elif mode == TestMode.INCREMENTAL:
+            # First pass: ingest
+            for name in datasets_to_test:
+                print(f"\n📊 Test: Initial Ingest {name.upper()}")
+                config = DATASETS[name]
+                result = test_dataset_ingest(name, config, work_dir, cas_shared, is_reingest=False)
+                print_result(result)
+                results.append(result)
+            
+            # Second pass: re-ingest (should be faster due to CAS hits)
+            print("\n" + "-" * 40)
+            print("🔄 Re-ingest pass (testing incremental speed)")
+            print("-" * 40)
+            
+            for name in datasets_to_test:
+                print(f"\n📊 Test: Re-ingest {name.upper()}")
+                config = DATASETS[name]
+                result = test_dataset_ingest(name, config, work_dir, cas_shared, is_reingest=True)
+                print_result(result)
+                results.append(result)
+            
+            # Dedup check
+            print("\n🔗 Test: Dedup Efficiency")
+            result = test_dedup_efficiency(work_dir, cas_shared, mode)
+            print_result(result)
+            results.append(result)
         
         # Test: EPERM handling
         if "xlarge" in datasets_to_test:
             print("\n🍎 Test: EPERM Handling (macOS)")
-            result = test_eperm_handling(work_dir, cas_dir)
+            result = test_eperm_handling(work_dir, cas_shared if mode != TestMode.ISOLATED else Path(tmp) / "cas_xlarge")
+            print_result(result)
+            results.append(result)
+        
+        # Test: Monorepo cross-package dedup (uses separate CAS to measure properly)
+        if monorepo_test:
+            monorepo_cas = Path(tmp) / "cas_monorepo"
+            monorepo_cas.mkdir()
+            print("\n🏢 Test: Monorepo Cross-Package Dedup")
+            result = test_monorepo_dedup(work_dir, monorepo_cas)
             print_result(result)
             results.append(result)
     

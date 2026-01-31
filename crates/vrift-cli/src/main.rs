@@ -32,9 +32,9 @@ use vrift_manifest::{Manifest, VnodeEntry};
 #[command(name = "vrift")]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// CAS storage root directory (TheSource)
-    #[arg(long, env = "VR_THE_SOURCE", default_value = "~/.vrift/the_source")]
-    cas_root: PathBuf,
+    /// TheSource™ storage root directory (global CAS)
+    #[arg(long = "the-source-root", env = "VR_THE_SOURCE", default_value = "~/.vrift/the_source")]
+    the_source_root: PathBuf,
 
     #[command(subcommand)]
     command: Commands,
@@ -187,7 +187,7 @@ fn main() -> Result<()> {
              // Validate inputs early
              // We can't use cmd_run directly because it might want async eventually, 
              // but current cmd_run for isolation calls isolation::run_isolated which is sync.
-             return isolation::run_isolated(command, manifest, &cli.cas_root, base.as_deref());
+             return isolation::run_isolated(command, manifest, &cli.the_source_root, base.as_deref());
         }
     }
 
@@ -209,25 +209,25 @@ async fn async_main(cli: Cli) -> Result<()> {
             threads,
             mode,
             tier,
-        } => cmd_ingest(&cli.cas_root, &directory, &output, prefix.as_deref(), parallel, threads, &mode, &tier).await,
+        } => cmd_ingest(&cli.the_source_root, &directory, &output, prefix.as_deref(), parallel, threads, &mode, &tier).await,
         Commands::Run {
             manifest,
             command,
             isolate,
             base,
             daemon,
-        } => cmd_run(&cli.cas_root, &manifest, &command, isolate, base.as_deref(), daemon), // isolate is false here
+        } => cmd_run(&cli.the_source_root, &manifest, &command, isolate, base.as_deref(), daemon), // isolate is false here
         Commands::Status { manifest, session, directory } => {
             let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
-            cmd_status(&cli.cas_root, manifest.as_deref(), session, &dir)
+            cmd_status(&cli.the_source_root, manifest.as_deref(), session, &dir)
         }
         Commands::Mount(args) => mount::run(args),
         Commands::Gc(args) => gc::run(args),
-        Commands::Resolve { lockfile } => cmd_resolve(&cli.cas_root, &lockfile),
+        Commands::Resolve { lockfile } => cmd_resolve(&cli.the_source_root, &lockfile),
         Commands::Daemon { command } => match command {
             DaemonCommands::Status => daemon::check_status().await,
         },
-        Commands::Watch { directory, output } => cmd_watch(&cli.cas_root, &directory, &output).await,
+        Commands::Watch { directory, output } => cmd_watch(&cli.the_source_root, &directory, &output).await,
         Commands::Active { phantom, directory } => {
             let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
             let mode = if phantom {
