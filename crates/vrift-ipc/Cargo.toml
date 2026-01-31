@@ -7,3 +7,5 @@ edition = "2021"
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+bincode = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util"] }

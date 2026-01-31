@@ -29,9 +29,9 @@ pub mod streaming_pipeline;
 pub mod zero_copy_ingest;
 
 pub use io_backend::{create_backend, rayon_backend, IngestBackend};
-pub use link_strategy::{get_strategy, LinkStrategy};
 #[cfg(target_os = "macos")]
 pub use link_strategy::is_binary_sensitive;
+pub use link_strategy::{get_strategy, LinkStrategy};
 pub use parallel_ingest::{
     default_thread_count, parallel_ingest, parallel_ingest_with_fallback,
     parallel_ingest_with_progress, parallel_ingest_with_threads, IngestMode, ParallelIngestStats,

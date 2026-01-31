@@ -2083,8 +2083,10 @@ name = "vrift-ipc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "serde",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
