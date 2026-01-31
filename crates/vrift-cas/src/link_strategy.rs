@@ -39,6 +39,57 @@ pub trait LinkStrategy: Send + Sync {
 }
 
 // ============================================================================
+// Binary-Sensitive Path Detection
+// ============================================================================
+
+/// File extensions that should skip hard_link on macOS
+///
+/// These typically involve:
+/// - Code-signed bundles (.app, .framework)
+/// - Dynamic libraries (.dylib, .so)
+/// - Static archives (.a)
+/// - Kernel extensions (.kext, .bundle)
+const BINARY_SENSITIVE_EXTENSIONS: &[&str] = &[
+    "app", "framework", "dylib", "so", "a", "bundle", "kext", "plugin",
+];
+
+/// Check if a path is inside a binary-sensitive bundle
+///
+/// Returns true for:
+/// - Files with sensitive extensions
+/// - Files inside .app/ or .framework/ directories
+///
+/// # Example
+/// ```ignore
+/// assert!(is_binary_sensitive(Path::new("Chromium.app/Contents/Info.plist")));
+/// assert!(is_binary_sensitive(Path::new("libfoo.dylib")));
+/// assert!(!is_binary_sensitive(Path::new("index.js")));
+/// ```
+pub fn is_binary_sensitive(path: &Path) -> bool {
+    // Check extension
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if BINARY_SENSITIVE_EXTENSIONS.contains(&ext) {
+            return true;
+        }
+    }
+    
+    // Check if inside .app/ or .framework/ directory
+    let path_str = path.to_string_lossy();
+    path_str.contains(".app/") || path_str.contains(".framework/")
+}
+
+/// Direct reflink or copy (skipping hard_link attempt)
+fn reflink_or_copy(source: &Path, target: &Path) -> io::Result<()> {
+    match reflink_copy::reflink(source, target) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(source, target)?;
+            Ok(())
+        }
+    }
+}
+
+// ============================================================================
 // macOS Implementation
 // ============================================================================
 
@@ -46,12 +97,19 @@ pub trait LinkStrategy: Send + Sync {
 ///
 /// Uses tiered fallback to handle code-signed bundles (.app, .framework)
 /// that reject hard_link with EPERM.
+///
+/// **Fast-path**: Known binary-sensitive paths skip hard_link entirely.
 #[cfg(target_os = "macos")]
 pub struct MacosLinkStrategy;
 
 #[cfg(target_os = "macos")]
 impl LinkStrategy for MacosLinkStrategy {
     fn link_file(&self, source: &Path, target: &Path) -> io::Result<()> {
+        // Fast-path: skip hard_link for known-sensitive paths
+        if is_binary_sensitive(source) {
+            return reflink_or_copy(source, target);
+        }
+        
         // Tier 1: hard_link (most efficient)
         match fs::hard_link(source, target) {
             Ok(()) => return Ok(()),
@@ -214,5 +272,38 @@ mod tests {
         // Should not error on AlreadyExists
         let result = strategy.link_file(&source, &target);
         assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_is_binary_sensitive_extensions() {
+        use std::path::Path;
+        
+        // Sensitive extensions
+        assert!(is_binary_sensitive(Path::new("Chromium.app")));
+        assert!(is_binary_sensitive(Path::new("libfoo.dylib")));
+        assert!(is_binary_sensitive(Path::new("libbar.so")));
+        assert!(is_binary_sensitive(Path::new("libstatic.a")));
+        assert!(is_binary_sensitive(Path::new("MyPlugin.bundle")));
+        assert!(is_binary_sensitive(Path::new("Cocoa.framework")));
+        
+        // Non-sensitive
+        assert!(!is_binary_sensitive(Path::new("index.js")));
+        assert!(!is_binary_sensitive(Path::new("package.json")));
+        assert!(!is_binary_sensitive(Path::new("README.md")));
+    }
+    
+    #[test]
+    fn test_is_binary_sensitive_paths() {
+        use std::path::Path;
+        
+        // Inside .app bundle
+        assert!(is_binary_sensitive(Path::new("Chromium.app/Contents/Info.plist")));
+        assert!(is_binary_sensitive(Path::new("node_modules/puppeteer/Chromium.app/Resources/icon.icns")));
+        
+        // Inside .framework
+        assert!(is_binary_sensitive(Path::new("Foo.framework/Versions/A/Foo")));
+        
+        // Not inside bundle
+        assert!(!is_binary_sensitive(Path::new("node_modules/lodash/index.js")));
     }
 }
