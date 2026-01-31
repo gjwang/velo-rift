@@ -147,7 +147,7 @@ jobs:
       - name: Build with FUSE
         run: cargo build --release -p vrift-cli --features vrift-cli/fuse
       - name: Run Daemon E2E Test
-        run: ./test.sh
+        run: ./scripts/v-e2e.sh
 
   # ============================================
   # Summary Gate (All Must Pass)
