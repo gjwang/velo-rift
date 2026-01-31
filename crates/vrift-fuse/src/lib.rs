@@ -56,7 +56,6 @@ mod imp {
             let opts = vec![
                 fuser::MountOption::RO,
                 fuser::MountOption::FSName("vrift".to_string()),
-                fuser::MountOption::AutoUnmount,
             ];
 
             fuser::mount2(self, mountpoint, &opts)?;
