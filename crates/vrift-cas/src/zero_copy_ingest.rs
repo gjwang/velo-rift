@@ -80,11 +80,16 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
         fs::create_dir_all(parent)?;
     }
     
-    // Hard link (zero-copy!) - handle EEXIST for parallel dedup
+    // Hard link (zero-copy!) - handle EEXIST and EPERM for parallel dedup / code-signed files
     match fs::hard_link(source, &cas_target) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Another thread already created this blob - dedup success!
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            // macOS EPERM: code-signed bundles (e.g., Chromium.app) cannot be hard-linked
+            // Fallback to copy (Pattern 987: macOS EPERM remediation)
+            fs::copy(source, &cas_target)?;
         }
         Err(e) => return Err(e.into()),
     }
@@ -139,10 +144,14 @@ pub fn ingest_solid_tier1_dedup(
             fs::create_dir_all(parent)?;
         }
         
-        // Hard link (zero-copy!)
+        // Hard link (zero-copy!) - handle EPERM
         match fs::hard_link(source, &cas_target) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                // macOS EPERM: code-signed bundles fallback to copy
+                fs::copy(source, &cas_target)?;
+            }
             Err(e) => return Err(e.into()),
         }
     }
@@ -179,11 +188,15 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
         fs::create_dir_all(parent)?;
     }
     
-    // Hard link (zero-copy!) - handle EEXIST for parallel dedup
+    // Hard link (zero-copy!) - handle EEXIST and EPERM
     match fs::hard_link(source, &cas_target) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Another thread already created this blob - dedup success!
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            // macOS EPERM: code-signed bundles fallback to copy
+            fs::copy(source, &cas_target)?;
         }
         Err(e) => return Err(e.into()),
     }
@@ -244,10 +257,14 @@ pub fn ingest_solid_tier2_dedup(
         fs::create_dir_all(parent)?;
     }
     
-    // Hard link (zero-copy!) - handle EEXIST for safety
+    // Hard link (zero-copy!) - handle EEXIST and EPERM
     match fs::hard_link(source, &cas_target) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            // macOS EPERM: code-signed bundles fallback to copy
+            fs::copy(source, &cas_target)?;
+        }
         Err(e) => return Err(e.into()),
     }
     
