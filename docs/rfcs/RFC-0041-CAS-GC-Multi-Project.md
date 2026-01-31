@@ -50,28 +50,81 @@ VRift's power comes from cross-project deduplication via a shared CAS. However, 
 
 #### 1. Manifest Registry
 
-A central registry tracking all known manifests:
+A central registry tracking all known manifests with UUID-based identification:
 
 ```
 ~/.vrift/registry/
-├── manifests.json           # Active manifest list
-└── blobs/
-    └── <hash>.refs          # Per-blob reference tracking (optional)
+├── manifests.json           # Active manifest list (SSOT)
+└── manifests/
+    └── <uuid>.manifest      # Cached copy of manifest (for GC when project deleted)
 ```
 
 **manifests.json**:
 ```json
 {
   "version": 1,
-  "manifests": [
-    {
-      "id": "project1",
-      "path": "/home/user/project1/.vrift.manifest",
+  "manifests": {
+    "a1b2c3d4-e5f6-7890-abcd-ef1234567890": {
+      "source_path": "/home/user/project1/.vrift.manifest",
+      "source_path_hash": "blake3:abc123...",
+      "project_root": "/home/user/project1",
       "registered_at": "2026-01-31T12:00:00Z",
-      "last_accessed": "2026-01-31T18:00:00Z"
+      "last_verified": "2026-01-31T18:00:00Z",
+      "status": "active"
+    },
+    "b2c3d4e5-f6a7-8901-bcde-f23456789012": {
+      "source_path": "/home/user/project2/.vrift.manifest",
+      "source_path_hash": "blake3:def456...",
+      "project_root": "/home/user/project2",
+      "registered_at": "2026-01-31T14:00:00Z",
+      "last_verified": "2026-01-31T18:00:00Z",
+      "status": "active"
     }
-  ]
+  }
 }
+```
+
+**Key Design Decisions**:
+
+| Issue | Solution |
+|-------|----------|
+| **Filename collision** | Use UUID as primary key, not project name |
+| **Project deleted** | Detect via `source_path` existence check; mark `status: "stale"` |
+| **Manifest moved** | Use `source_path_hash` to detect content changes |
+| **Offline GC** | Cache manifest copy in `manifests/<uuid>.manifest` |
+
+**Stale Project Handling**:
+
+```
+gc --verify:
+  1. For each registered manifest:
+     - Check if source_path exists
+     - If not: mark status = "stale"
+  2. Stale manifests still protect blobs until explicitly removed
+  3. User can run: vrift gc --prune-stale to remove stale entries
+```
+
+**Example Flow**:
+```bash
+# User deletes project directory
+rm -rf /home/user/project1
+
+# Next GC detects stale manifest
+vrift gc
+# Output:
+#   ⚠️  Stale manifest: project1 (source path deleted)
+#   🗑️  Orphaned blobs: 0 (stale manifest still protecting blobs)
+#
+#   Run `vrift gc --prune-stale` to remove stale manifests first.
+
+# User confirms stale removal
+vrift gc --prune-stale
+# Output:
+#   Removed stale manifest: a1b2c3d4-... (project1)
+#   Orphaned blobs now available for cleanup.
+
+# Then clean orphans
+vrift gc --delete
 ```
 
 #### 2. Command: `vrift gc`
