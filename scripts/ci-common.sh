@@ -269,10 +269,10 @@ run_rust_tests() {
     # Fallback to cargo test for minimal environments
     if command -v cargo-nextest &>/dev/null || cargo nextest --version &>/dev/null 2>&1; then
         log_step "Using cargo-nextest (GitHub CI compatible)"
-        cargo nextest run --lib --workspace --exclude velo-shim --exclude velo-fuse ${EXTRA_RUST_ARGS:-}
+        cargo nextest run --lib --workspace --exclude vrift-shim --exclude vrift-fuse ${EXTRA_RUST_ARGS:-}
     else
         log_step "Falling back to cargo test (nextest not installed)"
-        cargo test --lib --workspace --exclude velo-shim --exclude velo-fuse ${EXTRA_RUST_ARGS:-}
+        cargo test --lib --workspace --exclude vrift-shim --exclude vrift-fuse ${EXTRA_RUST_ARGS:-}
     fi
     
     log_success "Rust tests passed"
@@ -359,7 +359,7 @@ run_python_tests() {
 # =============================================================================
 run_clippy() {
     log_step "Running Clippy (all crates)..."
-    cargo clippy --workspace --exclude velo-fuse --exclude velo-shim --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets --all-features -- -D warnings
     log_success "Clippy passed"
 }
 
