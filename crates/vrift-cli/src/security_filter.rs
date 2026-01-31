@@ -44,15 +44,45 @@ const SENSITIVE_DIRS: &[&str] = &[".aws", ".docker", ".secrets", ".ssh"];
 pub struct SecurityFilter {
     enabled: bool,
     excluded_files: Vec<String>,
+    /// Custom patterns from config (if provided)
+    custom_patterns: Option<Vec<String>>,
+}
+
+impl Default for SecurityFilter {
+    fn default() -> Self {
+        Self::new(true)
+    }
 }
 
 impl SecurityFilter {
-    /// Create a new security filter (enabled by default)
+    /// Create a new security filter with default patterns (enabled by default)
     pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
             excluded_files: Vec::new(),
+            custom_patterns: None,
         }
+    }
+
+    /// Create a security filter with custom patterns from config
+    #[allow(dead_code)] // Will be used when CLI integrates config
+    pub fn with_config(config: &vrift_config::SecurityConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            excluded_files: Vec::new(),
+            custom_patterns: if config.exclude_patterns.is_empty() {
+                None
+            } else {
+                Some(config.exclude_patterns.clone())
+            },
+        }
+    }
+
+    /// Create from the global config
+    #[allow(dead_code)] // Will be used when CLI integrates config
+    pub fn from_global_config() -> Self {
+        let config = vrift_config::config();
+        Self::with_config(&config.security)
     }
 
     /// Check if a path should be excluded from ingest
@@ -63,8 +93,19 @@ impl SecurityFilter {
         }
 
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let path_str = path.to_string_lossy();
 
-        // Check exact filename matches
+        // Check custom patterns from config first (if any)
+        if let Some(ref patterns) = self.custom_patterns {
+            for pattern in patterns {
+                // Match filename or path contains pattern
+                if file_name == pattern || path_str.contains(pattern) {
+                    return Some("config exclude pattern");
+                }
+            }
+        }
+
+        // Check exact filename matches against default patterns
         for pattern in DEFAULT_EXCLUDE_PATTERNS {
             if file_name == *pattern {
                 return Some(match *pattern {
@@ -207,5 +248,47 @@ mod tests {
         // When disabled, nothing should be excluded
         assert!(filter.should_exclude(Path::new(".env")).is_none());
         assert!(filter.should_exclude(Path::new("id_rsa")).is_none());
+    }
+
+    #[test]
+    fn test_custom_config_patterns() {
+        let config = vrift_config::SecurityConfig {
+            enabled: true,
+            exclude_patterns: vec!["custom_secret.txt".to_string(), "internal/".to_string()],
+        };
+        let filter = SecurityFilter::with_config(&config);
+
+        // Custom patterns should match
+        assert!(filter
+            .should_exclude(Path::new("custom_secret.txt"))
+            .is_some());
+        assert!(filter
+            .should_exclude(Path::new("internal/data.json"))
+            .is_some());
+
+        // Default patterns should still work
+        assert!(filter.should_exclude(Path::new(".env")).is_some());
+    }
+
+    #[test]
+    fn test_from_global_config() {
+        let filter = SecurityFilter::from_global_config();
+
+        // Should use global config defaults
+        assert!(filter.should_exclude(Path::new(".env")).is_some());
+        assert!(filter.should_exclude(Path::new("id_rsa")).is_some());
+    }
+
+    #[test]
+    fn test_disabled_via_config() {
+        let config = vrift_config::SecurityConfig {
+            enabled: false,
+            exclude_patterns: vec!["anything".to_string()],
+        };
+        let filter = SecurityFilter::with_config(&config);
+
+        // When disabled via config, nothing excluded
+        assert!(filter.should_exclude(Path::new(".env")).is_none());
+        assert!(filter.should_exclude(Path::new("anything")).is_none());
     }
 }
