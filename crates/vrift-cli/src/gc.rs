@@ -35,9 +35,10 @@ pub struct GcArgs {
 }
 
 pub fn run(cas_root: &std::path::Path, args: GcArgs) -> Result<()> {
+    // Print header like ingest
     println!();
-    println!("  Velo Rift Garbage Collection (RFC-0041)");
-    println!("  ========================================");
+    println!("🗑️  VRift Garbage Collection");
+    println!("   CAS:     {}", cas_root.display());
 
     // Acquire exclusive lock
     let _lock = ManifestRegistry::acquire_lock()
@@ -133,17 +134,18 @@ pub fn run(cas_root: &std::path::Path, args: GcArgs) -> Result<()> {
 
     // Delete orphans if requested
     if args.delete {
-        if !args.immediate && args.older_than.is_none() {
-            // TODO: Implement grace period tracking via orphans.json
-            // For now, proceed with immediate deletion with warning
+        if !args.immediate && args.older_than.is_none() && orphan_count > 0 {
             println!();
             println!("  ⚠️  --older-than not specified, deleting all orphans immediately.");
         }
 
-        println!();
         if orphan_count == 0 {
-            println!("  ✨ No orphaned blobs to delete!");
+            println!();
+            println!("╔════════════════════════════════════════╗");
+            println!("║  ✨ CAS is Clean - No Orphans!         ║");
+            println!("╚════════════════════════════════════════╝");
         } else {
+            println!();
             println!("  Deleting orphaned blobs...");
             for (hash, size) in orphans {
                 match cas.delete(&hash) {
@@ -157,14 +159,32 @@ pub fn run(cas_root: &std::path::Path, args: GcArgs) -> Result<()> {
                     }
                 }
             }
+            // Print completion box
             println!();
-            println!("  ✅ Deleted: {} blobs ({})",
-                format_number(deleted_count),
-                format_bytes(deleted_bytes));
+            println!("╔════════════════════════════════════════╗");
+            println!("║  ✅ GC Complete                        ║");
+            println!("╚════════════════════════════════════════╝");
+            println!();
+            println!("   🗑️  Deleted: {} blobs", format_number(deleted_count));
+            println!("   💾 Reclaimed: {}", format_bytes(deleted_bytes));
+            if total_bytes > 0 {
+                let saved_pct = (deleted_bytes as f64 / (total_bytes) as f64) * 100.0;
+                println!("   📉 Reduced CAS by {:.1}%", saved_pct);
+            }
         }
     } else {
         println!();
-        println!("  📋 Dry run complete. Use --delete to remove orphaned blobs.");
+        println!("╔════════════════════════════════════════╗");
+        println!("║  📋 Dry Run Complete                   ║");
+        println!("╚════════════════════════════════════════╝");
+        if orphan_count > 0 {
+            println!();
+            println!("   🗑️  {} orphans found ({})", format_number(orphan_count), format_bytes(orphan_bytes));
+            println!("   💡 Run with --delete to remove orphaned blobs.");
+        } else {
+            println!();
+            println!("   ✨ CAS is clean - no orphaned blobs!");
+        }
     }
 
     // Save registry (in case we updated verification times)
