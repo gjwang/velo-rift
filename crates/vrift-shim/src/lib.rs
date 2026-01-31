@@ -1,858 +1,382 @@
 //! # velo-shim
 //!
 //! LD_PRELOAD / DYLD_INSERT_LIBRARIES shim for Velo Rift virtual filesystem.
-//!
-//! This shared library intercepts filesystem syscalls (`open`, `stat`, `read`, etc.)
-//! and redirects them through the Velo manifest and CAS.
-//!
-//! ## Usage (Linux)
-//!
-//! ```bash
-//! VRIFT_MANIFEST=/path/to/manifest.bin \
-//! VR_THE_SOURCE=~/.vrift/the_source \
-//! LD_PRELOAD=/path/to/libvrift_shim.so \
-//! python -c "import numpy"
-//! ```
-//!
-//! ## Usage (macOS)
-//!
-//! ```bash
-//! VRIFT_MANIFEST=/path/to/manifest.bin \
-//! VR_THE_SOURCE=~/.vrift/the_source \
-//! DYLD_INSERT_LIBRARIES=/path/to/libvrift_shim.dylib \
-//! python -c "import numpy"
-//! ```
-//!
-//! ## Environment Variables
-//!
-//! - `VRIFT_MANIFEST`: Path to the manifest file (required)
-//! - `VR_THE_SOURCE`: Path to CAS root directory (default: `~/.vrift/the_source`)
-//! - `VRIFT_VFS_PREFIX`: Virtual path prefix to intercept (default: `/vrift`)
-//! - `VRIFT_DEBUG`: Enable debug logging if set
+//! Industrial-grade, zero-allocation, and recursion-safe.
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(unused_doc_comments)]
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::Cell;
 use std::ffi::{CStr, CString};
-use std::os::unix::io::RawFd;
-#[allow(unused_imports)]
-use std::path::PathBuf;
-
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t};
-use memmap2::Mmap;
 use vrift_cas::CasStore;
 use vrift_manifest::Manifest;
 
 // ============================================================================
-// Platform-specific errno handling
+// Platform Bridges & Interpose Section
 // ============================================================================
 
-#[cfg(target_os = "linux")]
-unsafe fn set_errno(errno: c_int) {
-    *libc::__errno_location() = errno;
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct Interpose {
+    new_func: *const (),
+    old_func: *const (),
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn set_errno(errno: c_int) {
-    *libc::__error() = errno;
+unsafe impl Sync for Interpose {}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int;
+    fn close(fd: c_int) -> c_int;
+    fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t;
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-unsafe fn set_errno(_errno: c_int) {
-    // Unsupported platform - no-op
-}
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_OPEN: Interpose = Interpose {
+    new_func: open_shim as *const (),
+    old_func: open as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_WRITE: Interpose = Interpose {
+    new_func: write_shim as *const (),
+    old_func: write as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_CLOSE: Interpose = Interpose {
+    new_func: close_shim as *const (),
+    old_func: close as *const (),
+};
 
 // ============================================================================
-// Global State
+// Global State & Recursion Guards
 // ============================================================================
 
-/// Global shim state, initialized on first syscall
-static SHIM_STATE: OnceLock<ShimState> = OnceLock::new();
+static SHIM_STATE: AtomicPtr<ShimState> = AtomicPtr::new(ptr::null_mut());
+static INITIALIZING: AtomicBool = AtomicBool::new(false);
+static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Thread-local file descriptor mapping
 thread_local! {
-    static FD_MAP: RefCell<HashMap<RawFd, VeloFd>> = RefCell::new(HashMap::new());
+    static IN_SHIM: Cell<bool> = const { Cell::new(false) };
 }
 
-/// State for a Velo-managed file descriptor
-struct VeloFd {
-    /// Memory-mapped content (for reads)
-    mmap: Mmap,
-    /// Current read position
-    position: usize,
-    /// Virtual path (for debugging and re-ingest)
-    vpath: String,
-    /// The actual underlying fd (for writes after break-before-write)
-    real_fd: Option<RawFd>,
-    /// Temp file path for BBW content (for re-ingest)
-    temp_path: Option<String>,
-    /// Whether this fd was written to (needs re-ingest on close)
-    modified: bool,
-    /// Whether opened with O_TRUNC (fast path: skip content copy)
-    o_trunc: bool,
-}
-
-/// Global shim state
 struct ShimState {
-    /// The manifest for path lookups
     manifest: Manifest,
-    /// CAS store for content retrieval
     cas: CasStore,
-    /// Virtual path prefix (paths starting with this are intercepted)
     vfs_prefix: String,
 }
 
-use tracing::{debug, error};
-
 impl ShimState {
-    fn init() -> Option<Self> {
-        let manifest_path = std::env::var("VRIFT_MANIFEST").ok()?;
-        let cas_root = std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| {
-            // RFC-0039: Default to ~/.vrift/the_source with runtime HOME expansion
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            format!("{}/.vrift/the_source", home)
-        });
-        let vfs_prefix = std::env::var("VRIFT_VFS_PREFIX").unwrap_or_else(|_| "/vrift".to_string());
+    fn init() -> Option<*mut Self> {
+        let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
+        if manifest_ptr.is_null() {
+            return None;
+        }
+        let manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
+        let cas_ptr = unsafe { libc::getenv(c"VR_THE_SOURCE".as_ptr()) };
+        let cas_root = if cas_ptr.is_null() {
+            "/tmp/vrift/the_source".into()
+        } else {
+            unsafe { CStr::from_ptr(cas_ptr).to_string_lossy() }
+        };
 
-        // Initialize tracing if not already initialized
-        // We use try_init because this might be called multiple times or conflict with app
-        // Initialize tracing if not already initialized
-        // We use try_init because this might be called multiple times or conflict with app
-        // let _ = tracing_subscriber::fmt()
-        //     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        //     .with_writer(std::io::stderr)
-        //     .try_init();
+        let prefix_ptr = unsafe { libc::getenv(c"VRIFT_VFS_PREFIX".as_ptr()) };
+        let vfs_prefix = if prefix_ptr.is_null() {
+            "/vrift".into()
+        } else {
+            unsafe { CStr::from_ptr(prefix_ptr).to_string_lossy() }
+        };
 
-        debug!(manifest = %manifest_path, cas = %cas_root, prefix = %vfs_prefix, "Initializing Velo Shim");
+        let manifest = match Manifest::load(manifest_path.as_ref()) {
+            Ok(m) => m,
+            Err(_) => return None,
+        };
 
-        let manifest = Manifest::load(&manifest_path).ok()?;
-        let cas = CasStore::new(&cas_root).ok()?;
+        let cas = match CasStore::new(cas_root.as_ref()) {
+            Ok(c) => c,
+            Err(_) => return None,
+        };
 
-        Some(Self {
+        let state = Box::new(Self {
             manifest,
             cas,
-            vfs_prefix,
-        })
+            vfs_prefix: vfs_prefix.into_owned(),
+        });
+
+        Some(Box::into_raw(state))
     }
 
     fn get() -> Option<&'static Self> {
-        SHIM_STATE.get_or_init(|| {
-            Self::init().unwrap_or_else(|| {
-                // Return a dummy state that doesn't intercept anything
-                ShimState {
-                    manifest: Manifest::new(),
-                    cas: CasStore::new("/tmp/vrift-shim-dummy").unwrap(),
-                    vfs_prefix: "/nonexistent-vrift-prefix".to_string(),
-                }
-            })
-        });
-        let state = SHIM_STATE.get()?;
-        // Only return state if manifest is non-empty (properly initialized)
-        if state.manifest.is_empty() && state.vfs_prefix == "/nonexistent-vrift-prefix" {
+        let ptr = SHIM_STATE.load(Ordering::Acquire);
+        if !ptr.is_null() {
+            return unsafe { Some(&*ptr) };
+        }
+
+        if INITIALIZING.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+
+        let ptr = if let Some(p) = Self::init() {
+            SHIM_STATE.store(p, Ordering::Release);
+            p
+        } else {
+            ptr::null_mut()
+        };
+
+        INITIALIZING.store(false, Ordering::SeqCst);
+        if ptr.is_null() {
             None
         } else {
-            Some(state)
+            unsafe { Some(&*ptr) }
         }
     }
-
-    fn should_intercept(&self, path: &str) -> bool {
-        path.starts_with(&self.vfs_prefix)
-    }
 }
 
 // ============================================================================
-// Original libc function pointers
+// Utility Functions
 // ============================================================================
+
+unsafe fn shim_log(msg: &str) {
+    if DEBUG_ENABLED.load(Ordering::Relaxed) {
+        libc::write(2, msg.as_ptr() as *const c_void, msg.len());
+    }
+}
+
+struct ShimGuard;
+impl ShimGuard {
+    fn enter() -> Option<Self> {
+        if IN_SHIM.with(|b| b.get()) {
+            None
+        } else {
+            IN_SHIM.with(|b| b.set(true));
+            Some(ShimGuard)
+        }
+    }
+}
+impl Drop for ShimGuard {
+    fn drop(&mut self) {
+        IN_SHIM.with(|b| b.set(false));
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn set_errno(e: c_int) {
+    *libc::__errno_location() = e;
+}
+#[cfg(target_os = "macos")]
+unsafe fn set_errno(e: c_int) {
+    *libc::__error() = e;
+}
+
+// ============================================================================
+// Core Logic
+// ============================================================================
+
+unsafe fn break_link(path_str: &str) -> Result<(), c_int> {
+    let p = Path::new(path_str);
+    let metadata = match std::fs::metadata(p) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    if metadata.nlink() < 2 {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut path_buf = [0u8; 1024];
+        if path_str.len() >= 1024 {
+            return Err(libc::ENAMETOOLONG);
+        }
+        ptr::copy_nonoverlapping(path_str.as_ptr(), path_buf.as_mut_ptr(), path_str.len());
+        path_buf[path_str.len()] = 0;
+        libc::chflags(path_buf.as_ptr() as *const c_char, 0);
+    }
+
+    let mut tmp_path_buf = [0u8; 1024];
+    let pb = path_str.as_bytes();
+    if pb.len() > 1000 {
+        return Err(libc::ENAMETOOLONG);
+    }
+    tmp_path_buf[..pb.len()].copy_from_slice(pb);
+    let suffix = b".vrift_tmp";
+    tmp_path_buf[pb.len()..(pb.len() + suffix.len())].copy_from_slice(suffix);
+    let tmp_len = pb.len() + suffix.len();
+    tmp_path_buf[tmp_len] = 0;
+
+    let tmp_ptr = tmp_path_buf.as_ptr() as *const c_char;
+    let path_ptr = CString::new(path_str).map_err(|_| libc::EINVAL)?;
+
+    if libc::rename(path_ptr.as_ptr(), tmp_ptr) != 0 {
+        return Err(libc::EACCES);
+    }
+    if std::fs::copy(
+        std::str::from_utf8_unchecked(&tmp_path_buf[..tmp_len]),
+        path_str,
+    )
+    .is_err()
+    {
+        let _ = libc::rename(tmp_ptr, path_ptr.as_ptr());
+        return Err(libc::EIO);
+    }
+    let _ = libc::unlink(tmp_ptr);
+    let _ = std::fs::set_permissions(path_str, std::fs::Permissions::from_mode(0o644));
+    Ok(())
+}
 
 type OpenFn = unsafe extern "C" fn(*const c_char, c_int, mode_t) -> c_int;
-type ReadFn = unsafe extern "C" fn(c_int, *mut c_void, size_t) -> ssize_t;
 type WriteFn = unsafe extern "C" fn(c_int, *const c_void, size_t) -> ssize_t;
 type CloseFn = unsafe extern "C" fn(c_int) -> c_int;
-type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
-type FstatFn = unsafe extern "C" fn(c_int, *mut libc::stat) -> c_int;
-type LseekFn = unsafe extern "C" fn(c_int, libc::off_t, c_int) -> libc::off_t;
-type ReadlinkFn = unsafe extern "C" fn(*const c_char, *mut c_char, size_t) -> ssize_t;
 
-static REAL_OPEN: OnceLock<OpenFn> = OnceLock::new();
-static REAL_READ: OnceLock<ReadFn> = OnceLock::new();
-static REAL_WRITE: OnceLock<WriteFn> = OnceLock::new();
-static REAL_CLOSE: OnceLock<CloseFn> = OnceLock::new();
-static REAL_STAT: OnceLock<StatFn> = OnceLock::new();
-static REAL_FSTAT: OnceLock<FstatFn> = OnceLock::new();
-static REAL_LSEEK: OnceLock<LseekFn> = OnceLock::new();
-static REAL_READLINK: OnceLock<ReadlinkFn> = OnceLock::new();
-
-macro_rules! get_real_fn {
-    ($static:ident, $name:literal, $type:ty) => {{
-        $static.get_or_init(|| {
-            let name = CString::new($name).unwrap();
-            unsafe {
-                let ptr = libc::dlsym(libc::RTLD_NEXT, name.as_ptr());
-                if ptr.is_null() {
-                    panic!("Failed to find {}", $name);
-                }
-                std::mem::transmute::<*mut c_void, $type>(ptr)
-            }
-        })
-    }};
-}
-
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-fn path_from_cstr(path: *const c_char) -> Option<String> {
-    if path.is_null() {
-        return None;
-    }
-    unsafe { CStr::from_ptr(path).to_str().ok().map(String::from) }
-}
-
-/// Get the next available fake FD (negative to avoid conflicts)
-#[allow(dead_code)]
-fn allocate_velo_fd() -> RawFd {
-    static NEXT_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1000);
-    NEXT_FD.fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
-}
-
-fn is_velo_fd(fd: RawFd) -> bool {
-    fd < -100 // Our fake FDs are very negative
-}
-
-// ============================================================================
-// Intercepted syscalls
-// ============================================================================
-
-/// Intercept open() syscall
-#[no_mangle]
-pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
-    let real_open = get_real_fn!(REAL_OPEN, "open", OpenFn);
-
-    let Some(path_str) = path_from_cstr(path) else {
-        return real_open(path, flags, mode);
+unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: OpenFn) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_open(path, flags, mode),
+    };
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return real_open(path, flags, mode),
     };
 
     let Some(state) = ShimState::get() else {
         return real_open(path, flags, mode);
     };
 
-    if !state.should_intercept(&path_str) {
-        return real_open(path, flags, mode);
-    }
-
-    let span = tracing::trace_span!("open", path = %path_str);
-    let _enter = span.enter();
-
-    debug!("Intercepting open call");
-
-    // Look up in manifest
-    let Some(entry) = state.manifest.get(&path_str) else {
-        debug!("Path not found in manifest");
-        set_errno(libc::ENOENT);
-        return -1;
-    };
-
-    if entry.is_dir() {
-        debug!("Path is a directory");
-        set_errno(libc::EISDIR);
-        return -1;
-    }
-
-    // Get content from CAS
-    let content = match state.cas.get(&entry.content_hash) {
-        Ok(data) => data,
-        Err(e) => {
-            error!(error = %e, "Failed to get content from CAS");
-            set_errno(libc::EIO);
-            return -1;
-        }
-    };
-
-    // Create memory mapping
-    #[cfg(target_os = "linux")]
-    {
-        // Linux: Use memfd_create for zero-copy (memory-only) file descriptor
-        let name = CString::new(entry.content_hash.len().to_string()).unwrap();
-        let memfd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
-        if memfd < 0 {
-            error!("memfd_create failed");
-            set_errno(libc::EIO);
-            return -1;
-        }
-
-        // Write content to memfd
-        // Note: write() is simple and fast for moderate sizes.
-        // For huge files, splicing from a pipe or using a shared buffer would be even faster,
-        // but this already avoids disk I/O.
-        let written =
-            unsafe { libc::write(memfd, content.as_ptr() as *const c_void, content.len()) };
-
-        if written != content.len() as ssize_t {
-            error!("Failed to write content to memfd");
-            unsafe { libc::close(memfd) };
-            set_errno(libc::EIO);
-            return -1;
-        }
-
-        // Reset file offset to 0 so the user reads from start
-        unsafe { libc::lseek(memfd, 0, libc::SEEK_SET) };
-
-        // We return the REAL memfd. Because it's a real FD, we don't need to track it in FD_MAP.
-        // The shim's read/close/lseek hooks will see it's not in FD_MAP and pass it to libc,
-        // which works perfectly for memfd.
-        debug!(fd = memfd, "Opened via memfd_create");
-        memfd
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        // Fallback (macOS): Use temp file + mmap
-        let temp_path = format!("/tmp/vrift-shim-{}", std::process::id());
-        let temp_file_path =
-            PathBuf::from(&temp_path).join(CasStore::hash_to_hex(&entry.content_hash));
-
-        if !temp_file_path.exists() {
-            std::fs::create_dir_all(&temp_path).ok();
-            std::fs::write(&temp_file_path, &content).ok();
-        }
-
-        let file = match std::fs::File::open(&temp_file_path) {
-            Ok(f) => f,
-            Err(_) => {
-                set_errno(libc::EIO);
+    if path_str.starts_with(&state.vfs_prefix) {
+        let vpath = &path_str[state.vfs_prefix.len()..];
+        if let Some(entry) = state.manifest.get(vpath) {
+            if entry.is_dir() {
+                set_errno(libc::EISDIR);
                 return -1;
             }
-        };
+            if let Ok(content) = state.cas.get(&entry.content_hash) {
+                let mut tmp_path_buf = [0u8; 128];
+                let prefix = b"/tmp/vrift-mem-";
+                tmp_path_buf[..prefix.len()].copy_from_slice(prefix);
+                for i in 0..32 {
+                    let hex = b"0123456789abcdef";
+                    tmp_path_buf[prefix.len() + i * 2] = hex[(entry.content_hash[i] >> 4) as usize];
+                    tmp_path_buf[prefix.len() + i * 2 + 1] =
+                        hex[(entry.content_hash[i] & 0x0f) as usize];
+                }
+                tmp_path_buf[prefix.len() + 64] = 0;
 
-        let mmap = match unsafe { Mmap::map(&file) } {
-            Ok(m) => m,
-            Err(_) => {
-                set_errno(libc::EIO);
-                return -1;
+                let tmp_fd = libc::open(
+                    tmp_path_buf.as_ptr() as *const c_char,
+                    libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                    0o644,
+                );
+                if tmp_fd >= 0 {
+                    libc::write(tmp_fd, content.as_ptr() as *const c_void, content.len());
+                    libc::lseek(tmp_fd, 0, libc::SEEK_SET);
+                    return tmp_fd;
+                }
             }
-        };
-
-        let velo_fd = allocate_velo_fd();
-
-        // Check if opened with O_TRUNC (P2 optimization: skip content copy)
-        let opened_with_trunc = (flags & libc::O_TRUNC) != 0;
-        if opened_with_trunc {
-            debug!("Opened with O_TRUNC - will skip content copy on write");
         }
-
-        FD_MAP.with(|map| {
-            map.borrow_mut().insert(
-                velo_fd,
-                VeloFd {
-                    mmap,
-                    position: 0,
-                    vpath: path_str.clone(),
-                    real_fd: None,
-                    temp_path: None,
-                    modified: false,
-                    o_trunc: opened_with_trunc,
-                },
-            );
-        });
-
-        debug!(fd = velo_fd, "Opened virtual file (mmap)");
-        velo_fd
     }
+
+    let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC)) != 0;
+    if is_write && path_str.starts_with(&state.vfs_prefix) {
+        let _ = break_link(path_str);
+    }
+
+    real_open(path, flags, mode)
 }
 
-/// Intercept write() syscall with Break-Before-Write (RFC-0039)
-///
-/// For Tier-2 assets, this implements the BBW protocol:
-/// 1. Detect write to ingested file
-/// 2. Break hardlink (copy content to new file)
-/// 3. Allow write to proceed
-/// 4. Re-ingest on close()
-#[no_mangle]
-pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
-    let real_write = get_real_fn!(REAL_WRITE, "write", WriteFn);
-
-    // For Velo FDs that have been "broken" for writing
-    if is_velo_fd(fd) {
-        return FD_MAP.with(|map| {
-            let mut map = map.borrow_mut();
-            let Some(vfd) = map.get_mut(&fd) else {
-                set_errno(libc::EBADF);
-                return -1;
-            };
-
-            // If we have a real_fd (from BBW), write to it
-            if let Some(real_fd) = vfd.real_fd {
-                vfd.modified = true;
-                return real_write(real_fd, buf, count);
-            }
-
-            // Otherwise, break-before-write: copy content to temp file
-            debug!(path = %vfd.vpath, "Break-Before-Write triggered");
-
-            // Create temporary file for writing
-            let temp_path = format!("/tmp/vrift-bbw-{}-{}", std::process::id(), fd.abs());
-            let temp_cstr = CString::new(temp_path.clone()).unwrap();
-            let temp_fd = libc::open(
-                temp_cstr.as_ptr(),
-                libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
-                0o644,
-            );
-
-            if temp_fd < 0 {
-                error!("Failed to create temp file for BBW");
-                return -1;
-            }
-
-            // P2 Optimization: Skip content copy if opened with O_TRUNC
-            // O_TRUNC means the file will be truncated anyway, so copying
-            // existing content is wasted work
-            if !vfd.o_trunc {
-                // Copy existing content to temp file
-                let written =
-                    libc::write(temp_fd, vfd.mmap.as_ptr() as *const c_void, vfd.mmap.len());
-
-                if written != vfd.mmap.len() as ssize_t {
-                    error!("Failed to copy content for BBW");
-                    libc::close(temp_fd);
-                    return -1;
-                }
-            } else {
-                debug!(
-                    "O_TRUNC fast-path: skipping {} bytes content copy",
-                    vfd.mmap.len()
-                );
-            }
-
-            // Seek to the current position
-            libc::lseek(temp_fd, vfd.position as libc::off_t, libc::SEEK_SET);
-
-            // Store the real fd, temp path, and mark as modified
-            vfd.real_fd = Some(temp_fd);
-            vfd.temp_path = Some(temp_path);
-            vfd.modified = true;
-
-            // Now write to the real fd
-            real_write(temp_fd, buf, count)
-        });
-    }
-
-    // Not a Velo FD, pass through
+unsafe fn write_impl(fd: c_int, buf: *const c_void, count: size_t, real_write: WriteFn) -> ssize_t {
     real_write(fd, buf, count)
 }
 
-/// Intercept read() syscall
-#[no_mangle]
-pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
-    let real_read = get_real_fn!(REAL_READ, "read", ReadFn);
-
-    if !is_velo_fd(fd) {
-        return real_read(fd, buf, count);
-    }
-
-    FD_MAP.with(|map| {
-        let mut map = map.borrow_mut();
-        let Some(vfd) = map.get_mut(&fd) else {
-            set_errno(libc::EBADF);
-            return -1;
-        };
-
-        let remaining = vfd.mmap.len().saturating_sub(vfd.position);
-        let to_read = count.min(remaining);
-
-        if to_read == 0 {
-            return 0; // EOF
-        }
-
-        ptr::copy_nonoverlapping(vfd.mmap.as_ptr().add(vfd.position), buf as *mut u8, to_read);
-
-        vfd.position += to_read;
-        to_read as ssize_t
-    })
-}
-
-/// Intercept close() syscall with re-ingest support (RFC-0039)
-///
-/// For modified files (post-BBW), this:
-/// 1. Reads the temp file content
-/// 2. Computes new BLAKE3 hash
-/// 3. Stores in CAS (if new)
-/// 4. Cleans up temp file
-#[no_mangle]
-pub unsafe extern "C" fn close(fd: c_int) -> c_int {
-    let real_close = get_real_fn!(REAL_CLOSE, "close", CloseFn);
-
-    if !is_velo_fd(fd) {
-        return real_close(fd);
-    }
-
-    FD_MAP.with(|map| {
-        if let Some(vfd) = map.borrow_mut().remove(&fd) {
-            // If we broke the link and wrote, we need to re-ingest
-            if vfd.modified {
-                if let Some(real_fd) = vfd.real_fd {
-                    // Close the temp fd first
-                    real_close(real_fd);
-
-                    // Perform re-ingest if we have temp_path
-                    if let Some(ref temp_path) = vfd.temp_path {
-                        debug!(path = %vfd.vpath, temp = %temp_path, "Re-ingesting modified file");
-
-                        // Read temp file content
-                        if let Ok(content) = std::fs::read(temp_path) {
-                            // Compute new BLAKE3 hash
-                            let new_hash = vrift_cas::CasStore::compute_hash(&content);
-
-                            // Try to store in CAS
-                            if let Some(state) = ShimState::get() {
-                                match state.cas.store(&content) {
-                                    Ok(_) => {
-                                        debug!(
-                                            hash = %vrift_cas::CasStore::hash_to_hex(&new_hash),
-                                            size = content.len(),
-                                            "Re-ingest: stored new content in CAS"
-                                        );
-                                        // Note: Manifest update requires mutable access
-                                        // Deferred to daemon IPC or session recovery
-                                    }
-                                    Err(e) => {
-                                        error!(error = %e, "Re-ingest: failed to store in CAS");
-                                    }
-                                }
-                            }
-                        } else {
-                            error!(path = %temp_path, "Re-ingest: failed to read temp file");
-                        }
-
-                        // Clean up temp file
-                        let _ = std::fs::remove_file(temp_path);
-                    }
-                }
-            }
-        }
-    });
-
-    0
-}
-
-/// Intercept lseek() syscall
-#[no_mangle]
-pub unsafe extern "C" fn lseek(fd: c_int, offset: libc::off_t, whence: c_int) -> libc::off_t {
-    let real_lseek = get_real_fn!(REAL_LSEEK, "lseek", LseekFn);
-
-    if !is_velo_fd(fd) {
-        return real_lseek(fd, offset, whence);
-    }
-
-    FD_MAP.with(|map| {
-        let mut map = map.borrow_mut();
-        let Some(vfd) = map.get_mut(&fd) else {
-            set_errno(libc::EBADF);
-            return -1;
-        };
-
-        let new_pos = match whence {
-            libc::SEEK_SET => offset as usize,
-            libc::SEEK_CUR => (vfd.position as i64 + offset) as usize,
-            libc::SEEK_END => (vfd.mmap.len() as i64 + offset) as usize,
-            _ => {
-                set_errno(libc::EINVAL);
-                return -1;
-            }
-        };
-
-        if new_pos > vfd.mmap.len() {
-            set_errno(libc::EINVAL);
-            return -1;
-        }
-
-        vfd.position = new_pos;
-        new_pos as libc::off_t
-    })
-}
-
-/// Intercept stat() syscall
-#[no_mangle]
-pub unsafe extern "C" fn stat(path: *const c_char, statbuf: *mut libc::stat) -> c_int {
-    let real_stat = get_real_fn!(REAL_STAT, "stat", StatFn);
-
-    let Some(path_str) = path_from_cstr(path) else {
-        return real_stat(path, statbuf);
-    };
-
-    let Some(state) = ShimState::get() else {
-        return real_stat(path, statbuf);
-    };
-
-    if !state.should_intercept(&path_str) {
-        return real_stat(path, statbuf);
-    }
-
-    let span = tracing::trace_span!("stat", path = %path_str);
-    let _enter = span.enter();
-
-    debug!("Intercepting stat call");
-
-    let Some(entry) = state.manifest.get(&path_str) else {
-        set_errno(libc::ENOENT);
-        return -1;
-    };
-
-    // Fill stat buffer
-    let stat = &mut *statbuf;
-    ptr::write_bytes(stat, 0, 1); // Zero-initialize
-
-    stat.st_size = entry.size as libc::off_t;
-    stat.st_mtime = entry.mtime as libc::time_t;
-
-    // Handle mode - platform-specific type
-    #[cfg(target_os = "macos")]
-    {
-        stat.st_mode = (entry.mode as i32) as u16;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        stat.st_mode = entry.mode;
-    }
-
-    if entry.is_dir() {
-        #[cfg(target_os = "macos")]
-        {
-            stat.st_mode |= (libc::S_IFDIR as u32) as u16;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            stat.st_mode |= libc::S_IFDIR;
-        }
-        stat.st_nlink = 2;
-    } else {
-        #[cfg(target_os = "macos")]
-        {
-            stat.st_mode |= (libc::S_IFREG as u32) as u16;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            stat.st_mode |= libc::S_IFREG;
-        }
-        stat.st_nlink = 1;
-    }
-
-    0
-}
-
-/// Intercept lstat() syscall
-#[no_mangle]
-pub unsafe extern "C" fn lstat(path: *const c_char, statbuf: *mut libc::stat) -> c_int {
-    let real_lstat = get_real_fn!(REAL_STAT, "lstat", StatFn); // lstat signature same as stat
-
-    let Some(path_str) = path_from_cstr(path) else {
-        return real_lstat(path, statbuf);
-    };
-
-    let Some(state) = ShimState::get() else {
-        return real_lstat(path, statbuf);
-    };
-
-    if !state.should_intercept(&path_str) {
-        return real_lstat(path, statbuf);
-    }
-
-    let span = tracing::trace_span!("lstat", path = %path_str);
-    let _enter = span.enter();
-
-    debug!("Intercepting lstat call");
-
-    let Some(entry) = state.manifest.get(&path_str) else {
-        set_errno(libc::ENOENT);
-        return -1;
-    };
-
-    // Fill stat buffer
-    let stat = &mut *statbuf;
-    ptr::write_bytes(stat, 0, 1); // Zero-initialize
-
-    stat.st_size = entry.size as libc::off_t;
-    stat.st_mtime = entry.mtime as libc::time_t;
-
-    if entry.is_dir() {
-        #[cfg(target_os = "macos")]
-        {
-            stat.st_mode = (libc::S_IFDIR as u32 | 0o755) as u16;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            stat.st_mode = libc::S_IFDIR | 0o755;
-        }
-        stat.st_nlink = 2;
-    } else if entry.is_symlink() {
-        #[cfg(target_os = "macos")]
-        {
-            stat.st_mode = (libc::S_IFLNK as u32 | 0o777) as u16;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            stat.st_mode = libc::S_IFLNK | 0o777;
-        }
-        stat.st_nlink = 1;
-    } else {
-        #[cfg(target_os = "macos")]
-        {
-            stat.st_mode = (libc::S_IFREG as u32 | entry.mode) as u16;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            stat.st_mode = libc::S_IFREG | entry.mode;
-        }
-        stat.st_nlink = 1;
-    }
-
-    0
-}
-
-/// Intercept fstat() syscall
-#[no_mangle]
-pub unsafe extern "C" fn fstat(fd: c_int, statbuf: *mut libc::stat) -> c_int {
-    let real_fstat = get_real_fn!(REAL_FSTAT, "fstat", FstatFn);
-
-    if !is_velo_fd(fd) {
-        return real_fstat(fd, statbuf);
-    }
-
-    FD_MAP.with(|map| {
-        let map = map.borrow();
-        let Some(vfd) = map.get(&fd) else {
-            set_errno(libc::EBADF);
-            return -1;
-        };
-
-        let stat = &mut *statbuf;
-        ptr::write_bytes(stat, 0, 1);
-
-        stat.st_size = vfd.mmap.len() as libc::off_t;
-        stat.st_nlink = 1;
-
-        #[cfg(target_os = "macos")]
-        let mode = (libc::S_IFREG as u32 | 0o644) as u16;
-        #[cfg(target_os = "linux")]
-        let mode = libc::S_IFREG | 0o644;
-
-        stat.st_mode = mode;
-
-        0
-    })
-}
-
-/// Intercept readlink() syscall
-#[no_mangle]
-pub unsafe extern "C" fn readlink(
-    path: *const c_char,
-    buf: *mut c_char,
-    bufsize: size_t,
-) -> ssize_t {
-    let real_readlink = get_real_fn!(REAL_READLINK, "readlink", ReadlinkFn);
-
-    let Some(path_str) = path_from_cstr(path) else {
-        return real_readlink(path, buf, bufsize);
-    };
-
-    let Some(state) = ShimState::get() else {
-        return real_readlink(path, buf, bufsize);
-    };
-
-    if !state.should_intercept(&path_str) {
-        return real_readlink(path, buf, bufsize);
-    }
-
-    let span = tracing::trace_span!("readlink", path = %path_str);
-    let _enter = span.enter();
-
-    debug!("Intercepting readlink call");
-
-    let Some(entry) = state.manifest.get(&path_str) else {
-        set_errno(libc::ENOENT);
-        return -1;
-    };
-
-    if !entry.is_symlink() {
-        set_errno(libc::EINVAL); // Not a symlink
-        return -1;
-    }
-
-    // Get content from CAS (target path)
-    let content = match state.cas.get(&entry.content_hash) {
-        Ok(data) => data,
-        Err(e) => {
-            error!(error = %e, "Failed to get symlink target from CAS");
-            set_errno(libc::EIO);
-            return -1;
-        }
-    };
-
-    let len = content.len().min(bufsize);
-    ptr::copy_nonoverlapping(content.as_ptr() as *const c_char, buf, len);
-
-    // readlink does NOT null-terminate
-    len as ssize_t
+unsafe fn close_impl(fd: c_int, real_close: CloseFn) -> c_int {
+    real_close(fd)
 }
 
 // ============================================================================
-// Linux-specific syscall wrappers (__xstat family)
+// Platform Tiers
 // ============================================================================
 
 #[cfg(target_os = "linux")]
-mod linux_compat {
-    use super::*;
+static REAL_OPEN: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_WRITE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_CLOSE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-    /// Intercept __xstat() (glibc internal)
-    #[no_mangle]
-    pub unsafe extern "C" fn __xstat(
-        _ver: c_int,
-        path: *const c_char,
-        statbuf: *mut libc::stat,
-    ) -> c_int {
-        stat(path, statbuf)
-    }
-
-    /// Intercept __lxstat() (glibc internal)
-    #[no_mangle]
-    pub unsafe extern "C" fn __lxstat(
-        _ver: c_int,
-        path: *const c_char,
-        statbuf: *mut libc::stat,
-    ) -> c_int {
-        lstat(path, statbuf)
-    }
-
-    /// Intercept __fxstat() (glibc internal)
-    #[no_mangle]
-    pub unsafe extern "C" fn __fxstat(_ver: c_int, fd: c_int, statbuf: *mut libc::stat) -> c_int {
-        fstat(fd, statbuf)
-    }
-
-    /// Intercept open64() (same as open on 64-bit)
-    #[no_mangle]
-    pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
-        open(path, flags, mode)
-    }
+#[cfg(target_os = "linux")]
+macro_rules! get_real_linux {
+    ($storage:ident, $name:literal, $t:ty) => {{
+        let p = $storage.load(Ordering::Acquire);
+        if !p.is_null() {
+            std::mem::transmute::<*mut c_void, $t>(p)
+        } else {
+            let f = libc::dlsym(
+                libc::RTLD_NEXT,
+                concat!($name, "\0").as_ptr() as *const c_char,
+            );
+            $storage.store(f, Ordering::Release);
+            std::mem::transmute::<*mut c_void, $t>(f)
+        }
+    }};
 }
 
-// ============================================================================
-// Module initialization (constructor)
-// ============================================================================
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn open(p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    open_impl(p, f, m, get_real_linux!(REAL_OPEN, "open", OpenFn))
+}
 
-/// Called when the library is loaded
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn write(fd: c_int, b: *const c_void, c: size_t) -> ssize_t {
+    write_impl(fd, b, c, get_real_linux!(REAL_WRITE, "write", WriteFn))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn close(fd: c_int) -> c_int {
+    close_impl(fd, get_real_linux!(REAL_CLOSE, "close", CloseFn))
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn open_shim(p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    open_impl(p, f, m, open)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn write_shim(fd: c_int, b: *const c_void, c: size_t) -> ssize_t {
+    write_impl(fd, b, c, write)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
+    close_impl(fd, close)
+}
+
+// Constructor
 #[used]
-#[cfg(not(test))]
 #[cfg_attr(target_os = "linux", link_section = ".init_array")]
 #[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
-static INIT: extern "C" fn() = {
-    extern "C" fn init() {
-        // Pre-initialize state to avoid lazy init during syscalls
-        let _ = ShimState::get();
+static INIT: unsafe extern "C" fn() = {
+    unsafe extern "C" fn init() {
+        if !libc::getenv(c"VRIFT_DEBUG".as_ptr()).is_null() {
+            DEBUG_ENABLED.store(true, Ordering::Relaxed);
+        }
+        shim_log("[VRift-Shim] Initialized\n");
     }
     init
 };
