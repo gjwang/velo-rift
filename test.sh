@@ -63,8 +63,16 @@ echo "[*] Testing Daemon Auto-Start & Ingest..."
 # Note: we don't start daemon manually. CLI should do it.
 vrift ingest "$DATA_DIR" --output "$MANIFEST"
 
+# Wait for socket (up to 5 seconds)
+MAX_RETRIES=10
+RETRY_COUNT=0
+while [ ! -S "/tmp/vrift.sock" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    sleep 0.5
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+done
+
 if [ ! -S "/tmp/vrift.sock" ]; then
-    echo "ERROR: Daemon socket not found. Auto-start failed."
+    echo "ERROR: Daemon socket not found. Auto-start failed after timeout."
     exit 1
 fi
 
@@ -289,7 +297,6 @@ else
 fi
 
 # End
-echo "=== All Tests Passed ==="
 # Create an orphan:
 # 1. Modify file1.txt content
 echo "New Content" > "$DATA_DIR/file1.txt"
@@ -307,7 +314,7 @@ vrift ingest "$DATA_DIR" --output "$MANIFEST" > /dev/null
 
 # Test Dry Run (Default)
 GC_OUT=$(vrift gc --manifest "$MANIFEST")
-if echo "$GC_OUT" | grep -q "Can Delete"; then
+if echo "$GC_OUT" | grep -q "orphans found"; then
     echo "[PASS] GC Dry Run detected garbage."
 else
     echo "ERROR: GC Dry Run failed to detect garbage."
@@ -321,8 +328,8 @@ if echo "$GC_OUT" | grep -q "DELETING"; then
 fi
 
 # Test Actual Delete
-GC_OUT_DEL=$(vrift gc --manifest "$MANIFEST" --delete)
-if echo "$GC_OUT_DEL" | grep -q "Deleted:"; then
+GC_OUT_DEL=$(vrift gc --manifest "$MANIFEST" --delete --yes)
+if echo "$GC_OUT_DEL" | grep -q "orphaned blobs deleted"; then
      echo "[PASS] GC Delete executed."
 else
      echo "ERROR: GC Delete failed."
