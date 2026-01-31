@@ -174,10 +174,11 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
     unix_fs::symlink(&cas_target, source)?;
     tracing::debug!("Symlink created successfully");
 
-    // RFC-0039 §5.1.1: Set immutable flag for maximum Tier-1 protection (must do after source removal!)
+    // RFC-0039 Iron Law: ALWAYS enforce CAS invariant, even for existing blobs
+    // This fixes the "Iron Law Drift" bug where pre-existing writable blobs
+    // would not be protected on re-ingest.
+    let _ = crate::protection::enforce_cas_invariant(&cas_target);
     if was_new {
-        // RFC-0039 Iron Law: Ensure CAS blob is read-only and NOT executable
-        let _ = crate::protection::enforce_cas_invariant(&cas_target);
         set_immutable_best_effort(&cas_target);
     }
 
@@ -272,10 +273,9 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
     // Tiered link: hard_link → clonefile → copy (RFC-0040)
     let was_new = link_or_clone_or_copy(source, &cas_target)?;
 
-    // RFC-0039 §5.1.1: Set immutable flag for maximum Tier-2 protection
+    // RFC-0039 Iron Law: ALWAYS enforce CAS invariant, even for existing blobs
+    let _ = crate::protection::enforce_cas_invariant(&cas_target);
     if was_new {
-        // RFC-0039 Iron Law: Ensure CAS blob is read-only and NOT executable
-        let _ = crate::protection::enforce_cas_invariant(&cas_target);
         set_immutable_best_effort(&cas_target);
     }
 
@@ -340,10 +340,9 @@ pub fn ingest_solid_tier2_dedup(
     // Tiered link: hard_link → clonefile → copy (RFC-0040)
     let was_new = link_or_clone_or_copy(source, &cas_target)?;
 
-    // RFC-0039 §5.1.1: Set immutable flag for maximum Tier-2 protection
+    // RFC-0039 Iron Law: ALWAYS enforce CAS invariant, even for existing blobs
+    let _ = crate::protection::enforce_cas_invariant(&cas_target);
     if was_new {
-        // RFC-0039 Iron Law: Ensure CAS blob is read-only and NOT executable
-        let _ = crate::protection::enforce_cas_invariant(&cas_target);
         set_immutable_best_effort(&cas_target);
     }
 

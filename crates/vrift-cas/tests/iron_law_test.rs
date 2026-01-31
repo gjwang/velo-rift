@@ -17,11 +17,12 @@ mod tests {
         fs::write(&file_path, "secret content").unwrap();
 
         // 1. Manually place file in CAS without protection (simulating legacy/corrupt state)
-        let hash = "6159b27af9a3c2ca93c75be16ae492127292b623bc4aa8a4f450aed029a4407d";
+        // The correct BLAKE3 hash of "secret content" is cb18e580...
+        let hash = "cb18e580a10f9fa598a703bbc284bbe6375bb8d37f204f1f7086d277bde818c1";
         let blob_path = cas_root
             .join("blake3")
-            .join("61")
-            .join("59")
+            .join("cb")
+            .join("18")
             .join(format!("{}_14.bin", hash));
         fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
         fs::write(&blob_path, "secret content").unwrap();
@@ -41,8 +42,12 @@ mod tests {
         let results = parallel_ingest(&files, cas_root, IngestMode::SolidTier2);
         assert!(results[0].is_ok());
 
+        // Verify was_new is false (blob already existed)
+        let result = results[0].as_ref().unwrap();
+        assert!(!result.was_new, "was_new should be false for existing blob");
+
         // 3. Verify if CAS blob is now enforced with protection
-        // If the bug exists, was_new=false will cause it to skip enforce_cas_invariant
+        // The fix ensures enforce_cas_invariant is called regardless of was_new
         let metadata = fs::metadata(&blob_path).unwrap();
         assert!(
             metadata.permissions().readonly(),
