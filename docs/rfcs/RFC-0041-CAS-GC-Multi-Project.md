@@ -476,9 +476,59 @@ All destructive operations logged to `~/.vrift/gc.log`:
 ### Phase 3: Recovery & Advanced Features
 - [ ] `vrift registry --rebuild` recovery command
 - [ ] `vrift doctor` health check
+- [ ] **Bloom Filter for fast orphan detection** (see below)
 - [ ] Reference counting per-blob
 - [ ] Incremental GC (track last GC time)
 - [ ] CAS compaction (defragmentation)
+
+### Phase 3 Detail: Bloom Filter Optimization
+
+For large CAS (100K+ blobs), full manifest scan is expensive. Bloom Filter accelerates orphan detection:
+
+```
+Bloom Filter Properties:
+  - "NO"  → Definitely NOT in set (100% accurate, no false negatives)
+  - "YES" → Possibly in set (may have false positives)
+```
+
+**Algorithm**:
+```
+1. Build Bloom Filter from all referenced blob hashes
+2. Walk CAS directory:
+   - Filter says "NO" → Definitely orphan → Fast delete ✅
+   - Filter says "YES" → Maybe referenced → Exact check needed
+3. Only ~1% of blobs need exact verification
+```
+
+**Memory Efficiency**:
+| Blobs | HashSet (exact) | Bloom Filter (0.1% FP) |
+|-------|-----------------|------------------------|
+| 100K  | ~6.4 MB         | ~120 KB                |
+| 1M    | ~64 MB          | ~1.2 MB                |
+
+**Implementation**:
+```rust
+use probabilistic_collections::bloom::BloomFilter;
+
+fn build_reference_filter(manifests: &[Manifest]) -> BloomFilter<Blake3Hash> {
+    // 0.1% false positive rate
+    let mut filter = BloomFilter::with_rate(0.001, estimated_blob_count);
+    for manifest in manifests {
+        for entry in &manifest.entries {
+            filter.insert(&entry.hash);
+        }
+    }
+    filter
+}
+
+fn is_orphan(hash: &Blake3Hash, filter: &BloomFilter<Blake3Hash>) -> OrphanStatus {
+    if !filter.contains(hash) {
+        OrphanStatus::DefinitelyOrphan  // Fast path: no false negatives
+    } else {
+        OrphanStatus::MaybeReferenced   // Slow path: need exact check
+    }
+}
+```
 
 ---
 
