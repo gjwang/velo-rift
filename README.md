@@ -47,6 +47,18 @@ Velo Rift:   open("/node_modules/...") → mmap pointer → done
 
 ---
 
+## 🛠 Development Setup
+
+First-time setup after cloning:
+
+```bash
+./setup-dev.sh
+```
+
+This configures Git hooks, Rust toolchain, and (if applicable) Python environment.
+
+---
+
 ## 🚀 Quick Start (Local)
 
 1. **Build**: `cargo build --release`
