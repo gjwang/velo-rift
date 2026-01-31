@@ -201,11 +201,18 @@ run_scenario_b() {
     local cas_size=$(get_dir_size "$CAS_DIR")
     echo -e "   ${BOLD}CAS Size:${NC} $(format_bytes $cas_size) (unchanged - all dedup!)"
     echo -e "   ${BOLD}Total Time:${NC} ${total_time}s"
+    
+    # Store for final summary
+    SCENARIO_B_TIME=$total_time
 }
 
 # ============================================================================
 # Main
 # ============================================================================
+
+# Global vars for summary
+SCENARIO_A_TIME=0
+SCENARIO_B_TIME=0
 
 main() {
     print_header "🎯 VRift Cross-Project Deduplication Demo"
@@ -214,11 +221,44 @@ main() {
     
     if ! $RERUN_ONLY; then
         run_scenario_a
+        SCENARIO_A_TIME=$(echo "$total_end - $total_start" | bc 2>/dev/null || echo "0")
+    fi
+    
+    # Pause between scenarios
+    if ! $FRESH_ONLY && ! $RERUN_ONLY; then
+        echo ""
+        echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BOLD}${YELLOW}   ⏸  Scenario A Complete. Press ENTER to start Scenario B...${NC}"
+        echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        read -r
     fi
     
     if ! $FRESH_ONLY; then
         run_scenario_b
     fi
+    
+    # Final Results Summary
+    print_header "📊 Final Benchmark Results"
+    
+    local cas_size=$(get_dir_size "$CAS_DIR")
+    local total_files=0
+    for entry in "${DATASETS[@]}"; do
+        IFS='|' read -r name path <<< "$entry"
+        local count=$(find "$path" -type f 2>/dev/null | wc -l | tr -d ' ')
+        total_files=$((total_files + count))
+    done
+    
+    echo -e "${BOLD}Summary:${NC}"
+    echo ""
+    echo "  ┌────────────────┬─────────────────────────────────────┐"
+    echo "  │ Metric         │ Value                               │"
+    echo "  ├────────────────┼─────────────────────────────────────┤"
+    printf "  │ %-14s │ %-35s │\n" "Total Files" "$(printf "%'d" $total_files)"
+    printf "  │ %-14s │ %-35s │\n" "CAS Size" "$(format_bytes $cas_size)"
+    printf "  │ %-14s │ %-35s │\n" "Scenario A" "Fresh start, progressive dedup"
+    printf "  │ %-14s │ %-35s │\n" "Scenario B" "Re-run, 100% dedup from warm CAS"
+    echo "  └────────────────┴─────────────────────────────────────┘"
+    echo ""
     
     print_header "✅ Demo Complete!"
     
