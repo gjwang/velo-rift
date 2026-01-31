@@ -83,14 +83,18 @@ case "$SIZE" in
     large)
         run_benchmark "large" "$PROJECT_ROOT/examples/benchmarks/large_package.json"
         ;;
+    xlarge)
+        run_benchmark "xlarge" "$PROJECT_ROOT/examples/benchmarks/xlarge_package.json"
+        ;;
     all)
         run_benchmark "small" "$PROJECT_ROOT/examples/benchmarks/small_package.json"
         run_benchmark "medium" "$PROJECT_ROOT/examples/benchmarks/medium_package.json"
         run_benchmark "large" "$PROJECT_ROOT/examples/benchmarks/large_package.json"
+        run_benchmark "xlarge" "$PROJECT_ROOT/examples/benchmarks/xlarge_package.json"
         ;;
     *)
         echo "Unknown size: $SIZE"
-        echo "Usage: $0 [--size small|medium|large|all]"
+        echo "Usage: $0 [--size small|medium|large|xlarge|all]"
         exit 1
         ;;
 esac
