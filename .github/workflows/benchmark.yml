@@ -1,0 +1,66 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'crates/vrift-cas/**'
+      - 'crates/vrift-cli/**'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build release
+        run: cargo build --release -p vrift-cli
+      
+      - name: Create test dataset
+        run: |
+          mkdir -p /tmp/bench-test
+          cd /tmp/bench-test
+          # Create 10K small files for benchmark
+          for i in $(seq 1 10000); do
+            dir="dir_$((i % 100))"
+            mkdir -p "$dir"
+            echo "content_$i" > "$dir/file_$i.txt"
+          done
+      
+      - name: Run ingest benchmark
+        id: benchmark
+        run: |
+          cd /tmp/bench-test
+          CAS=$(mktemp -d)
+          
+          # Time the ingest
+          START=$(date +%s.%N)
+          ./target/release/vrift --cas-root "$CAS" ingest /tmp/bench-test -o /tmp/manifest.bin
+          END=$(date +%s.%N)
+          
+          TIME=$(echo "$END - $START" | bc)
+          FILES=$(find /tmp/bench-test -type f | wc -l)
+          THROUGHPUT=$(echo "scale=0; $FILES / $TIME" | bc)
+          
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+          echo "time=$TIME" >> $GITHUB_OUTPUT
+          echo "throughput=$THROUGHPUT" >> $GITHUB_OUTPUT
+        working-directory: ${{ github.workspace }}
+      
+      - name: Report results
+        run: |
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Files | ${{ steps.benchmark.outputs.files }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Time | ${{ steps.benchmark.outputs.time }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| Throughput | ${{ steps.benchmark.outputs.throughput }} files/s |" >> $GITHUB_STEP_SUMMARY

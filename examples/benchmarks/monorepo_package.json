@@ -1,0 +1,40 @@
+{
+    "name": "vrift-bench-monorepo",
+    "description": "Monorepo benchmark: Multiple packages with shared deps (~300K files)",
+    "private": true,
+    "workspaces": [
+        "packages/*"
+    ],
+    "dependencies": {
+        "turbo": "^2.0.0"
+    },
+    "devDependencies": {
+        "typescript": "^5.3.3"
+    },
+    "packages": {
+        "web": {
+            "extends": "../large_package.json"
+        },
+        "mobile": {
+            "extends": "../medium_package.json"
+        },
+        "shared": {
+            "extends": "../small_package.json"
+        },
+        "docs": {
+            "dependencies": {
+                "next": "^14.0.0",
+                "nextra": "^2.13.4",
+                "nextra-theme-docs": "^2.13.4"
+            }
+        },
+        "storybook": {
+            "dependencies": {
+                "@storybook/react": "^7.6.0",
+                "@storybook/nextjs": "^7.6.0",
+                "@storybook/addon-essentials": "^7.6.0"
+            }
+        }
+    },
+    "_note": "This is a template for monorepo testing. To use: create packages/ subdirectories and install deps in each."
+}
