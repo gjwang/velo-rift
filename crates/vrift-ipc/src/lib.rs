@@ -30,6 +30,16 @@ pub enum VeloRequest {
         path: String,
         entry: vrift_manifest::VnodeEntry,
     },
+    /// List directory entries for VFS synthesis
+    ManifestListDir {
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +60,10 @@ pub enum VeloResponse {
     CasNotFound,
     ManifestAck {
         entry: Option<vrift_manifest::VnodeEntry>,
+    },
+    /// Directory listing response for VFS synthesis
+    ManifestListAck {
+        entries: Vec<DirEntry>,
     },
     ProtectAck,
     Error(String),

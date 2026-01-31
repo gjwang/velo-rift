@@ -394,6 +394,39 @@ async fn handle_request(
             }
             VeloResponse::ManifestAck { entry: None }
         }
+        VeloRequest::ManifestListDir { path } => {
+            // List directory entries for VFS synthesis (opendir/readdir)
+            let manifest = state.manifest.lock().unwrap();
+            let mut entries = Vec::new();
+            let prefix = if path.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", path.trim_end_matches('/'))
+            };
+            let prefix_len = prefix.len();
+
+            // Collect unique direct children (not deep descendants)
+            let mut seen = std::collections::HashSet::new();
+            if let Ok(all_entries) = manifest.iter() {
+                for (entry_path, manifest_entry) in all_entries {
+                    if entry_path.starts_with(&prefix) {
+                        // Get the relative path after prefix
+                        let remainder = &entry_path[prefix_len..];
+                        // Only take the first component (direct child)
+                        let child_name = remainder.split('/').next().unwrap_or(remainder);
+                        if !child_name.is_empty() && seen.insert(child_name.to_string()) {
+                            // Check if this is a directory by seeing if there are children
+                            let is_dir = manifest_entry.vnode.is_dir() || remainder.contains('/');
+                            entries.push(vrift_ipc::DirEntry {
+                                name: child_name.to_string(),
+                                is_dir,
+                            });
+                        }
+                    }
+                }
+            }
+            VeloResponse::ManifestListAck { entries }
+        }
     }
 }
 

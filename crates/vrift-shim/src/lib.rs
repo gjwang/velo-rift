@@ -248,11 +248,21 @@ struct OpenFile {
     original_path: String,
 }
 
+/// Synthetic directory for VFS opendir/readdir
+#[allow(dead_code)] // Will be used when readdir/closedir exports are added
+struct SyntheticDir {
+    vpath: String,
+    entries: Vec<vrift_ipc::DirEntry>,
+    position: usize,
+}
+
 struct ShimState {
     cas: CasStore,
     vfs_prefix: String,
     socket_path: String,
     open_fds: Mutex<HashMap<c_int, OpenFile>>,
+    /// Synthetic directories for VFS readdir (DIR* pointer -> SyntheticDir)
+    open_dirs: Mutex<HashMap<usize, SyntheticDir>>,
     bloom_ptr: *const u8,
 }
 
@@ -305,6 +315,7 @@ impl ShimState {
             vfs_prefix: vfs_prefix.into_owned(),
             socket_path,
             open_fds: Mutex::new(HashMap::new()),
+            open_dirs: Mutex::new(HashMap::new()),
             bloom_ptr,
         });
 
@@ -419,6 +430,50 @@ impl ShimState {
 
         unsafe { libc::close(fd) };
         ok.is_some()
+    }
+
+    /// Query daemon for directory listing (for opendir/readdir)
+    fn query_dir_listing(&self, path: &str) -> Option<Vec<vrift_ipc::DirEntry>> {
+        use vrift_ipc::{VeloRequest, VeloResponse};
+
+        // Use raw libc syscalls to avoid recursion through shim
+        let fd = unsafe { raw_unix_connect(&self.socket_path) };
+        if fd < 0 {
+            return None;
+        }
+
+        let req = VeloRequest::ManifestListDir {
+            path: path.to_string(),
+        };
+        let buf = bincode::serialize(&req).ok()?;
+        let len = (buf.len() as u32).to_le_bytes();
+
+        if !unsafe { raw_write_all(fd, &len) } || !unsafe { raw_write_all(fd, &buf) } {
+            unsafe { libc::close(fd) };
+            return None;
+        }
+
+        let mut resp_len_buf = [0u8; 4];
+        if !unsafe { raw_read_exact(fd, &mut resp_len_buf) } {
+            unsafe { libc::close(fd) };
+            return None;
+        }
+        let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
+        if resp_len > 16 * 1024 * 1024 {
+            unsafe { libc::close(fd) };
+            return None;
+        }
+        let mut resp_buf = vec![0u8; resp_len];
+        if !unsafe { raw_read_exact(fd, &mut resp_buf) } {
+            unsafe { libc::close(fd) };
+            return None;
+        }
+        unsafe { libc::close(fd) };
+
+        match bincode::deserialize::<VeloResponse>(&resp_buf).ok()? {
+            VeloResponse::ManifestListAck { entries } => Some(entries),
+            _ => None,
+        }
     }
 }
 
@@ -887,27 +942,174 @@ unsafe fn fstat_impl(fd: c_int, buf: *mut libc::stat, real_fstat: FstatFn) -> c_
     // Check if this fd belongs to a VFS file we're tracking
     let fds = state.open_fds.lock().unwrap();
     if let Some(open_file) = fds.get(&fd) {
-        // For VFS files, stat the underlying CAS blob or original path
-        let ret = real_fstat(fd, buf);
-        if ret == 0 {
-            // If we have manifest entry, override size with manifest size
-            // This handles the case where the fd points to a CAS blob
-            shim_log("[VRift-Shim] fstat on VFS fd: ");
-            shim_log(&open_file.vpath);
+        // Query manifest for this vpath to get virtual metadata
+        let vpath = open_file.vpath.clone();
+        drop(fds); // Release lock before IPC
+
+        if let Some(entry) = state.query_manifest(&vpath) {
+            // Return virtual metadata from manifest
+            ptr::write_bytes(buf, 0, 1);
+            (*buf).st_size = entry.size as libc::off_t;
+            (*buf).st_mtime = entry.mtime as libc::time_t;
+            (*buf).st_mode = entry.mode as libc::mode_t;
+            if entry.is_dir() {
+                (*buf).st_mode |= libc::S_IFDIR;
+            } else if entry.is_symlink() {
+                (*buf).st_mode |= libc::S_IFLNK;
+            } else {
+                (*buf).st_mode |= libc::S_IFREG;
+            }
+            (*buf).st_nlink = 1;
+            (*buf).st_uid = libc::getuid();
+            (*buf).st_gid = libc::getgid();
+            (*buf).st_blksize = 4096;
+            (*buf).st_blocks = entry.size.div_ceil(512) as libc::blkcnt_t;
+            shim_log("[VRift-Shim] fstat returned virtual metadata for: ");
+            shim_log(&vpath);
             shim_log("\n");
+            return 0;
         }
-        return ret;
+        // Fall through to real fstat if manifest miss
+    } else {
+        drop(fds);
     }
-    drop(fds);
 
     real_fstat(fd, buf)
 }
 
 type OpendirFn = unsafe extern "C" fn(*const c_char) -> *mut libc::DIR;
 type ReadlinkFn = unsafe extern "C" fn(*const c_char, *mut c_char, size_t) -> ssize_t;
+#[allow(dead_code)] // Will be exported when full readdir support is added
+type ReaddirFn = unsafe extern "C" fn(*mut libc::DIR) -> *mut libc::dirent;
+#[allow(dead_code)]
+type ClosedirFn = unsafe extern "C" fn(*mut libc::DIR) -> c_int;
+
+/// Synthetic DIR handle counter (unique per synthetic directory)
+static SYNTHETIC_DIR_COUNTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0x7F000000);
 
 unsafe fn opendir_impl(path: *const c_char, real_opendir: OpendirFn) -> *mut libc::DIR {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_opendir(path),
+    };
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return real_opendir(path),
+    };
+
+    let Some(state) = ShimState::get() else {
+        return real_opendir(path);
+    };
+
+    // Check if this is a VFS path
+    if path_str.starts_with(&state.vfs_prefix) {
+        let vpath = &path_str[state.vfs_prefix.len()..];
+
+        // Query daemon for directory entries
+        if let Some(entries) = state.query_dir_listing(vpath) {
+            // Create synthetic DIR handle
+            let handle = SYNTHETIC_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+            let synthetic = SyntheticDir {
+                vpath: vpath.to_string(),
+                entries,
+                position: 0,
+            };
+
+            let mut dirs = state.open_dirs.lock().unwrap();
+            dirs.insert(handle, synthetic);
+
+            shim_log("[VRift-Shim] opendir VFS: ");
+            shim_log(vpath);
+            shim_log("\n");
+
+            // Return synthetic DIR* (cast handle as pointer)
+            return handle as *mut libc::DIR;
+        }
+    }
+
     real_opendir(path)
+}
+
+/// Static dirent for returning from readdir (must be static to remain valid after return)
+#[allow(dead_code)] // Will be used when readdir export is added
+static mut SYNTHETIC_DIRENT: libc::dirent = unsafe { std::mem::zeroed() };
+
+#[allow(dead_code)] // Will be exported when full readdir support is added
+#[allow(static_mut_refs)] // Required for returning static dirent from readdir
+unsafe fn readdir_impl(dir: *mut libc::DIR, real_readdir: ReaddirFn) -> *mut libc::dirent {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_readdir(dir),
+    };
+
+    let Some(state) = ShimState::get() else {
+        return real_readdir(dir);
+    };
+
+    let handle = dir as usize;
+
+    // Check if this is a synthetic directory
+    let mut dirs = state.open_dirs.lock().unwrap();
+    if let Some(synthetic) = dirs.get_mut(&handle) {
+        if synthetic.position >= synthetic.entries.len() {
+            // No more entries
+            return ptr::null_mut();
+        }
+
+        let entry = &synthetic.entries[synthetic.position];
+        synthetic.position += 1;
+
+        // Fill in the static dirent
+        ptr::write_bytes(&mut SYNTHETIC_DIRENT, 0, 1);
+        SYNTHETIC_DIRENT.d_ino = (handle + synthetic.position) as libc::ino_t;
+        SYNTHETIC_DIRENT.d_type = if entry.is_dir {
+            libc::DT_DIR
+        } else {
+            libc::DT_REG
+        };
+
+        // Copy name (truncate if too long)
+        let name_bytes = entry.name.as_bytes();
+        let copy_len = std::cmp::min(name_bytes.len(), SYNTHETIC_DIRENT.d_name.len() - 1);
+        ptr::copy_nonoverlapping(
+            name_bytes.as_ptr(),
+            SYNTHETIC_DIRENT.d_name.as_mut_ptr() as *mut u8,
+            copy_len,
+        );
+        SYNTHETIC_DIRENT.d_name[copy_len] = 0;
+
+        return &mut SYNTHETIC_DIRENT;
+    }
+    drop(dirs);
+
+    real_readdir(dir)
+}
+
+#[allow(dead_code)] // Will be exported when full closedir support is added
+unsafe fn closedir_impl(dir: *mut libc::DIR, real_closedir: ClosedirFn) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_closedir(dir),
+    };
+
+    let Some(state) = ShimState::get() else {
+        return real_closedir(dir);
+    };
+
+    let handle = dir as usize;
+
+    // Check if this was a synthetic directory
+    let mut dirs = state.open_dirs.lock().unwrap();
+    if dirs.remove(&handle).is_some() {
+        shim_log("[VRift-Shim] closedir synthetic\n");
+        return 0;
+    }
+    drop(dirs);
+
+    real_closedir(dir)
 }
 
 unsafe fn readlink_impl(
