@@ -317,3 +317,152 @@ Hard links share mtime → one project's build invalidates another's cache.
 | `copy` | Cross-filesystem, non-APFS volumes |
 
 > **Conclusion**: For py/cargo/c++ acceleration, VFS must be smarter than pnpm — treat `clonefile` as the primary operation on macOS.
+
+---
+
+# Appendix C: FUSE Interception vs Sync Layer
+
+## Architecture Decision
+
+Two approaches to handle special file types:
+
+| Approach | Description | Timing |
+|----------|-------------|--------|
+| **Sync Layer** | Handle in Ingest/Populate phase | Build-time |
+| **FUSE Layer** | Intercept syscalls at runtime | Runtime |
+
+> **Key Trade-off**: Sync layer is "symptomatic treatment", FUSE is "root cause fix"
+
+---
+
+## Option 1: Sync Layer (Ingest/Populate)
+
+velovfs acts as an "offline" link manager (like pnpm).
+
+### Implementation
+
+```rust
+// During Ingest
+if is_signed_bundle(path) {
+    mark_as(NEEDS_CLONE);
+}
+
+// During Populate
+if needs_clone(file) {
+    clonefile(cas_blob, target);
+} else {
+    hard_link(cas_blob, target);
+}
+```
+
+### Pros
+
+| Benefit | Description |
+|---------|-------------|
+| **Performance** | Native kernel speed, zero FUSE overhead |
+| **Simplicity** | Just add if-branches in Rust |
+| **Predictable** | All decisions at install time |
+
+### Cons
+
+| Limitation | Description |
+|------------|-------------|
+| **Passive** | Can't detect runtime-generated signed binaries |
+| **Static** | Pre-baked directory structure |
+
+---
+
+## Option 2: FUSE Interception
+
+velovfs is a live mounted filesystem process.
+
+### Implementation
+
+```rust
+// In FUSE link() handler
+fn fuse_link(&self, source: &Path, target: &Path) -> Result<()> {
+    if would_trigger_eperm(target) {
+        // Transparent downgrade to clonefile
+        reflink_copy::reflink(source, target)?;
+    } else {
+        fs::hard_link(source, target)?;
+    }
+    Ok(())
+}
+```
+
+### Pros
+
+| Benefit | Description |
+|---------|-------------|
+| **Transparent** | npm/cargo/clang unaware of workaround |
+| **Dynamic** | Real-time IO pattern observation |
+| **Flexible** | Can COW on write detection |
+
+### Cons
+
+| Limitation | Description |
+|------------|-------------|
+| **Performance** | Kernel↔Userspace context switch overhead |
+| **Deadlock Risk** | inode lock management complexity |
+| **Small Files** | FUSE overhead significant for node_modules |
+
+---
+
+## Recommended: Hybrid Strategy
+
+> **"Sync Layer for 95%, FUSE for dynamic COW"**
+
+### Strategy A: Sync Layer for Static Assets (Default)
+
+During `velo install`:
+
+| File Type | Action |
+|-----------|--------|
+| Regular files | `hard_link` |
+| Signed bundles | `clonefile` |
+| Symlinks | Recreate exactly |
+
+### Strategy B: FUSE Write-Time Clone for Build Artifacts
+
+Intercept `open()` / `write()` calls:
+
+```rust
+fn fuse_write(&self, path: &Path, data: &[u8]) -> Result<()> {
+    if is_cas_managed(path) {
+        // Create private copy on first write
+        let private = self.clone_to_private(path)?;
+        write_to(private, data)
+    } else {
+        write_to(path, data)
+    }
+}
+```
+
+This solves:
+- Signature issues
+- Cross-project pollution
+- Incremental build correctness
+
+---
+
+## Warning: macOS App Sandbox
+
+> ⚠️ **sandboxd interaction**
+
+Sandboxed apps (App Store tools, some IDE plugins) may crash if:
+- inode changes unexpectedly (link → clone swap)
+- File appears to violate security policy
+
+**Mitigation**: Document which tools are sandbox-safe.
+
+---
+
+## Decision Matrix
+
+| Scenario | Recommended Approach |
+|----------|----------------------|
+| npm install | Sync Layer (Populate) |
+| cargo build | Sync Layer + FUSE COW |
+| C++ incremental | FUSE COW on write |
+| Signed .app access | Sync Layer (clonefile) |
