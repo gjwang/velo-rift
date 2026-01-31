@@ -4,8 +4,10 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Instant;
 use vrift_cas::CasStore;
 use vrift_manifest::Manifest;
 
@@ -134,56 +136,76 @@ pub fn run(cas_root: &std::path::Path, args: GcArgs) -> Result<()> {
 
     // Delete orphans if requested
     if args.delete {
-        if !args.immediate && args.older_than.is_none() && orphan_count > 0 {
-            println!();
-            println!("  ⚠️  --older-than not specified, deleting all orphans immediately.");
-        }
-
         if orphan_count == 0 {
             println!();
             println!("╔════════════════════════════════════════╗");
             println!("║  ✨ CAS is Clean - No Orphans!         ║");
             println!("╚════════════════════════════════════════╝");
         } else {
-            println!();
-            println!("  Deleting orphaned blobs...");
+            let gc_start = Instant::now();
+
+            // Create progress bar for deletion
+            let pb = ProgressBar::new(orphan_count);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("   [{bar:40.red/white}] {pos:>7}/{len:7} • {msg}")
+                    .unwrap()
+                    .progress_chars("█▓░"),
+            );
+            pb.set_message(format!("0 B reclaimed"));
+
             for (hash, size) in orphans {
                 match cas.delete(&hash) {
                     Ok(_) => {
                         deleted_count += 1;
                         deleted_bytes += size;
+                        pb.inc(1);
+                        // Update reclaimed size message
+                        pb.set_message(format!("{} reclaimed", format_bytes(deleted_bytes)));
                     }
                     Err(e) => {
-                        eprintln!("  ❌ Failed to delete {}: {}",
-                            CasStore::hash_to_hex(&hash), e);
+                        pb.inc(1);
+                        pb.println(format!("  ❌ Failed to delete {}: {}", 
+                            CasStore::hash_to_hex(&hash), e));
                     }
                 }
             }
-            // Print completion box
+            pb.finish_and_clear();
+
+            let gc_elapsed = gc_start.elapsed().as_secs_f64();
+            let delete_rate = if gc_elapsed > 0.0 { deleted_count as f64 / gc_elapsed } else { 0.0 };
+            let reclaim_pct = if total_bytes > 0 { (deleted_bytes as f64 / total_bytes as f64) * 100.0 } else { 0.0 };
+
+            // Print prominent completion box
             println!();
             println!("╔════════════════════════════════════════╗");
-            println!("║  ✅ GC Complete                        ║");
+            println!("║  ✅ GC Complete in {:.2}s              ║", gc_elapsed);
             println!("╚════════════════════════════════════════╝");
             println!();
-            println!("   🗑️  Deleted: {} blobs", format_number(deleted_count));
-            println!("   💾 Reclaimed: {}", format_bytes(deleted_bytes));
-            if total_bytes > 0 {
-                let saved_pct = (deleted_bytes as f64 / (total_bytes) as f64) * 100.0;
-                println!("   📉 Reduced CAS by {:.1}%", saved_pct);
-            }
+            // Highlight the key metrics users care about
+            println!("   🗑️  {} orphaned blobs deleted", format_number(deleted_count));
+            println!("   💾 {} reclaimed", format_bytes(deleted_bytes));
+            println!("   📉 CAS reduced by {:.1}%", reclaim_pct);
+            println!("   ⚡ {:.0} blobs/sec", delete_rate);
         }
     } else {
+        // Dry run output - highlight what WOULD be reclaimed
         println!();
-        println!("╔════════════════════════════════════════╗");
-        println!("║  📋 Dry Run Complete                   ║");
-        println!("╚════════════════════════════════════════╝");
         if orphan_count > 0 {
+            let reclaim_pct = if total_bytes > 0 { (orphan_bytes as f64 / total_bytes as f64) * 100.0 } else { 0.0 };
+            println!("╔════════════════════════════════════════╗");
+            println!("║  📋 Dry Run Complete                   ║");
+            println!("╚════════════════════════════════════════╝");
             println!();
-            println!("   🗑️  {} orphans found ({})", format_number(orphan_count), format_bytes(orphan_bytes));
-            println!("   💡 Run with --delete to remove orphaned blobs.");
+            println!("   🗑️  {} orphans found", format_number(orphan_count));
+            println!("   💾 {} can be reclaimed", format_bytes(orphan_bytes));
+            println!("   📉 Would reduce CAS by {:.1}%", reclaim_pct);
+            println!();
+            println!("   👉 Run with --delete to reclaim space");
         } else {
-            println!();
-            println!("   ✨ CAS is clean - no orphaned blobs!");
+            println!("╔════════════════════════════════════════╗");
+            println!("║  ✨ CAS is Clean - No Orphans!         ║");
+            println!("╚════════════════════════════════════════╝");
         }
     }
 
