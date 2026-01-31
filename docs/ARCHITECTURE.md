@@ -7905,6 +7905,52 @@ fn check_inode_health(mount_point: &Path) -> HealthStatus {
 | **Btrfs** | ✅ Good — Also dynamic |
 | **tmpfs** | N/A — Memory-based, no inode limit |
 
+### 106.5 PSFS Stat Acceleration (RFC-0044)
+
+**Problem**: When intercepting `stat()` at the syscall level via LD_PRELOAD/DYLD_INSERT_LIBRARIES, any "smart logic" can trigger **recursive deadlock**:
+
+```text
+stat → VFS lookup → path normalize → alloc → mmap → stat (DEADLOCK)
+```
+
+**Key Insight**: `stat` is **control flow, not I/O**. In Python/Cargo/npm/Go, stat serves as "existence probe" for import graphs and dependency DAGs.
+
+**PSFS Model** (Provably-Side-Effect-Free Stat):
+
+| Stat Type | Domain | Requirements |
+|-----------|--------|--------------|
+| **Hot Stat** | VFS paths (`/vrift/*`, CAS mounts) | Zero-alloc, no locks, no logs, O(1), async-signal-safe |
+| **Cold Stat** | Everything else | Pure passthrough to `real_stat()` — no judgment |
+
+**Implementation Pattern**:
+
+```c
+int stat(const char *path, struct stat *buf) {
+    // Early bypass during dyld initialization
+    if (shim_state_is_null()) {
+        return real_stat(path, buf);
+    }
+    
+    // Hot path: VFS domain with resident metadata
+    if (psfs_applicable(path)) {
+        if (psfs_lookup(path, buf)) {
+            return 0;
+        }
+    }
+    
+    // Cold path: pure passthrough
+    return real_stat(path, buf);
+}
+```
+
+**Core Principle**:
+
+> **VFS does not infer intent. It consumes capability.**
+> Capability = "Is this path in VFS domain with resident metadata?"
+> Deadlocks eliminated **by construction**, not by heuristics.
+
+**Reference**: See [RFC-0044: PSFS Stat Acceleration Architecture](rfcs/RFC-0044-PSFS-Stat-Acceleration.md) for full design rationale.
+
 ---
 
 ## 107. Implementation Roadmap
