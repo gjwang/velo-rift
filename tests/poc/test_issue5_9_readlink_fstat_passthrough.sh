@@ -60,14 +60,15 @@ fi
 
 echo ""
 echo "[INFO] fstat_impl current implementation:"
-grep -A5 "unsafe fn fstat_impl" "${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs" || echo "Not found"
+grep -A30 "unsafe fn fstat_impl" "${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs" | head -40
 
-if grep -A5 "unsafe fn fstat_impl" "${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs" | grep -q "real_fstat(fd, buf)"; then
+# Check if fstat returns virtual metadata (looks for st_size assignment followed by return 0)
+if grep -A50 "unsafe fn fstat_impl" "${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs" | grep -q "st_size = entry.size"; then
+    echo ""
+    echo "[PASS] fstat_impl returns virtual metadata from manifest entry."
+else
     echo ""
     echo "[FAIL] fstat_impl is a passthrough - does not return virtual metadata."
-    # Already failed above
-else
-    echo "[PASS] fstat_impl appears to have interception logic."
 fi
 
 # Cleanup
