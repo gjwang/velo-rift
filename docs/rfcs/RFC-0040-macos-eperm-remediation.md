@@ -219,3 +219,101 @@ macOS verifies bundle integrity on first launch. If:
 | TBD | Permission preservation | Store mode bits in manifest |
 | TBD | Bundle validation | Verify after restore |
 
+---
+
+# Appendix B: Cross-Ecosystem Hard Link Hazards
+
+> **Key Insight**: macOS EPERM is a signal that `hard_link` is becoming obsolete for modern development workflows.
+
+## Affected Ecosystems
+
+### Python (uv / pip)
+
+| Issue | Scenario |
+|-------|----------|
+| **Framework Bundles** | PySide/PyQt, matplotlib backends contain `.framework` |
+| **RPATH Pollution** | `dyld` rejects signed `.dylib` from unknown CAS path |
+| **Gatekeeper** | "Malicious software" warning when inode points to CAS |
+
+### Rust (cargo)
+
+| Issue | Scenario |
+|-------|----------|
+| **build.rs Artifacts** | openssl-sys, ring download precompiled binaries |
+| **cargo-bundle** | Generated `.app` triggers same EPERM |
+| **Target Directory** | Hard-linked build artifacts break codesign |
+
+### C/C++ (Clang/CMake)
+
+| Issue | Scenario |
+|-------|----------|
+| **Framework Structure** | `.framework` requires physical integrity |
+| **Signature Pollution** | Signing one path corrupts CAS source for others |
+| **Incremental Build** | Shared mtime triggers phantom rebuilds |
+
+---
+
+## Core Problem Matrix
+
+| Problem | Symptom | Affected | Root Cause |
+|---------|---------|----------|------------|
+| **Signature Readonly** | EPERM | All signed binaries | Kernel blocks inode modification |
+| **RPATH Pollution** | Library not found | Python, C++ | `install_name_tool` modifies CAS source |
+| **Sandbox Isolation** | Operation not permitted | App Store builds | Sandbox rejects external inodes |
+| **Mtime Sync** | Phantom rebuilds | Cargo, Ninja | Hard links share modification time |
+
+---
+
+## Binary-Sensitive Extensions
+
+Mark these as `NO_HARDLINK` in velovfs:
+
+```
+.app .framework .dylib .so .a .bundle .plugin .kext
+```
+
+---
+
+## Recommended Strategy for velovfs
+
+### 1. Detect Binary-Sensitive Zones
+
+```rust
+fn is_binary_sensitive(path: &Path) -> bool {
+    let sensitive = ["app", "framework", "dylib", "so", "a", "bundle"];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| sensitive.contains(&e))
+        .unwrap_or(false)
+}
+```
+
+### 2. Prefer clonefile as First-Class Citizen
+
+On macOS, use `clonefile` by default for all binary artifacts:
+
+```rust
+if cfg!(target_os = "macos") && is_binary_sensitive(path) {
+    reflink_copy::reflink(source, target)?;
+} else {
+    link_or_clone_or_copy(source, target)?;
+}
+```
+
+### 3. Mtime Isolation
+
+Hard links share mtime → one project's build invalidates another's cache.
+
+**Solution**: Clone provides independent mtime, eliminating "phantom rebuilds".
+
+---
+
+## Summary
+
+| Strategy | When to Use |
+|----------|-------------|
+| `hard_link` | Text files, source code, non-sensitive assets |
+| `clonefile` | Signed binaries, .dylib, .framework, build artifacts |
+| `copy` | Cross-filesystem, non-APFS volumes |
+
+> **Conclusion**: For py/cargo/c++ acceleration, VFS must be smarter than pnpm — treat `clonefile` as the primary operation on macOS.
