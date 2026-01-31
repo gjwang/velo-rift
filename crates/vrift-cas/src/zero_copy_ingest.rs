@@ -5,12 +5,18 @@
 //! - Phantom Mode: rename() (atomic move)
 //!
 //! NO data copying - only metadata operations.
+//!
+//! # Parallel Deduplication
+//!
+//! When processing files in parallel, uses DashSet for in-memory dedup
+//! to skip filesystem writes for already-seen hashes.
 
 use std::fs::{self, File};
 use std::os::unix::fs as unix_fs;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
+use dashmap::DashSet;
 use nix::fcntl::{Flock, FlockArg};
 
 use crate::{Blake3Hash, CasError, Result};
@@ -125,6 +131,68 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
     }
     
     // Lock guard auto-drops here
+    Ok(IngestResult {
+        source_path: source.to_owned(),
+        hash,
+        size,
+    })
+}
+
+/// Ingest Solid Mode Tier-2 with in-memory deduplication
+///
+/// Uses DashSet to track already-seen hashes, skipping filesystem
+/// operations entirely for duplicate files. This is more efficient
+/// than letting the filesystem reject duplicates with EEXIST.
+///
+/// # Arguments
+///
+/// * `source` - Path to file to ingest  
+/// * `cas_root` - CAS storage root
+/// * `seen_hashes` - Concurrent set of already-processed hashes
+///
+/// # Returns
+///
+/// IngestResult with hash and size (filesystem write may be skipped)
+pub fn ingest_solid_tier2_dedup(
+    source: &Path,
+    cas_root: &Path,
+    seen_hashes: &DashSet<String>,
+) -> Result<IngestResult> {
+    let file = File::open(source)?;
+    let metadata = file.metadata()?;
+    let size = metadata.len();
+    
+    // Acquire shared lock with retry
+    let locked_file = lock_with_retry(file, FlockArg::LockShared)?;
+    
+    // Stream hash
+    let hash = stream_hash(&*locked_file)?;
+    let hash_key = hex::encode(hash);
+    
+    // In-memory dedup: if hash already seen, skip filesystem write
+    if !seen_hashes.insert(hash_key) {
+        // Already processed by another thread - skip hard_link entirely
+        return Ok(IngestResult {
+            source_path: source.to_owned(),
+            hash,
+            size,
+        });
+    }
+    
+    let cas_target = cas_path(cas_root, &hash, size);
+    
+    // Create CAS directory if needed
+    if let Some(parent) = cas_target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    
+    // Hard link (zero-copy!) - handle EEXIST for safety
+    match fs::hard_link(source, &cas_target) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    
     Ok(IngestResult {
         source_path: source.to_owned(),
         hash,

@@ -25,11 +25,15 @@
 
 use std::path::{Path, PathBuf};
 
+use dashmap::DashSet;
 use nix::libc;
 use rayon::prelude::*;
 use rayon::ThreadPool;
 
-use crate::{ingest_phantom, ingest_solid_tier1, ingest_solid_tier2, IngestResult, Result};
+use crate::{
+    ingest_phantom, ingest_solid_tier1, ingest_solid_tier2, ingest_solid_tier2_dedup, IngestResult,
+    Result,
+};
 
 // ============================================================================
 // Thread Pool Configuration
@@ -162,13 +166,18 @@ pub fn parallel_ingest_with_threads(
 ) -> Vec<Result<IngestResult>> {
     let pool = create_thread_pool(threads);
     
+    // In-memory dedup set for tracking seen hashes
+    // Only used for SolidTier2 which is the common case
+    let seen_hashes: DashSet<String> = DashSet::new();
+    
     pool.install(|| {
         files
             .par_iter()
             .map(|path| {
                 match mode {
                     IngestMode::SolidTier1 => ingest_solid_tier1(path, cas_root),
-                    IngestMode::SolidTier2 => ingest_solid_tier2(path, cas_root),
+                    // Use dedup-aware version for Tier2 (default mode)
+                    IngestMode::SolidTier2 => ingest_solid_tier2_dedup(path, cas_root, &seen_hashes),
                     IngestMode::Phantom => ingest_phantom(path, cas_root),
                 }
             })

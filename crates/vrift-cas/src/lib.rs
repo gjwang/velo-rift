@@ -33,7 +33,9 @@ pub use parallel_ingest::{
     parallel_ingest_with_threads, IngestMode, ParallelIngestStats, MAX_INGEST_THREADS,
 };
 pub use streaming_pipeline::{IngestPipeline, IngestStats, PipelineConfig};
-pub use zero_copy_ingest::{ingest_phantom, ingest_solid_tier1, ingest_solid_tier2, IngestResult};
+pub use zero_copy_ingest::{
+    ingest_phantom, ingest_solid_tier1, ingest_solid_tier2, ingest_solid_tier2_dedup, IngestResult,
+};
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
