@@ -23,16 +23,34 @@ pub enum VeloRequest {
         immutable: bool,
         owner: Option<String>,
     },
+    ManifestGet {
+        path: String,
+    },
+    ManifestUpsert {
+        path: String,
+        entry: vrift_manifest::VnodeEntry,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum VeloResponse {
-    HandshakeAck { server_version: String },
-    StatusAck { status: String },
-    SpawnAck { pid: u32 },
+    HandshakeAck {
+        server_version: String,
+    },
+    StatusAck {
+        status: String,
+    },
+    SpawnAck {
+        pid: u32,
+    },
     CasAck,
-    CasFound { size: u64 },
+    CasFound {
+        size: u64,
+    },
     CasNotFound,
+    ManifestAck {
+        entry: Option<vrift_manifest::VnodeEntry>,
+    },
     ProtectAck,
     Error(String),
 }

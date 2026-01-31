@@ -14,8 +14,9 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use vrift_cas::CasStore;
-use vrift_manifest::Manifest;
 
 // ============================================================================
 // Platform Bridges & Interpose Section
@@ -36,6 +37,13 @@ extern "C" {
     fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t;
+    fn stat(path: *const c_char, buf: *mut libc::stat) -> c_int;
+    fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_int;
+    fn fstat(fd: c_int, buf: *mut libc::stat) -> c_int;
+    fn opendir(path: *const c_char) -> *mut libc::DIR;
+    fn readdir(dirp: *mut libc::DIR) -> *mut libc::dirent;
+    fn closedir(dirp: *mut libc::DIR) -> c_int;
+    fn readlink(path: *const c_char, buf: *mut c_char, bufsiz: size_t) -> ssize_t;
 }
 
 #[cfg(target_os = "macos")]
@@ -59,6 +67,55 @@ static IT_CLOSE: Interpose = Interpose {
     new_func: close_shim as *const (),
     old_func: close as *const (),
 };
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_STAT: Interpose = Interpose {
+    new_func: stat_shim as *const (),
+    old_func: stat as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_LSTAT: Interpose = Interpose {
+    new_func: lstat_shim as *const (),
+    old_func: lstat as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_FSTAT: Interpose = Interpose {
+    new_func: fstat_shim as *const (),
+    old_func: fstat as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_OPENDIR: Interpose = Interpose {
+    new_func: opendir_shim as *const (),
+    old_func: opendir as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_READDIR: Interpose = Interpose {
+    new_func: readdir_shim as *const (),
+    old_func: readdir as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_CLOSEDIR: Interpose = Interpose {
+    new_func: closedir_shim as *const (),
+    old_func: closedir as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_READLINK: Interpose = Interpose {
+    new_func: readlink_shim as *const (),
+    old_func: readlink as *const (),
+};
 
 // ============================================================================
 // Global State & Recursion Guards
@@ -72,19 +129,81 @@ thread_local! {
     static IN_SHIM: Cell<bool> = const { Cell::new(false) };
 }
 
+const LOG_BUF_SIZE: usize = 64 * 1024;
+struct Logger {
+    buffer: [u8; LOG_BUF_SIZE],
+    head: std::sync::atomic::AtomicUsize,
+}
+
+impl Logger {
+    const fn new() -> Self {
+        Self {
+            buffer: [0u8; LOG_BUF_SIZE],
+            head: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn log(&self, msg: &str) {
+        let len = msg.len();
+        if len > LOG_BUF_SIZE {
+            return;
+        }
+
+        let start = self.head.fetch_add(len, Ordering::SeqCst);
+        for i in 0..len {
+            unsafe {
+                let ptr = self.buffer.as_ptr().add((start + i) % LOG_BUF_SIZE) as *mut u8;
+                *ptr = msg.as_bytes()[i];
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn dump(&self) {
+        let head = self.head.load(Ordering::SeqCst);
+        let start = if head > LOG_BUF_SIZE {
+            head % LOG_BUF_SIZE
+        } else {
+            0
+        };
+        let len = if head > LOG_BUF_SIZE {
+            LOG_BUF_SIZE
+        } else {
+            head
+        };
+
+        unsafe {
+            if start + len <= LOG_BUF_SIZE {
+                libc::write(2, self.buffer.as_ptr().add(start) as *const c_void, len);
+            } else {
+                let first_part = LOG_BUF_SIZE - start;
+                libc::write(
+                    2,
+                    self.buffer.as_ptr().add(start) as *const c_void,
+                    first_part,
+                );
+                libc::write(2, self.buffer.as_ptr() as *const c_void, len - first_part);
+            }
+        }
+    }
+}
+
+static LOGGER: Logger = Logger::new();
+
+struct OpenFile {
+    vpath: String,
+    original_path: String,
+}
+
 struct ShimState {
-    manifest: Manifest,
     cas: CasStore,
     vfs_prefix: String,
+    socket_path: String,
+    open_fds: Mutex<HashMap<c_int, OpenFile>>,
 }
 
 impl ShimState {
     fn init() -> Option<*mut Self> {
-        let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
-        if manifest_ptr.is_null() {
-            return None;
-        }
-        let manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
         let cas_ptr = unsafe { libc::getenv(c"VR_THE_SOURCE".as_ptr()) };
         let cas_root = if cas_ptr.is_null() {
             "/tmp/vrift/the_source".into()
@@ -99,20 +218,18 @@ impl ShimState {
             unsafe { CStr::from_ptr(prefix_ptr).to_string_lossy() }
         };
 
-        let manifest = match Manifest::load(manifest_path.as_ref()) {
-            Ok(m) => m,
-            Err(_) => return None,
-        };
-
         let cas = match CasStore::new(cas_root.as_ref()) {
             Ok(c) => c,
             Err(_) => return None,
         };
 
+        let socket_path = "/tmp/vrift.sock".to_string();
+
         let state = Box::new(Self {
-            manifest,
             cas,
             vfs_prefix: vfs_prefix.into_owned(),
+            socket_path,
+            open_fds: Mutex::new(HashMap::new()),
         });
 
         Some(Box::into_raw(state))
@@ -142,6 +259,51 @@ impl ShimState {
             unsafe { Some(&*ptr) }
         }
     }
+
+    fn query_manifest(&self, path: &str) -> Option<vrift_manifest::VnodeEntry> {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        use vrift_ipc::{VeloRequest, VeloResponse};
+
+        let mut stream = UnixStream::connect(&self.socket_path).ok()?;
+        let req = VeloRequest::ManifestGet {
+            path: path.to_string(),
+        };
+        let buf = bincode::serialize(&req).ok()?;
+        let len = (buf.len() as u32).to_le_bytes();
+        stream.write_all(&len).ok()?;
+        stream.write_all(&buf).ok()?;
+
+        let mut resp_len_buf = [0u8; 4];
+        stream.read_exact(&mut resp_len_buf).ok()?;
+        let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
+        let mut resp_buf = vec![0u8; resp_len];
+        stream.read_exact(&mut resp_buf).ok()?;
+
+        match bincode::deserialize::<VeloResponse>(&resp_buf).ok()? {
+            VeloResponse::ManifestAck { entry } => entry,
+            _ => None,
+        }
+    }
+    fn upsert_manifest(&self, path: &str, entry: vrift_manifest::VnodeEntry) -> bool {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use vrift_ipc::VeloRequest;
+
+        let ok = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let mut stream = UnixStream::connect(&self.socket_path)?;
+            let req = VeloRequest::ManifestUpsert {
+                path: path.to_string(),
+                entry,
+            };
+            let buf = bincode::serialize(&req)?;
+            let len = (buf.len() as u32).to_le_bytes();
+            stream.write_all(&len)?;
+            stream.write_all(&buf)?;
+            Ok(())
+        })();
+        ok.is_ok()
+    }
 }
 
 // ============================================================================
@@ -149,6 +311,7 @@ impl ShimState {
 // ============================================================================
 
 unsafe fn shim_log(msg: &str) {
+    LOGGER.log(msg);
     if DEBUG_ENABLED.load(Ordering::Relaxed) {
         libc::write(2, msg.as_ptr() as *const c_void, msg.len());
     }
@@ -254,9 +417,10 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: 
         return real_open(path, flags, mode);
     };
 
+    let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC)) != 0;
     if path_str.starts_with(&state.vfs_prefix) {
         let vpath = &path_str[state.vfs_prefix.len()..];
-        if let Some(entry) = state.manifest.get(vpath) {
+        if let Some(entry) = state.query_manifest(vpath) {
             if entry.is_dir() {
                 set_errno(libc::EISDIR);
                 return -1;
@@ -287,9 +451,21 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: 
         }
     }
 
-    let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC)) != 0;
     if is_write && path_str.starts_with(&state.vfs_prefix) {
         let _ = break_link(path_str);
+
+        let fd = real_open(path, flags, mode);
+        if fd >= 0 {
+            let mut fds = state.open_fds.lock().unwrap();
+            fds.insert(
+                fd,
+                OpenFile {
+                    vpath: path_str[state.vfs_prefix.len()..].to_string(),
+                    original_path: path_str.to_string(),
+                },
+            );
+        }
+        return fd;
     }
 
     real_open(path, flags, mode)
@@ -300,7 +476,107 @@ unsafe fn write_impl(fd: c_int, buf: *const c_void, count: size_t, real_write: W
 }
 
 unsafe fn close_impl(fd: c_int, real_close: CloseFn) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_close(fd),
+    };
+
+    if let Some(state) = ShimState::get() {
+        let open_file = {
+            let mut fds = state.open_fds.lock().unwrap();
+            fds.remove(&fd)
+        };
+
+        if let Some(file) = open_file {
+            // Re-ingest
+            if let Ok(metadata) = std::fs::metadata(&file.original_path) {
+                if let Ok(data) = std::fs::read(&file.original_path) {
+                    let hash = CasStore::compute_hash(&data);
+                    let entry = vrift_manifest::VnodeEntry::new_file(
+                        hash,
+                        metadata.len(),
+                        metadata.mtime() as u64,
+                        metadata.mode(),
+                    );
+                    state.upsert_manifest(&file.vpath, entry);
+                    shim_log("[VRift-Shim] Re-ingested file on close\n");
+                }
+            }
+        }
+    }
+
     real_close(fd)
+}
+
+type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
+type FstatFn = unsafe extern "C" fn(c_int, *mut libc::stat) -> c_int;
+
+unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: StatFn) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_stat(path, buf),
+    };
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return real_stat(path, buf),
+    };
+
+    let Some(state) = ShimState::get() else {
+        return real_stat(path, buf);
+    };
+
+    if path_str == state.vfs_prefix {
+        ptr::write_bytes(buf, 0, 1);
+        (*buf).st_mode = libc::S_IFDIR | 0o755;
+        (*buf).st_nlink = 2;
+        (*buf).st_uid = libc::getuid();
+        (*buf).st_gid = libc::getgid();
+        return 0;
+    }
+
+    if path_str.starts_with(&state.vfs_prefix) {
+        let vpath = &path_str[state.vfs_prefix.len()..];
+        if let Some(entry) = state.query_manifest(vpath) {
+            ptr::write_bytes(buf, 0, 1);
+            (*buf).st_size = entry.size as libc::off_t;
+            (*buf).st_mtime = entry.mtime as libc::time_t;
+            (*buf).st_mode = entry.mode as libc::mode_t;
+            if entry.is_dir() {
+                (*buf).st_mode |= libc::S_IFDIR;
+            } else if entry.is_symlink() {
+                (*buf).st_mode |= libc::S_IFLNK;
+            } else {
+                (*buf).st_mode |= libc::S_IFREG;
+            }
+            (*buf).st_nlink = 1;
+            (*buf).st_uid = libc::getuid();
+            (*buf).st_gid = libc::getgid();
+            return 0;
+        }
+    }
+
+    real_stat(path, buf)
+}
+
+unsafe fn fstat_impl(fd: c_int, buf: *mut libc::stat, real_fstat: FstatFn) -> c_int {
+    // For fstat, we ideally track fds. For now, we just pass through.
+    real_fstat(fd, buf)
+}
+
+type OpendirFn = unsafe extern "C" fn(*const c_char) -> *mut libc::DIR;
+type ReadlinkFn = unsafe extern "C" fn(*const c_char, *mut c_char, size_t) -> ssize_t;
+
+unsafe fn opendir_impl(path: *const c_char, real_opendir: OpendirFn) -> *mut libc::DIR {
+    real_opendir(path)
+}
+
+unsafe fn readlink_impl(
+    path: *const c_char,
+    buf: *mut c_char,
+    bufsiz: size_t,
+    real_readlink: ReadlinkFn,
+) -> ssize_t {
+    real_readlink(path, buf, bufsiz)
 }
 
 // ============================================================================
@@ -341,9 +617,34 @@ pub unsafe extern "C" fn write(fd: c_int, b: *const c_void, c: size_t) -> ssize_
 }
 
 #[cfg(target_os = "linux")]
+static REAL_STAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_LSTAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_FSTAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+
+#[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn close(fd: c_int) -> c_int {
     close_impl(fd, get_real!(REAL_CLOSE, "close", CloseFn))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn stat(p: *const c_char, b: *mut libc::stat) -> c_int {
+    stat_common(p, b, get_real!(REAL_STAT, "stat", StatFn))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn lstat(p: *const c_char, b: *mut libc::stat) -> c_int {
+    stat_common(p, b, get_real!(REAL_LSTAT, "lstat", StatFn))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn fstat(fd: c_int, b: *mut libc::stat) -> c_int {
+    fstat_impl(fd, b, get_real!(REAL_FSTAT, "fstat", FstatFn))
 }
 
 #[cfg(target_os = "macos")]
@@ -365,6 +666,48 @@ pub unsafe extern "C" fn write_shim(fd: c_int, b: *const c_void, c: size_t) -> s
 pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     let real = std::mem::transmute::<*const (), CloseFn>(IT_CLOSE.old_func);
     close_impl(fd, real)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn stat_shim(p: *const c_char, b: *mut libc::stat) -> c_int {
+    stat_common(p, b, stat)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn lstat_shim(p: *const c_char, b: *mut libc::stat) -> c_int {
+    stat_common(p, b, lstat)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn fstat_shim(fd: c_int, b: *mut libc::stat) -> c_int {
+    fstat_impl(fd, b, fstat)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn opendir_shim(p: *const c_char) -> *mut libc::DIR {
+    opendir_impl(p, opendir)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn readdir_shim(d: *mut libc::DIR) -> *mut libc::dirent {
+    readdir(d)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn closedir_shim(d: *mut libc::DIR) -> c_int {
+    closedir(d)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn readlink_shim(p: *const c_char, b: *mut c_char, s: size_t) -> ssize_t {
+    readlink_impl(p, b, s, readlink)
 }
 
 // Constructor

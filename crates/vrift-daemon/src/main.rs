@@ -42,13 +42,28 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use vrift_manifest::Manifest;
+
 struct DaemonState {
     // In-memory index of CAS blobs (Hash -> Size)
     cas_index: Mutex<HashMap<[u8; 32], u64>>,
+    // VFS Manifest
+    manifest: Mutex<Manifest>,
+    manifest_path: String,
 }
 
 async fn start_daemon() -> Result<()> {
     tracing::info!("vriftd: Starting daemon...");
+
+    let manifest_path =
+        std::env::var("VRIFT_MANIFEST").unwrap_or_else(|_| "velo.manifest".to_string());
+    let manifest = Manifest::load(&manifest_path).unwrap_or_else(|_| {
+        tracing::warn!(
+            "Failed to load manifest from {}, creating new.",
+            manifest_path
+        );
+        Manifest::new()
+    });
 
     let socket_path = "/tmp/vrift.sock";
     let path = Path::new(socket_path);
@@ -63,6 +78,8 @@ async fn start_daemon() -> Result<()> {
     // Initialize shared state
     let state = Arc::new(DaemonState {
         cas_index: Mutex::new(HashMap::new()),
+        manifest: Mutex::new(manifest),
+        manifest_path,
     });
 
     // Start background scan (Warm-up)
@@ -175,6 +192,22 @@ async fn handle_request(req: VeloRequest, state: &DaemonState) -> VeloResponse {
             immutable,
             owner,
         } => handle_protect(path, immutable, owner).await,
+        VeloRequest::ManifestGet { path } => {
+            let manifest: tokio::sync::MutexGuard<Manifest> = state.manifest.lock().await;
+            VeloResponse::ManifestAck {
+                entry: manifest.get(&path).cloned(),
+            }
+        }
+        VeloRequest::ManifestUpsert { path, entry } => {
+            let mut manifest: tokio::sync::MutexGuard<Manifest> = state.manifest.lock().await;
+            manifest.insert(&path, entry);
+            if let Err(e) = manifest.save(&state.manifest_path) {
+                tracing::error!("Failed to save manifest: {}", e);
+                VeloResponse::Error(format!("Manifest save failed: {}", e))
+            } else {
+                VeloResponse::ManifestAck { entry: None }
+            }
+        }
     }
 }
 

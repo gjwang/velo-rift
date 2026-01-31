@@ -1981,6 +1981,7 @@ dependencies = [
  "tracing-subscriber",
  "vrift-cas",
  "vrift-ipc",
+ "vrift-manifest",
 ]
 
 [[package]]
@@ -2005,6 +2006,7 @@ dependencies = [
  "serde",
  "thiserror",
  "tokio",
+ "vrift-manifest",
 ]
 
 [[package]]
@@ -2064,11 +2066,14 @@ dependencies = [
 name = "vrift-shim"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bincode",
  "cc",
  "libc",
  "memmap2",
  "thiserror",
  "vrift-cas",
+ "vrift-ipc",
  "vrift-manifest",
 ]
 
