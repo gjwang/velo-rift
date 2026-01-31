@@ -311,7 +311,8 @@ fi
 
 # End
 # Create an orphan:
-# 1. Modify file1.txt content
+# 1. Modify file1.txt content (Remove first as it might be a read-only hard link from Solid ingest)
+rm "$DATA_DIR/file1.txt"
 echo "New Content" > "$DATA_DIR/file1.txt"
 # 2. Ingest again (creates new blob, updates manifest, leaving old blob "Hello Velo Rift" orphan)
 # Note: In a real scenario, we'd probably want to use a fresh manifest or update existing. 
