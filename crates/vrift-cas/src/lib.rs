@@ -25,6 +25,7 @@
 mod io_backend;
 pub mod link_strategy;
 pub mod parallel_ingest;
+pub mod protection;
 pub mod streaming_pipeline;
 pub mod zero_copy_ingest;
 
@@ -37,6 +38,7 @@ pub use parallel_ingest::{
     parallel_ingest_with_progress, parallel_ingest_with_threads, IngestMode, ParallelIngestStats,
     MAX_INGEST_THREADS,
 };
+pub use protection::{is_immutable, set_immutable};
 pub use streaming_pipeline::{IngestPipeline, IngestStats, PipelineConfig};
 pub use zero_copy_ingest::{
     ingest_phantom, ingest_solid_tier1, ingest_solid_tier1_dedup, ingest_solid_tier2,

@@ -76,27 +76,16 @@ fn link_or_clone_or_copy(source: &Path, target: &Path) -> io::Result<bool> {
 // Tier-1 Immutable Flag (RFC-0039 §5.1.1)
 // ============================================================================
 
-/// Set immutable flag on CAS blob for maximum Tier-1 protection.
-///
-/// - Linux: `chattr +i` (requires root or CAP_LINUX_IMMUTABLE)
-/// - macOS: `chflags uchg` (user immutable flag)
-///
-/// This is best-effort: silently fails if permissions are insufficient.
-#[cfg(target_os = "linux")]
-fn set_immutable_on_cas(path: &Path) {
-    use std::process::Command;
-    let _ = Command::new("chattr").arg("+i").arg(path).status();
-}
+// RFC-0039 §5.1.1: Set immutable flag for maximum Tier-1 protection moved to crates/vrift-cas/src/protection.rs
+use crate::protection::set_immutable as set_immutable_native;
 
-#[cfg(target_os = "macos")]
-fn set_immutable_on_cas(path: &Path) {
-    use std::process::Command;
-    let _ = Command::new("chflags").arg("uchg").arg(path).status();
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn set_immutable_on_cas(_path: &Path) {
-    // Unsupported platform - no-op
+/// Best-effort immutable flag setting.
+///
+/// Log errors but don't fail ingest if permissions are insufficient (e.g. non-root on Linux).
+fn set_immutable_best_effort(path: &std::path::Path) {
+    if let Err(e) = set_immutable_native(path, true) {
+        tracing::debug!("Failed to set immutable flag on {:?}: {}", path, e);
+    }
 }
 
 // ============================================================================
@@ -165,7 +154,7 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
 
     // RFC-0039 §5.1.1: Set immutable flag for maximum Tier-1 protection
     if was_new {
-        set_immutable_on_cas(&cas_target);
+        set_immutable_best_effort(&cas_target);
     }
 
     // Drop the lock guard before modifying source
@@ -223,7 +212,7 @@ pub fn ingest_solid_tier1_dedup(
         link_or_clone_or_copy(source, &cas_target)?;
 
         // RFC-0039 §5.1.1: Set immutable flag for maximum Tier-1 protection
-        set_immutable_on_cas(&cas_target);
+        set_immutable_best_effort(&cas_target);
     }
 
     // Drop the lock guard before modifying source
