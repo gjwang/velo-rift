@@ -49,6 +49,7 @@ pub trait LinkStrategy: Send + Sync {
 /// - Dynamic libraries (.dylib, .so)
 /// - Static archives (.a)
 /// - Kernel extensions (.kext, .bundle)
+#[cfg(target_os = "macos")]
 const BINARY_SENSITIVE_EXTENSIONS: &[&str] = &[
     "app",
     "framework",
@@ -72,6 +73,7 @@ const BINARY_SENSITIVE_EXTENSIONS: &[&str] = &[
 /// assert!(is_binary_sensitive(Path::new("libfoo.dylib")));
 /// assert!(!is_binary_sensitive(Path::new("index.js")));
 /// ```
+#[cfg(target_os = "macos")]
 pub fn is_binary_sensitive(path: &Path) -> bool {
     // Check extension
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -86,6 +88,7 @@ pub fn is_binary_sensitive(path: &Path) -> bool {
 }
 
 /// Direct reflink or copy (skipping hard_link attempt)
+#[cfg(target_os = "macos")]
 fn reflink_or_copy(source: &Path, target: &Path) -> io::Result<()> {
     match reflink_copy::reflink(source, target) {
         Ok(()) => Ok(()),
@@ -281,6 +284,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_is_binary_sensitive_extensions() {
         use std::path::Path;
 
@@ -299,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_is_binary_sensitive_paths() {
         use std::path::Path;
 

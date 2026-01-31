@@ -359,7 +359,9 @@ run_python_tests() {
 # =============================================================================
 run_clippy() {
     log_step "Running Clippy (all crates)..."
-    cargo clippy --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets --all-features -- -D warnings
+    # Note: We don't use --all-features because io_uring feature is Linux-only
+    # Platform-specific features should be tested on their target platforms
+    cargo clippy --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets -- -D warnings
     log_success "Clippy passed"
 }
 
