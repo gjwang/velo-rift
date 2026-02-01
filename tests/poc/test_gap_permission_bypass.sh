@@ -1,28 +1,42 @@
 #!/bin/bash
-set -e
+# No set -e to allow proper error handling
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
 VELO_PROJECT_ROOT="$TEST_DIR/workspace"
-DAEMON_BIN="${PROJECT_ROOT}/target/debug/vriftd"
 
 echo "=== P0 Gap Test: Permission Bypass (CAS Mode Corruption) ==="
+
+# Compile C test program
+cat > "$TEST_DIR/perm_test.c" << 'EOF'
+#include <stdio.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <string.h>
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <path>\n", argv[0]);
+        return 1;
+    }
+    
+    printf("Testing chmod 644 on %s...\n", argv[1]);
+    if (chmod(argv[1], 0644) == 0) {
+        printf("chmod SUCCESS (bypass!)\n");
+        return 1; // Fail - chmod should be blocked
+    } else {
+        printf("chmod BLOCKED: %s\n", strerror(errno));
+        return 0; // Pass - chmod was blocked
+    }
+}
+EOF
+
+clang -o "$TEST_DIR/perm_test" "$TEST_DIR/perm_test.c"
 
 # Prepare VFS
 mkdir -p "$VELO_PROJECT_ROOT/.vrift"
 echo "IMMUTABLE_DATA" > "$VELO_PROJECT_ROOT/protected.txt"
-chmod 444 "$VELO_PROJECT_ROOT/protected.txt" # Make it read-only
-
-# Start Daemon
-rm -f /tmp/vrift.sock
-(
-    unset DYLD_INSERT_LIBRARIES
-    unset LD_PRELOAD
-    $DAEMON_BIN start > "$TEST_DIR/daemon.log" 2>&1 &
-    echo $! > "$TEST_DIR/daemon.pid"
-)
-DAEMON_PID=$(cat "$TEST_DIR/daemon.pid")
-sleep 2
+chmod 444 "$VELO_PROJECT_ROOT/protected.txt"
 
 # Setup Shim
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
@@ -30,23 +44,19 @@ if [[ "$(uname)" == "Darwin" ]]; then
     export DYLD_INSERT_LIBRARIES="$LD_PRELOAD"
     export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
-export VRIFT_socket_path="/tmp/vrift.sock"
+export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 
-echo "Attempting chmod +w on virtual path..."
-(cd "$VELO_PROJECT_ROOT" && chmod 644 protected.txt)
+# Run test with shim
+RESULT=$("$TEST_DIR/perm_test" "$VELO_PROJECT_ROOT/protected.txt" 2>&1)
+EXIT_CODE=$?
+echo "$RESULT"
 
-# Verify
-CURRENT_MODE=$(stat -f "%Lp" "$VELO_PROJECT_ROOT/protected.txt")
-echo "Current Mode: $CURRENT_MODE"
-
-kill $DAEMON_PID || true
 rm -rf "$TEST_DIR"
 
-if [[ "$CURRENT_MODE" == "644" ]]; then
-    echo "❌ FAIL: Permission Bypass. chmod succeeded via OS on virtual path."
-    echo "   Risk: User can flip write bit on shared CAS blocks."
-    exit 1
-else
-    echo "✅ PASS: chmod blocked or virtualized (mode unchanged)."
+if [[ $EXIT_CODE -eq 0 ]]; then
+    echo "✅ PASS: chmod blocked or virtualized."
     exit 0
+else
+    echo "❌ FAIL: Permission Bypass. chmod succeeded on virtual path."
+    exit 1
 fi
