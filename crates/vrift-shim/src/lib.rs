@@ -70,6 +70,7 @@ extern "C" {
         offset: libc::off_t,
     ) -> *mut c_void;
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+    fn access(path: *const c_char, mode: c_int) -> c_int;
 }
 
 #[cfg(target_os = "macos")]
@@ -176,6 +177,13 @@ static IT_MMAP: Interpose = Interpose {
 static IT_DLOPEN: Interpose = Interpose {
     new_func: dlopen_shim as *const (),
     old_func: dlopen as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_ACCESS: Interpose = Interpose {
+    new_func: access_shim as *const (),
+    old_func: access as *const (),
 };
 
 // ============================================================================
@@ -823,6 +831,7 @@ type PosixSpawnFn = unsafe extern "C" fn(
 type MmapFn =
     unsafe extern "C" fn(*mut c_void, size_t, c_int, c_int, c_int, libc::off_t) -> *mut c_void;
 type DlopenFn = unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void;
+type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 
 unsafe fn execve_impl(
     path: *const c_char,
@@ -1034,6 +1043,16 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
             ptr::write_bytes(buf, 0, 1);
             (*buf).st_size = entry.size as libc::off_t;
             (*buf).st_mtime = entry.mtime as libc::time_t;
+            // Set nanosecond-precision mtime for incremental build tools (make, ninja, cargo)
+            #[cfg(target_os = "macos")]
+            {
+                (*buf).st_mtime_nsec = 0; // Manifest stores seconds, nsec = 0 for now
+            }
+            #[cfg(target_os = "linux")]
+            {
+                (*buf).st_mtim.tv_sec = entry.mtime as i64;
+                (*buf).st_mtim.tv_nsec = 0; // Manifest stores seconds, nsec = 0 for now
+            }
             (*buf).st_mode = entry.mode as libc::mode_t;
             if entry.is_dir() {
                 (*buf).st_mode |= libc::S_IFDIR;
@@ -1125,6 +1144,77 @@ unsafe fn fstat_impl(fd: c_int, buf: *mut libc::stat, real_fstat: FstatFn) -> c_
     }
 
     real_fstat(fd, buf)
+}
+
+/// access() syscall implementation for VFS
+/// Checks if a VFS path is accessible based on manifest entries
+unsafe fn access_impl(path: *const c_char, mode: c_int, real_access: AccessFn) -> c_int {
+    // Early bailout during ShimState initialization
+    if INITIALIZING.load(Ordering::SeqCst) {
+        return real_access(path, mode);
+    }
+
+    // Skip if ShimState is not yet initialized
+    if SHIM_STATE.load(Ordering::Acquire).is_null() {
+        return real_access(path, mode);
+    }
+
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real_access(path, mode),
+    };
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return real_access(path, mode),
+    };
+
+    let Some(state) = ShimState::get() else {
+        return real_access(path, mode);
+    };
+
+    // Check if this is a VFS path
+    if state.psfs_applicable(path_str) {
+        if let Some(entry) = state.psfs_lookup(path_str) {
+            // F_OK (0) = check existence
+            if mode == libc::F_OK {
+                return 0; // File exists in manifest
+            }
+
+            // Check permission bits from manifest entry mode
+            let file_mode = entry.mode;
+
+            // R_OK (4) = check read permission
+            if (mode & libc::R_OK) != 0 {
+                // Check user/group/other read bits
+                if (file_mode & 0o444) == 0 {
+                    set_errno(libc::EACCES);
+                    return -1;
+                }
+            }
+
+            // W_OK (2) = check write permission
+            // VFS files are typically read-only (hardlinked from CAS)
+            if (mode & libc::W_OK) != 0 {
+                // CAS files are immutable, but CoW will handle writes
+                // For now, allow write checks to pass as CoW can handle it
+            }
+
+            // X_OK (1) = check execute permission
+            if (mode & libc::X_OK) != 0 && (file_mode & 0o111) == 0 {
+                set_errno(libc::EACCES);
+                return -1;
+            }
+
+            shim_log("[VRift-Shim] access() returned 0 for VFS path: ");
+            shim_log(path_str);
+            shim_log("\n");
+            return 0;
+        }
+        // Path is in VFS prefix but not in manifest - let real syscall handle ENOENT
+    }
+
+    real_access(path, mode)
 }
 
 type OpendirFn = unsafe extern "C" fn(*const c_char) -> *mut libc::DIR;
@@ -1603,6 +1693,13 @@ pub unsafe extern "C" fn dlopen_shim(filename: *const c_char, flags: c_int) -> *
 
     // Passthrough for non-VFS paths and fallback
     real(filename, flags)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn access_shim(path: *const c_char, mode: c_int) -> c_int {
+    let real = std::mem::transmute::<*const (), AccessFn>(IT_ACCESS.old_func);
+    access_impl(path, mode, real)
 }
 
 // Constructor
