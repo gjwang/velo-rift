@@ -65,8 +65,9 @@ tests/qa/ai_bench_workspace/
 tests/qa/ai_dropin_workspace/
 .DS_Store
 
-# VRift cache directories (RFC-0042)
+# VRift cache and manifest artifacts
 **/.vrift/
+*.manifest
 .tmp_home/
 .vrift_test/
 gc_test_dir/
@@ -74,8 +75,6 @@ ingest_dir/
 _old_gc_test_dir/
 _old_ingest_dir/
 ls_no_sip
-test.manifest
 test.txt
 test_stat
 test_stat.c
-valid.manifest
