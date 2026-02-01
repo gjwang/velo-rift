@@ -558,12 +558,17 @@ run_full_ci() {
         local failed=0
         local gap_report=""
         
+        # Disable strict mode to ensure we collect all gaps
+        set +e
+        
         for task in "${tier_tests[@]}"; do
             echo ""
             log_step "TASK: $task"
-            # Run in subshell to isolate exit behavior
-            local rc=0
-            (eval "$task") 2>&1 || rc=$?
+            
+            # Simple execution capturing exit code
+            # Note: Explicitly NOT using set -e here
+            (eval "$task")
+            local rc=$?
             
             if [[ $rc -eq 0 ]]; then
                 ((passed++))
@@ -571,9 +576,12 @@ run_full_ci() {
             else
                 ((failed++))
                 log_warn "GAP: $task (expected - not implemented)"
-                gap_report+="  - $(basename "$task")\n"
+                gap_report="${gap_report}  - ${task}\n"
             fi
         done
+        
+        # Re-enable strict mode
+        set -e
         
         echo ""
         echo "=========================================="
