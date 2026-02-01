@@ -3,23 +3,27 @@
 //! LD_PRELOAD / DYLD_INSERT_LIBRARIES shim for Velo Rift virtual filesystem.
 //! Industrial-grade, zero-allocation, and recursion-safe.
 
-#![allow(clippy::missing_safety_doc)]
-#![allow(unused_doc_comments)]
+// Allow dead code during incremental restoration - functions will be connected in later phases
 #![allow(dead_code)]
-#![allow(clippy::needless_borrow)]
-#![allow(clippy::unnecessary_cast)]
-#![allow(clippy::unnecessary_map_or)]
 
-#[macro_use]
-pub mod macros;
 pub mod interpose;
 pub mod ipc;
-pub mod path;
 pub mod state;
 pub mod syscalls;
 
+// Re-export for linkage
+pub use interpose::*;
 pub use state::LOGGER;
 pub use syscalls::*;
 
-#[allow(dead_code)]
-extern "C" fn dump_logs_atexit() {} // Placeholder, moved to state.rs
+/// RFC-0049: Static constructor for macOS to signal that the library
+/// has been loaded and symbol resolution is complete.
+/// This safely clears the INITIALIZING flag to enable shims.
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__mod_init_func"]
+pub static SET_READY: unsafe extern "C" fn() = {
+    unsafe extern "C" fn ready() {
+        crate::state::INITIALIZING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    ready
+};

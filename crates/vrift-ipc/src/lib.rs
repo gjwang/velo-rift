@@ -26,9 +26,10 @@ pub enum VeloRequest {
     ManifestGet {
         path: String,
     },
+    /// Manifest payload
     ManifestUpsert {
         path: String,
-        entry: vrift_manifest::VnodeEntry,
+        entry: VnodeEntry,
     },
     /// RFC-0047: Remove a manifest entry (for unlink/rmdir)
     ManifestRemove {
@@ -82,6 +83,28 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+#[cfg(feature = "manifest")]
+pub use vrift_manifest::VnodeEntry;
+
+#[cfg(not(feature = "manifest"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct VnodeEntry {
+    pub content_hash: [u8; 32],
+    pub size: u64,
+    pub mtime: u64,
+    pub mode: u32,
+    pub flags: u16,
+    #[serde(default)]
+    pub _pad: u16,
+}
+
+#[cfg(not(feature = "manifest"))]
+impl VnodeEntry {
+    pub fn is_dir(&self) -> bool {
+        (self.flags & 1) != 0
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum VeloResponse {
     HandshakeAck {
@@ -99,7 +122,7 @@ pub enum VeloResponse {
     },
     CasNotFound,
     ManifestAck {
-        entry: Option<vrift_manifest::VnodeEntry>,
+        entry: Option<VnodeEntry>,
     },
     /// Directory listing response for VFS synthesis
     ManifestListAck {
@@ -120,12 +143,26 @@ pub enum VeloResponse {
     Error(String),
 }
 
-/// Default daemon socket path
 pub fn default_socket_path() -> &'static str {
     "/tmp/vrift.sock"
 }
 
+#[cfg(feature = "cas")]
 pub use vrift_cas::{bloom_hashes, BloomFilter, BLOOM_SIZE};
+
+#[cfg(not(feature = "cas"))]
+pub const BLOOM_SIZE: usize = 32 * 1024;
+
+#[cfg(not(feature = "cas"))]
+pub fn bloom_hashes(s: &str) -> (usize, usize) {
+    let mut h1 = 0usize;
+    let mut h2 = 0usize;
+    for (i, b) in s.as_bytes().iter().enumerate() {
+        h1 = h1.wrapping_add((*b as usize).wrapping_mul(i + 1));
+        h2 = h2.wrapping_add((*b as usize).wrapping_mul(i + 31));
+    }
+    (h1, h2)
+}
 
 // ============================================================================
 // Manifest Mmap Shared Memory (RFC-0044 Hot Stat Cache)
@@ -501,6 +538,7 @@ pub fn is_daemon_running() -> bool {
 }
 
 /// IPC Client for communicating with vrift-daemon
+#[cfg(feature = "tokio")]
 pub mod client {
     use super::*;
     use std::path::Path;

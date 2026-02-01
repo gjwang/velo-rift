@@ -1,16 +1,10 @@
-#[cfg(target_os = "macos")]
-use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t};
+//! Syscall interposition table for macOS/Linux shim.
+//! Safety: All extern "C" functions here are dangerous FFI and must be used correctly.
+#![allow(clippy::missing_safety_doc)]
 
-// Import all shims from crate root (lib.rs) for IT_* initialization
-#[cfg(target_os = "macos")]
-use crate::{
-    access_shim, chdir_shim, close_shim, closedir_shim, dlopen_shim, dlsym_shim, execve_shim,
-    faccessat_shim, fcntl_shim, flock_shim, fstat_shim, fstatat_shim, getcwd_shim, link_shim,
-    linkat_shim, lstat_shim, mkdir_shim, mmap_shim, munmap_shim, open_shim, openat_shim,
-    opendir_shim, posix_spawn_shim, posix_spawnp_shim, read_shim, readdir_shim, readlink_shim,
-    realpath_shim, rename_shim, renameat_shim, rmdir_shim, stat_shim, symlink_shim, unlink_shim,
-    utimensat_shim, write_shim,
-};
+use crate::state::*;
+use libc::{c_char, c_int, c_void, dirent, mode_t, off_t, pid_t, size_t, ssize_t, timespec, DIR};
+use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -23,78 +17,265 @@ pub struct Interpose {
 unsafe impl Sync for Interpose {}
 
 #[cfg(target_os = "macos")]
-#[allow(improper_ctypes)] // For some libc types that might warn
 extern "C" {
     fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t;
+    fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t;
     fn stat(path: *const c_char, buf: *mut libc::stat) -> c_int;
     fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_int;
     fn fstat(fd: c_int, buf: *mut libc::stat) -> c_int;
-    fn opendir(path: *const c_char) -> *mut libc::DIR;
-    fn readdir(dirp: *mut libc::DIR) -> *mut libc::dirent;
-    fn closedir(dirp: *mut libc::DIR) -> c_int;
+    fn opendir(path: *const c_char) -> *mut DIR;
+    fn readdir(dirp: *mut DIR) -> *mut dirent;
+    fn closedir(dirp: *mut DIR) -> c_int;
     fn readlink(path: *const c_char, buf: *mut c_char, bufsiz: size_t) -> ssize_t;
     fn execve(path: *const c_char, argv: *const *const c_char, envp: *const *const c_char)
         -> c_int;
     fn posix_spawn(
-        pid: *mut libc::pid_t,
+        pid: *mut pid_t,
         path: *const c_char,
-        file_actions: *const c_void,
-        attrp: *const c_void,
+        fa: *const c_void,
+        attr: *const c_void,
         argv: *const *const c_char,
         envp: *const *const c_char,
     ) -> c_int;
     fn posix_spawnp(
-        pid: *mut libc::pid_t,
+        pid: *mut pid_t,
         file: *const c_char,
-        file_actions: *const c_void,
-        attrp: *const c_void,
+        fa: *const c_void,
+        attr: *const c_void,
         argv: *const *const c_char,
         envp: *const *const c_char,
     ) -> c_int;
-    fn realpath(pathname: *const c_char, resolved_path: *mut c_char) -> *mut c_char;
-
+    fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
     #[link_name = "realpath$DARWIN_EXTSN"]
-    fn realpath_darwin(pathname: *const c_char, resolved_path: *mut c_char) -> *mut c_char;
+    fn realpath_darwin(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
     fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char;
     fn chdir(path: *const c_char) -> c_int;
     fn unlink(path: *const c_char) -> c_int;
-    fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int;
+    fn rename(old: *const c_char, new: *const c_char) -> c_int;
     fn rmdir(path: *const c_char) -> c_int;
-
-    fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+    fn dlopen(path: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn access(path: *const c_char, mode: c_int) -> c_int;
-
-    // Additional external functions usually found in libc but declared here for interpose mapping
-    fn faccessat(dirfd: c_int, pathname: *const c_char, mode: c_int, flags: c_int) -> c_int;
-    fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, mode: mode_t) -> c_int;
-    fn link(oldpath: *const c_char, newpath: *const c_char) -> c_int;
-    fn linkat(
-        olddirfd: c_int,
-        oldpath: *const c_char,
-        newdirfd: c_int,
-        newpath: *const c_char,
-        flags: c_int,
-    ) -> c_int;
-    fn renameat(
-        olddirfd: c_int,
-        oldpath: *const c_char,
-        newdirfd: c_int,
-        newpath: *const c_char,
-    ) -> c_int;
-    fn symlink(path1: *const c_char, path2: *const c_char) -> c_int;
-    fn flock(fd: c_int, operation: c_int) -> c_int;
-    fn utimensat(
-        dirfd: c_int,
-        pathname: *const c_char,
-        times: *const libc::timespec,
-        flags: c_int,
-    ) -> c_int;
+    fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int;
+    fn openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: mode_t) -> c_int;
+    fn link(old: *const c_char, new: *const c_char) -> c_int;
+    fn linkat(fd1: c_int, p1: *const c_char, fd2: c_int, p2: *const c_char, flags: c_int) -> c_int;
+    fn renameat(fd1: c_int, p1: *const c_char, fd2: c_int, p2: *const c_char) -> c_int;
+    fn symlink(p1: *const c_char, p2: *const c_char) -> c_int;
+    fn flock(fd: c_int, op: c_int) -> c_int;
+    fn utimensat(dirfd: c_int, path: *const c_char, times: *const timespec, flags: c_int) -> c_int;
     fn mkdir(path: *const c_char, mode: mode_t) -> c_int;
     fn munmap(addr: *mut c_void, len: size_t) -> c_int;
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    fn fstatat(dirfd: c_int, path: *const c_char, buf: *mut libc::stat, flags: c_int) -> c_int;
+}
+
+#[allow(unused_macros)]
+macro_rules! shim {
+    ($name:ident, $real:ident, ($($arg:ident : $typ:ty),*) -> $ret:ty) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $name($($arg : $typ),*) -> $ret {
+            let real = std::mem::transmute::<*const (), unsafe extern "C" fn($($typ),*) -> $ret>(IT_OPEN.old_func); // Placeholder, will fix
+            real($($arg),*)
+        }
+    };
+}
+
+// Minimal stubs that don't depend on other modules
+#[no_mangle]
+pub unsafe extern "C" fn open_shim(p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    if INITIALIZING.load(Ordering::Relaxed) {
+        return open(p, f, m);
+    }
+    open(p, f, m)
+}
+#[no_mangle]
+pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
+    close(fd)
+}
+#[no_mangle]
+pub unsafe extern "C" fn write_shim(fd: c_int, b: *const c_void, c: size_t) -> ssize_t {
+    write(fd, b, c)
+}
+#[no_mangle]
+pub unsafe extern "C" fn read_shim(fd: c_int, b: *mut c_void, c: size_t) -> ssize_t {
+    read(fd, b, c)
+}
+#[no_mangle]
+pub unsafe extern "C" fn stat_shim(p: *const c_char, b: *mut libc::stat) -> c_int {
+    stat(p, b)
+}
+#[no_mangle]
+pub unsafe extern "C" fn lstat_shim(p: *const c_char, b: *mut libc::stat) -> c_int {
+    lstat(p, b)
+}
+#[no_mangle]
+pub unsafe extern "C" fn fstat_shim(fd: c_int, b: *mut libc::stat) -> c_int {
+    fstat(fd, b)
+}
+#[no_mangle]
+pub unsafe extern "C" fn opendir_shim(p: *const c_char) -> *mut DIR {
+    opendir(p)
+}
+#[no_mangle]
+pub unsafe extern "C" fn readdir_shim(d: *mut DIR) -> *mut dirent {
+    readdir(d)
+}
+#[no_mangle]
+pub unsafe extern "C" fn closedir_shim(d: *mut DIR) -> c_int {
+    closedir(d)
+}
+#[no_mangle]
+pub unsafe extern "C" fn readlink_shim(p: *const c_char, b: *mut c_char, s: size_t) -> ssize_t {
+    readlink(p, b, s)
+}
+#[no_mangle]
+pub unsafe extern "C" fn realpath_shim(p: *const c_char, r: *mut c_char) -> *mut c_char {
+    realpath(p, r)
+}
+#[no_mangle]
+pub unsafe extern "C" fn getcwd_shim(b: *mut c_char, s: size_t) -> *mut c_char {
+    getcwd(b, s)
+}
+#[no_mangle]
+pub unsafe extern "C" fn chdir_shim(p: *const c_char) -> c_int {
+    chdir(p)
+}
+#[no_mangle]
+pub unsafe extern "C" fn unlink_shim(p: *const c_char) -> c_int {
+    unlink(p)
+}
+#[no_mangle]
+pub unsafe extern "C" fn rename_shim(o: *const c_char, n: *const c_char) -> c_int {
+    rename(o, n)
+}
+#[no_mangle]
+pub unsafe extern "C" fn rmdir_shim(p: *const c_char) -> c_int {
+    rmdir(p)
+}
+#[no_mangle]
+pub unsafe extern "C" fn dlopen_shim(p: *const c_char, f: c_int) -> *mut c_void {
+    dlopen(p, f)
+}
+#[no_mangle]
+pub unsafe extern "C" fn dlsym_shim(h: *mut c_void, s: *const c_char) -> *mut c_void {
+    dlsym(h, s)
+}
+#[no_mangle]
+pub unsafe extern "C" fn access_shim(p: *const c_char, m: c_int) -> c_int {
+    access(p, m)
+}
+#[no_mangle]
+pub unsafe extern "C" fn faccessat_shim(d: c_int, p: *const c_char, m: c_int, f: c_int) -> c_int {
+    faccessat(d, p, m, f)
+}
+#[no_mangle]
+pub unsafe extern "C" fn openat_shim(d: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    openat(d, p, f, m)
+}
+#[no_mangle]
+pub unsafe extern "C" fn link_shim(o: *const c_char, n: *const c_char) -> c_int {
+    link(o, n)
+}
+#[no_mangle]
+pub unsafe extern "C" fn linkat_shim(
+    f1: c_int,
+    p1: *const c_char,
+    f2: c_int,
+    p2: *const c_char,
+    f: c_int,
+) -> c_int {
+    linkat(f1, p1, f2, p2, f)
+}
+#[no_mangle]
+pub unsafe extern "C" fn renameat_shim(
+    f1: c_int,
+    p1: *const c_char,
+    f2: c_int,
+    p2: *const c_char,
+) -> c_int {
+    renameat(f1, p1, f2, p2)
+}
+#[no_mangle]
+pub unsafe extern "C" fn symlink_shim(p1: *const c_char, p2: *const c_char) -> c_int {
+    symlink(p1, p2)
+}
+#[no_mangle]
+pub unsafe extern "C" fn flock_shim(fd: c_int, o: c_int) -> c_int {
+    flock(fd, o)
+}
+#[no_mangle]
+pub unsafe extern "C" fn utimensat_shim(
+    d: c_int,
+    p: *const c_char,
+    t: *const timespec,
+    f: c_int,
+) -> c_int {
+    utimensat(d, p, t, f)
+}
+#[no_mangle]
+pub unsafe extern "C" fn mkdir_shim(p: *const c_char, m: mode_t) -> c_int {
+    mkdir(p, m)
+}
+#[no_mangle]
+pub unsafe extern "C" fn mmap_shim(
+    a: *mut c_void,
+    l: size_t,
+    p: c_int,
+    f: c_int,
+    d: c_int,
+    o: off_t,
+) -> *mut c_void {
+    unsafe { libc::mmap(a, l, p, f, d, o) }
+}
+#[no_mangle]
+pub unsafe extern "C" fn munmap_shim(a: *mut c_void, l: size_t) -> c_int {
+    munmap(a, l)
+}
+#[no_mangle]
+pub unsafe extern "C" fn fcntl_shim(f: c_int, c: c_int, a: c_int) -> c_int {
+    fcntl(f, c, a)
+}
+#[no_mangle]
+pub unsafe extern "C" fn fstatat_shim(
+    d: c_int,
+    p: *const c_char,
+    b: *mut libc::stat,
+    f: c_int,
+) -> c_int {
+    fstatat(d, p, b, f)
+}
+#[no_mangle]
+pub unsafe extern "C" fn execve_shim(
+    p: *const c_char,
+    a: *const *const c_char,
+    e: *const *const c_char,
+) -> c_int {
+    execve(p, a, e)
+}
+#[no_mangle]
+pub unsafe extern "C" fn posix_spawn_shim(
+    p: *mut pid_t,
+    pa: *const c_char,
+    fa: *const c_void,
+    at: *const c_void,
+    ar: *const *const c_char,
+    e: *const *const c_char,
+) -> c_int {
+    posix_spawn(p, pa, fa, at, ar, e)
+}
+#[no_mangle]
+pub unsafe extern "C" fn posix_spawnp_shim(
+    p: *mut pid_t,
+    f: *const c_char,
+    fa: *const c_void,
+    at: *const c_void,
+    ar: *const *const c_char,
+    e: *const *const c_char,
+) -> c_int {
+    posix_spawnp(p, f, fa, at, ar, e)
 }
 
 #[cfg(target_os = "macos")]

@@ -66,3 +66,9 @@ vrift-shim = { path = "crates/vrift-shim" }
 vrift-fuse = { path = "crates/vrift-fuse" }
 vrift-lock = { path = "crates/vrift-lock" }
 vrift-ipc = { path = "crates/vrift-ipc" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

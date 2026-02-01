@@ -9,7 +9,7 @@ static VIRTUAL_CWD_KEY_VALUE: AtomicUsize = AtomicUsize::new(0);
 
 /// Get or create the pthread key for VIRTUAL_CWD storage.
 /// Returns 0 if creation fails (will be treated as no virtual CWD).
-fn get_virtual_cwd_key() -> libc::pthread_key_t {
+pub(crate) fn get_virtual_cwd_key() -> libc::pthread_key_t {
     // Fast path: already initialized
     if VIRTUAL_CWD_KEY_INIT.load(Ordering::Acquire) {
         return VIRTUAL_CWD_KEY_VALUE.load(Ordering::Relaxed) as libc::pthread_key_t;
@@ -25,9 +25,14 @@ fn get_virtual_cwd_key() -> libc::pthread_key_t {
     }
 
     // Slow path: initialize (only one thread will succeed)
+    if crate::state::BOOTSTRAPPING.swap(true, Ordering::SeqCst) {
+        return 0;
+    }
+
     let mut key: libc::pthread_key_t = 0;
     let ret = unsafe { libc::pthread_key_create(&mut key, Some(destructor)) };
     if ret != 0 {
+        crate::state::BOOTSTRAPPING.store(false, Ordering::SeqCst);
         return 0;
     }
 
@@ -38,10 +43,12 @@ fn get_virtual_cwd_key() -> libc::pthread_key_t {
         .is_ok()
     {
         VIRTUAL_CWD_KEY_INIT.store(true, Ordering::Release);
+        crate::state::BOOTSTRAPPING.store(false, Ordering::SeqCst);
         key
     } else {
         // Another thread beat us, clean up and use their key
         unsafe { libc::pthread_key_delete(key) };
+        crate::state::BOOTSTRAPPING.store(false, Ordering::SeqCst);
         VIRTUAL_CWD_KEY_VALUE.load(Ordering::Relaxed) as libc::pthread_key_t
     }
 }

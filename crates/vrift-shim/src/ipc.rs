@@ -71,308 +71,152 @@ pub(crate) unsafe fn raw_read_exact(fd: c_int, buf: &mut [u8]) -> bool {
     true
 }
 
-/// Sync IPC to daemon for manifest removal (for unlink/rmdir)
-/// Returns true on success, false on failure (caller should fallback)
-pub(crate) unsafe fn sync_ipc_manifest_remove(socket_path: &str, path: &str) -> bool {
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(_) => return false,
+/// Send request and receive response using raw libc I/O
+unsafe fn sync_rpc(
+    socket_path: &str,
+    request: &vrift_ipc::VeloRequest,
+) -> Option<vrift_ipc::VeloResponse> {
+    let fd = raw_unix_connect(socket_path);
+    if fd < 0 {
+        return None;
+    }
+
+    // Serialize request with bincode
+    let req_bytes = match bincode::serialize(request) {
+        Ok(b) => b,
+        Err(_) => {
+            libc::close(fd);
+            return None;
+        }
     };
 
+    // Send length prefix (4 bytes LE) + payload
+    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
+    if !raw_write_all(fd, &len_bytes) || !raw_write_all(fd, &req_bytes) {
+        libc::close(fd);
+        return None;
+    }
+
+    // Read response length
+    let mut resp_len_buf = [0u8; 4];
+    if !raw_read_exact(fd, &mut resp_len_buf) {
+        libc::close(fd);
+        return None;
+    }
+    let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
+
+    // Read response payload (use heap allocation for variable size)
+    let mut resp_buf = vec![0u8; resp_len];
+    if !raw_read_exact(fd, &mut resp_buf) {
+        libc::close(fd);
+        return None;
+    }
+    libc::close(fd);
+
+    // Deserialize response
+    bincode::deserialize(&resp_buf).ok()
+}
+
+pub(crate) unsafe fn sync_ipc_manifest_remove(socket_path: &str, path: &str) -> bool {
     let request = vrift_ipc::VeloRequest::ManifestRemove {
         path: path.to_string(),
     };
-
-    let req_bytes = match bincode::serialize(&request) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    let mut stream = stream;
-    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
-    if stream.write_all(&len_bytes).is_err() {
-        return false;
-    }
-    if stream.write_all(&req_bytes).is_err() {
-        return false;
-    }
-
-    // Read response
-    let mut len_buf = [0u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        return false;
-    }
-    let resp_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut resp_buf = vec![0u8; resp_len];
-    if stream.read_exact(&mut resp_buf).is_err() {
-        return false;
-    }
-
     matches!(
-        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
-        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+        sync_rpc(socket_path, &request),
+        Some(vrift_ipc::VeloResponse::ManifestAck { .. })
     )
 }
 
-/// Sync IPC to daemon for manifest rename
-pub(crate) unsafe fn sync_ipc_manifest_rename(
-    socket_path: &str,
-    old_path: &str,
-    new_path: &str,
-) -> bool {
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
+pub(crate) unsafe fn sync_ipc_manifest_rename(socket_path: &str, old: &str, new: &str) -> bool {
     let request = vrift_ipc::VeloRequest::ManifestRename {
-        old_path: old_path.to_string(),
-        new_path: new_path.to_string(),
+        old_path: old.to_string(),
+        new_path: new.to_string(),
     };
-
-    let req_bytes = match bincode::serialize(&request) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    let mut stream = stream;
-    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
-    if stream.write_all(&len_bytes).is_err() {
-        return false;
-    }
-    if stream.write_all(&req_bytes).is_err() {
-        return false;
-    }
-
-    // Read response
-    let mut len_buf = [0u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        return false;
-    }
-    let resp_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut resp_buf = vec![0u8; resp_len];
-    if stream.read_exact(&mut resp_buf).is_err() {
-        return false;
-    }
-
     matches!(
-        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
-        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+        sync_rpc(socket_path, &request),
+        Some(vrift_ipc::VeloResponse::ManifestAck { .. })
     )
 }
 
-/// Sync IPC to daemon for manifest mtime update (for utimes/utimensat)
 pub(crate) unsafe fn sync_ipc_manifest_update_mtime(
     socket_path: &str,
     path: &str,
-    mtime_ns: u64,
+    mtime: u64,
 ) -> bool {
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
     let request = vrift_ipc::VeloRequest::ManifestUpdateMtime {
         path: path.to_string(),
-        mtime_ns,
+        mtime_ns: mtime,
     };
-
-    let req_bytes = match bincode::serialize(&request) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    let mut stream = stream;
-    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
-    if stream.write_all(&len_bytes).is_err() {
-        return false;
-    }
-    if stream.write_all(&req_bytes).is_err() {
-        return false;
-    }
-
-    // Read response
-    let mut len_buf = [0u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        return false;
-    }
-    let resp_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut resp_buf = vec![0u8; resp_len];
-    if stream.read_exact(&mut resp_buf).is_err() {
-        return false;
-    }
-
     matches!(
-        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
-        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+        sync_rpc(socket_path, &request),
+        Some(vrift_ipc::VeloResponse::ManifestAck { .. })
     )
 }
 
-/// Sync IPC to daemon for mkdir (creates dir entry in Manifest)
-pub(crate) unsafe fn sync_ipc_manifest_mkdir(socket_path: &str, path: &str, mode: u32) -> bool {
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-
-    // Create a directory VnodeEntry using constructor
-    let entry = vrift_manifest::VnodeEntry::new_directory(now, mode);
-
+pub(crate) unsafe fn sync_ipc_manifest_mkdir(socket_path: &str, path: &str, _mode: u32) -> bool {
+    // Create a directory entry in the manifest
     let request = vrift_ipc::VeloRequest::ManifestUpsert {
         path: path.to_string(),
-        entry,
+        entry: vrift_ipc::VnodeEntry {
+            content_hash: [0u8; 32],
+            size: 0,
+            mtime: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            mode: 0o755,
+            flags: 1, // is_dir flag
+            _pad: 0,
+        },
     };
-
-    let req_bytes = match bincode::serialize(&request) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    let mut stream = stream;
-    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
-    if stream.write_all(&len_bytes).is_err() {
-        return false;
-    }
-    if stream.write_all(&req_bytes).is_err() {
-        return false;
-    }
-
-    let mut len_buf = [0u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        return false;
-    }
-    let resp_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut resp_buf = vec![0u8; resp_len];
-    if stream.read_exact(&mut resp_buf).is_err() {
-        return false;
-    }
-
     matches!(
-        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
-        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+        sync_rpc(socket_path, &request),
+        Some(vrift_ipc::VeloResponse::ManifestAck { .. })
     )
 }
 
-/// Sync IPC to daemon for symlink (creates symlink entry in Manifest)
 pub(crate) unsafe fn sync_ipc_manifest_symlink(
     socket_path: &str,
-    link_path: &str,
+    path: &str,
     _target: &str,
 ) -> bool {
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-
-    // Create a symlink VnodeEntry using constructor
-    // Note: target_hash should store hash of target string, using zeros for now
-    let entry = vrift_manifest::VnodeEntry::new_symlink([0u8; 32], 0, now);
-
+    // Symlinks stored as special manifest entries
     let request = vrift_ipc::VeloRequest::ManifestUpsert {
-        path: link_path.to_string(),
-        entry,
+        path: path.to_string(),
+        entry: vrift_ipc::VnodeEntry {
+            content_hash: [0u8; 32],
+            size: 0,
+            mtime: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            mode: 0o777,
+            flags: 2, // is_symlink pseudo-flag
+            _pad: 0,
+        },
     };
-
-    let req_bytes = match bincode::serialize(&request) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    let mut stream = stream;
-    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
-    if stream.write_all(&len_bytes).is_err() {
-        return false;
-    }
-    if stream.write_all(&req_bytes).is_err() {
-        return false;
-    }
-
-    let mut len_buf = [0u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        return false;
-    }
-    let resp_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut resp_buf = vec![0u8; resp_len];
-    if stream.read_exact(&mut resp_buf).is_err() {
-        return false;
-    }
-
     matches!(
-        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
-        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+        sync_rpc(socket_path, &request),
+        Some(vrift_ipc::VeloResponse::ManifestAck { .. })
     )
 }
 
-/// Sync IPC to daemon for CoW reingest (close of dirty FD)
-/// Daemon will read temp_path, hash it, insert to CAS, update Manifest for vpath
 pub(crate) unsafe fn sync_ipc_manifest_reingest(
     socket_path: &str,
     vpath: &str,
-    temp_path: &str,
+    temp: &str,
 ) -> bool {
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
     let request = vrift_ipc::VeloRequest::ManifestReingest {
         vpath: vpath.to_string(),
-        temp_path: temp_path.to_string(),
+        temp_path: temp.to_string(),
     };
-
-    let req_bytes = match bincode::serialize(&request) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
-    let mut stream = stream;
-    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
-    if stream.write_all(&len_bytes).is_err() {
-        return false;
-    }
-    if stream.write_all(&req_bytes).is_err() {
-        return false;
-    }
-
-    let mut len_buf = [0u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        return false;
-    }
-    let resp_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut resp_buf = vec![0u8; resp_len];
-    if stream.read_exact(&mut resp_buf).is_err() {
-        return false;
-    }
-
     matches!(
-        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
-        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+        sync_rpc(socket_path, &request),
+        Some(vrift_ipc::VeloResponse::ManifestAck { .. })
     )
 }
 
-/// RFC-0049: Sync IPC for advisory locking (flock serialization)
-pub(crate) unsafe fn sync_ipc_flock(socket_path: &str, path: &str, op: i32) -> Result<(), i32> {
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(_) => return Err(libc::ECONNREFUSED),
-    };
-
+pub(crate) unsafe fn sync_ipc_flock(socket_path: &str, path: &str, op: i32) -> bool {
     let request = if op & libc::LOCK_UN != 0 {
         vrift_ipc::VeloRequest::FlockRelease {
             path: path.to_string(),
@@ -383,41 +227,46 @@ pub(crate) unsafe fn sync_ipc_flock(socket_path: &str, path: &str, op: i32) -> R
             operation: op,
         }
     };
+    matches!(
+        sync_rpc(socket_path, &request),
+        Some(vrift_ipc::VeloResponse::FlockAck)
+    )
+}
 
-    let req_bytes = match bincode::serialize(&request) {
-        Ok(b) => b,
-        Err(_) => return Err(libc::EIO),
+pub(crate) unsafe fn sync_ipc_fcntl_lock(
+    _socket_path: &str,
+    _path: &str,
+    _cmd: i32,
+    _lock: *mut libc::flock,
+) -> bool {
+    // fcntl F_SETLK/F_GETLK - complex locking, defer to passthrough for now
+    false
+}
+
+/// Query manifest for a single path
+pub(crate) unsafe fn sync_ipc_manifest_get(
+    socket_path: &str,
+    path: &str,
+) -> Option<vrift_ipc::VnodeEntry> {
+    let request = vrift_ipc::VeloRequest::ManifestGet {
+        path: path.to_string(),
     };
-
-    let mut stream = stream;
-    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
-    if stream.write_all(&len_bytes).is_err() {
-        return Err(libc::EPIPE);
+    match sync_rpc(socket_path, &request) {
+        Some(vrift_ipc::VeloResponse::ManifestAck { entry }) => entry,
+        _ => None,
     }
-    if stream.write_all(&req_bytes).is_err() {
-        return Err(libc::EPIPE);
-    }
+}
 
-    let mut len_buf = [0u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        return Err(libc::EPIPE);
-    }
-    let resp_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut resp_buf = vec![0u8; resp_len];
-    if stream.read_exact(&mut resp_buf).is_err() {
-        return Err(libc::EPIPE);
-    }
-
-    match bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf) {
-        Ok(vrift_ipc::VeloResponse::FlockAck) => Ok(()),
-        Ok(vrift_ipc::VeloResponse::Error(msg)) => {
-            if msg.contains("WOULDBLOCK") {
-                Err(libc::EWOULDBLOCK)
-            } else {
-                Err(libc::EIO)
-            }
-        }
-        _ => Err(libc::EIO),
+/// Query directory listing from daemon
+pub(crate) unsafe fn sync_ipc_manifest_list_dir(
+    socket_path: &str,
+    path: &str,
+) -> Option<Vec<vrift_ipc::DirEntry>> {
+    let request = vrift_ipc::VeloRequest::ManifestListDir {
+        path: path.to_string(),
+    };
+    match sync_rpc(socket_path, &request) {
+        Some(vrift_ipc::VeloResponse::ManifestListAck { entries }) => Some(entries),
+        _ => None,
     }
 }

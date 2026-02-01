@@ -79,7 +79,7 @@ pub struct VnodeEntry {
     pub flags: u16,
     /// Padding for alignment
     #[serde(skip)]
-    _pad: u16,
+    pub _pad: u16,
 }
 
 impl VnodeEntry {

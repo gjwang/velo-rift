@@ -2125,17 +2125,10 @@ dependencies = [
 name = "vrift-shim"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bincode",
- "blake3",
  "cc",
  "libc",
- "memmap2",
- "nix 0.28.0",
- "thiserror 1.0.69",
- "vrift-cas",
  "vrift-ipc",
- "vrift-manifest",
 ]
 
 [[package]]

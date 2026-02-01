@@ -3,11 +3,17 @@ name = "vrift-ipc"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["tokio", "manifest", "cas"]
+tokio = ["dep:tokio"]
+manifest = ["dep:vrift-manifest"]
+cas = ["dep:vrift-cas"]
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 bincode = { workspace = true }
-tokio = { workspace = true, features = ["net", "io-util"] }
-vrift-manifest = { path = "../vrift-manifest" }
-vrift-cas = { path = "../vrift-cas" }
+tokio = { workspace = true, features = ["net", "io-util"], optional = true }
+vrift-manifest = { path = "../vrift-manifest", optional = true }
+vrift-cas = { path = "../vrift-cas", optional = true }

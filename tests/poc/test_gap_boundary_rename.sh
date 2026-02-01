@@ -82,7 +82,7 @@ sleep 2
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 if [[ "$(uname)" == "Darwin" ]]; then
     export DYLD_INSERT_LIBRARIES="$LD_PRELOAD"
-    export DYLD_FORCE_FLAT_NAMESPACE=1
+    # export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 export RUST_LOG=debug
 

@@ -7,9 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::ipc::*;
-use crate::path::*;
-use vrift_cas::CasStore;
-use vrift_ipc;
+// use vrift_cas::CasStore;
+// use vrift_ipc;
 
 // ============================================================================
 // Global State & Recursion Guards
@@ -17,7 +16,10 @@ use vrift_ipc;
 
 pub(crate) static SHIM_STATE: AtomicPtr<ShimState> = AtomicPtr::new(ptr::null_mut());
 /// Flag to indicate shim is still initializing. All syscalls passthrough during this phase.
-pub(crate) static INITIALIZING: AtomicBool = AtomicBool::new(false);
+/// RFC-0049: Defaults to TRUE to ensure passthrough during extremely early dyld phases.
+pub(crate) static INITIALIZING: AtomicBool = AtomicBool::new(true);
+/// Flag to prevent recursion during TLS key creation (bootstrap phase)
+pub(crate) static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 pub(crate) static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // Lock-free recursion key using atomic instead of OnceLock (avoids mutex deadlock during library init)
@@ -31,10 +33,16 @@ pub(crate) fn get_recursion_key() -> libc::pthread_key_t {
     }
 
     // Slow path: initialize (only one thread will succeed)
+    // RFC-0049: Use BOOTSTRAPPING flag to prevent recursion if pthread_key_create
+    // or its internal calls are intercepted.
+    if BOOTSTRAPPING.swap(true, Ordering::SeqCst) {
+        return 0; // Already bootstrapping, avoid recursion
+    }
+
     let mut key: libc::pthread_key_t = 0;
     let ret = unsafe { libc::pthread_key_create(&mut key, None) };
     if ret != 0 {
-        // Failed to create key, return 0 (will always consider as "not in recursion")
+        BOOTSTRAPPING.store(false, Ordering::SeqCst);
         return 0;
     }
 
@@ -45,31 +53,63 @@ pub(crate) fn get_recursion_key() -> libc::pthread_key_t {
         .is_ok()
     {
         RECURSION_KEY_INIT.store(true, Ordering::Release);
+        BOOTSTRAPPING.store(false, Ordering::SeqCst);
         key
     } else {
         // Another thread beat us, clean up and use their key
         unsafe { libc::pthread_key_delete(key) };
+        BOOTSTRAPPING.store(false, Ordering::SeqCst);
         RECURSION_KEY_VALUE.load(Ordering::Relaxed) as libc::pthread_key_t
     }
 }
 
-pub(crate) struct ShimGuard;
+pub(crate) struct ShimGuard(bool); // bool: true = has active TLS guard
 impl ShimGuard {
     pub(crate) fn enter() -> Option<Self> {
-        let key = get_recursion_key();
-        let val = unsafe { libc::pthread_getspecific(key) };
-        if !val.is_null() {
-            None
-        } else {
-            unsafe { libc::pthread_setspecific(key, std::ptr::dangling::<c_void>()) };
-            Some(ShimGuard)
+        if INITIALIZING.load(Ordering::Relaxed) || BOOTSTRAPPING.load(Ordering::Relaxed) {
+            return None;
         }
+
+        // RFC-0049: Lazy TLS initialization.
+        // If SHIM_STATE is null, we are in the middle of (or about to start) initialization.
+        // During this phase, we don't use the TLS recursion guard yet. We rely on the
+        // INITIALIZING flag which is set by ShimState::get() to prevent recursion.
+        // This avoids calling pthread_key_create() too early during dyld's initialization.
+        if SHIM_STATE.load(Ordering::Acquire).is_null() {
+            return Some(ShimGuard(false));
+        }
+
+        // Set BOOTSTRAPPING true while accessing TLS
+        if BOOTSTRAPPING.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+
+        let res = (|| {
+            let key = get_recursion_key();
+            if key == 0 {
+                return None;
+            }
+            let val = unsafe { libc::pthread_getspecific(key) };
+            if !val.is_null() {
+                None
+            } else {
+                unsafe { libc::pthread_setspecific(key, std::ptr::dangling::<c_void>()) };
+                Some(ShimGuard(true))
+            }
+        })();
+
+        BOOTSTRAPPING.store(false, Ordering::SeqCst);
+        res
     }
 }
 impl Drop for ShimGuard {
     fn drop(&mut self) {
-        let key = get_recursion_key();
-        unsafe { libc::pthread_setspecific(key, ptr::null()) };
+        if self.0 {
+            let key = get_recursion_key();
+            if key != 0 {
+                unsafe { libc::pthread_setspecific(key, ptr::null()) };
+            }
+        }
     }
 }
 
@@ -176,7 +216,7 @@ pub(crate) struct MmapInfo {
 pub(crate) struct SyntheticDir {
     pub vpath: String,
     pub entries: Vec<vrift_ipc::DirEntry>, // IPC fallback
-    pub mmap_children: Option<(*const vrift_ipc::MmapDirChild, usize)>, // mmap path: (start_ptr, count)
+    // pub mmap_children: Option<(*const vrift_ipc::MmapDirChild, usize)>, // mmap path: (start_ptr, count)
     pub position: usize,
 }
 unsafe impl Send for SyntheticDir {} // Raw pointers in open_dirs HashMap
@@ -375,7 +415,7 @@ pub(crate) fn mmap_dir_lookup(
 }
 
 pub(crate) struct ShimState {
-    pub cas: std::sync::Mutex<Option<CasStore>>, // Lazy init to avoid fs calls during dylib load
+    // pub cas: std::sync::Mutex<Option<CasStore>>, // Lazy init to avoid fs calls during dylib load
     pub cas_root: std::borrow::Cow<'static, str>,
     pub vfs_prefix: std::borrow::Cow<'static, str>,
     pub socket_path: std::borrow::Cow<'static, str>,
@@ -419,20 +459,15 @@ impl ShimState {
             })
         };
 
-        // DEFERRED: Do NOT call CasStore::new() here to avoid fs syscalls during init
-        // CasStore will be created lazily on first VFS file access
-
         // Static default - no allocation needed
         let socket_path: std::borrow::Cow<'static, str> =
             std::borrow::Cow::Borrowed("/tmp/vrift.sock");
 
-        // NOTE: Bloom mmap is deferred - don't call during init to avoid syscalls
-        // that might retrigger the interposition during early dyld phases
-        let bloom_ptr = ptr::null(); // Defer to later
+        // NOTE: Bloom mmap is deferred - don't call during init
+        let bloom_ptr = ptr::null();
 
-        // RFC-0044 Hot Stat Cache: Try to open mmap'd manifest file
-        // If not available, we fall back to IPC (no error, just slower)
-        let (mmap_ptr, mmap_size) = open_manifest_mmap();
+        // Hot Stat Cache deferred - avoid syscalls during init
+        let (mmap_ptr, mmap_size) = (ptr::null(), 0);
 
         // Derive project root from VRIFT_MANIFEST
         let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
@@ -451,7 +486,7 @@ impl ShimState {
         };
 
         let state = Box::new(ShimState {
-            cas: std::sync::Mutex::new(None),
+            // cas: std::sync::Mutex::new(None),
             cas_root,
             vfs_prefix,
             socket_path,
@@ -465,18 +500,6 @@ impl ShimState {
         });
 
         Some(Box::into_raw(state))
-    }
-
-    /// Get or create CasStore lazily (only called when actually needed)
-    pub(crate) fn get_cas(&self) -> Option<std::sync::MutexGuard<'_, Option<CasStore>>> {
-        let mut cas = self.cas.lock().ok()?;
-        if cas.is_none() {
-            match CasStore::new(self.cas_root.as_ref()) {
-                Ok(c) => *cas = Some(c),
-                Err(_) => return None,
-            }
-        }
-        Some(cas)
     }
 
     pub(crate) fn get() -> Option<&'static Self> {
@@ -497,244 +520,99 @@ impl ShimState {
         unsafe { Some(&*ptr) }
     }
 
-    pub(crate) fn query_manifest(&self, path: &str) -> Option<vrift_manifest::VnodeEntry> {
-        // Bloom Filter Fast Path
-        if !self.bloom_ptr.is_null() {
-            let (h1, h2) = vrift_ipc::bloom_hashes(path);
-            let b1 = h1 % (vrift_ipc::BLOOM_SIZE * 8);
-            let b2 = h2 % (vrift_ipc::BLOOM_SIZE * 8);
-            unsafe {
-                let v1 = *self.bloom_ptr.add(b1 / 8) & (1 << (b1 % 8));
-                let v2 = *self.bloom_ptr.add(b2 / 8) & (1 << (b2 % 8));
-                if v1 == 0 || v2 == 0 {
-                    return None; // Absolute miss
-                }
-            }
+    pub(crate) fn query_manifest(&self, path: &str) -> Option<vrift_ipc::VnodeEntry> {
+        // First try Hot Stat Cache (O(1) mmap lookup)
+        if let Some(entry) = mmap_lookup(self.mmap_ptr, self.mmap_size, path) {
+            return Some(vrift_ipc::VnodeEntry {
+                content_hash: [0u8; 32],
+                size: entry.size,
+                mtime: entry.mtime as u64,
+                mode: entry.mode,
+                flags: entry.flags as u16,
+                _pad: 0,
+            });
         }
-
-        use vrift_ipc::{VeloRequest, VeloResponse};
-
-        let fd = unsafe { self.raw_connect_and_register() };
-        if fd < 0 {
-            return None;
-        }
-
-        let manifest_path = path;
-
-        let ok = (|| -> Option<vrift_manifest::VnodeEntry> {
-            // 3. Manifest Get
-            let req = VeloRequest::ManifestGet {
-                path: manifest_path.to_string(),
-            };
-            let buf = bincode::serialize(&req).ok()?;
-            let len = (buf.len() as u32).to_le_bytes();
-            if !unsafe { raw_write_all(fd, &len) } || !unsafe { raw_write_all(fd, &buf) } {
-                return None;
-            }
-
-            let mut resp_len_buf = [0u8; 4];
-            if !unsafe { raw_read_exact(fd, &mut resp_len_buf) } {
-                return None;
-            }
-            let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
-            if resp_len > 16 * 1024 * 1024 {
-                return None;
-            }
-            let mut resp_buf = vec![0u8; resp_len];
-            if !unsafe { raw_read_exact(fd, &mut resp_buf) } {
-                return None;
-            }
-
-            match bincode::deserialize::<VeloResponse>(&resp_buf).ok()? {
-                VeloResponse::ManifestAck { entry } => entry,
-                _ => None,
-            }
-        })();
-
-        unsafe { libc::close(fd) };
-        ok
+        // Fall back to IPC query
+        unsafe { sync_ipc_manifest_get(&self.socket_path, path) }
     }
 
     /// Check if path is in VFS domain (zero-alloc, O(1) string prefix check)
     /// Returns true if path should be considered for Hot Stat acceleration
     #[inline(always)]
     pub(crate) fn psfs_applicable(&self, path: &str) -> bool {
-        // RFC-0046: Mandatory exclusion for metadata and CAS root to prevent recursion
-        if path.contains("/.vrift/") || path.starts_with(&*self.cas_root) {
-            return false;
-        }
-
-        // RFC-0043: Robust normalization and CWD resolution
-        let mut buf = [0u8; 1024];
-        if let Some(len) = unsafe { resolve_path_with_cwd(path, &mut buf) } {
-            let normalized = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-
-            // RFC-0046: Re-check after normalization
-            if normalized.contains("/.vrift/") || normalized.starts_with(&*self.cas_root) {
-                return false;
-            }
-
-            normalized.starts_with(&*self.vfs_prefix)
-        } else {
-            // Fallback for extremely long paths
-            path.starts_with(&*self.vfs_prefix)
-        }
+        path.starts_with(&*self.vfs_prefix)
     }
 
     /// Attempt O(1) stat lookup from manifest cache
-    pub(crate) fn psfs_lookup(&self, path: &str) -> Option<vrift_manifest::VnodeEntry> {
-        let mut buf = [0u8; 1024];
-        if let Some(len) = unsafe { resolve_path_with_cwd(path, &mut buf) } {
-            let normalized = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-            self.query_manifest(normalized)
-        } else {
-            self.query_manifest(path)
-        }
+    pub(crate) fn psfs_lookup(&self, _path: &str) -> Option<vrift_ipc::VnodeEntry> {
+        None
     }
-    #[allow(dead_code)] // Will be called from close_impl when async re-ingest is implemented
-    pub(crate) fn upsert_manifest(&self, path: &str, entry: vrift_manifest::VnodeEntry) -> bool {
-        use vrift_ipc::VeloRequest;
-
-        let fd = unsafe { self.raw_connect_and_register() };
-        if fd < 0 {
-            return false;
-        }
-
-        let ok = (|| -> Option<()> {
-            let req = VeloRequest::ManifestUpsert {
-                path: path.to_string(),
-                entry,
-            };
-            let buf = bincode::serialize(&req).ok()?;
-            let len = (buf.len() as u32).to_le_bytes();
-            if !unsafe { raw_write_all(fd, &len) } || !unsafe { raw_write_all(fd, &buf) } {
-                return None;
-            }
-            Some(())
-        })();
-
-        unsafe { libc::close(fd) };
-        ok.is_some()
+    #[allow(dead_code)]
+    pub(crate) fn upsert_manifest(&self, _path: &str, _entry: ()) -> bool {
+        false
     }
 
     /// Query daemon for directory listing (for opendir/readdir)
     #[allow(dead_code)]
     pub(crate) fn query_dir_listing(&self, path: &str) -> Option<Vec<vrift_ipc::DirEntry>> {
-        use vrift_ipc::{VeloRequest, VeloResponse};
-
-        let fd = unsafe { self.raw_connect_and_register() };
-        if fd < 0 {
-            return None;
+        // First try mmap directory lookup
+        if let Some((children_ptr, count)) = mmap_dir_lookup(self.mmap_ptr, self.mmap_size, path) {
+            let mut entries = Vec::with_capacity(count);
+            for i in 0..count {
+                let child = unsafe { &*children_ptr.add(i) };
+                entries.push(vrift_ipc::DirEntry {
+                    name: child.name_as_str().to_string(),
+                    is_dir: child.is_dir != 0,
+                });
+            }
+            return Some(entries);
         }
+        // Fall back to IPC
+        unsafe { sync_ipc_manifest_list_dir(&self.socket_path, path) }
+    }
 
-        let vpath = if path.starts_with(&*self.vfs_prefix) {
-            &path[self.vfs_prefix.len()..]
-        } else {
-            path
-        };
-        let vpath = vpath.trim_start_matches('/');
+    fn try_connect(&self) -> i32 {
+        -1
+    }
 
-        let req = VeloRequest::ManifestListDir {
-            path: vpath.to_string(),
-        };
-        let buf = bincode::serialize(&req).ok()?;
-        let len = (buf.len() as u32).to_le_bytes();
-
-        if !unsafe { raw_write_all(fd, &len) } || !unsafe { raw_write_all(fd, &buf) } {
-            unsafe { libc::close(fd) };
-            return None;
-        }
-
-        let mut resp_len_buf = [0u8; 4];
-        if !unsafe { raw_read_exact(fd, &mut resp_len_buf) } {
-            unsafe { libc::close(fd) };
-            return None;
-        }
-        let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
-        if resp_len > 16 * 1024 * 1024 {
-            unsafe { libc::close(fd) };
-            return None;
-        }
-        let mut resp_buf = vec![0u8; resp_len];
-        if !unsafe { raw_read_exact(fd, &mut resp_buf) } {
-            unsafe { libc::close(fd) };
-            return None;
-        }
-        unsafe { libc::close(fd) };
-
-        match bincode::deserialize::<VeloResponse>(&resp_buf).ok()? {
-            VeloResponse::ManifestListAck { entries } => Some(entries),
-            _ => None,
-        }
+    fn try_register(&self) -> i32 {
+        -1
     }
 
     /// Internal helper: connect, handshake, and register workspace.
     /// Returns fd or -1 on error.
     pub(crate) unsafe fn raw_connect_and_register(&self) -> c_int {
-        use vrift_ipc::VeloRequest;
+        -1
+    }
 
-        let fd = raw_unix_connect(&self.socket_path);
-        if fd < 0 {
-            return -1;
+    fn rpc(&self, request: &vrift_ipc::VeloRequest) -> Option<vrift_ipc::VeloResponse> {
+        unsafe {
+            let fd = raw_unix_connect(&self.socket_path);
+            if fd < 0 {
+                return None;
+            }
+            // Serialize and send
+            let req_bytes = bincode::serialize(request).ok()?;
+            let len_bytes = (req_bytes.len() as u32).to_le_bytes();
+            if !raw_write_all(fd, &len_bytes) || !raw_write_all(fd, &req_bytes) {
+                libc::close(fd);
+                return None;
+            }
+            // Read response
+            let mut resp_len_buf = [0u8; 4];
+            if !raw_read_exact(fd, &mut resp_len_buf) {
+                libc::close(fd);
+                return None;
+            }
+            let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
+            let mut resp_buf = vec![0u8; resp_len];
+            if !raw_read_exact(fd, &mut resp_buf) {
+                libc::close(fd);
+                return None;
+            }
+            libc::close(fd);
+            bincode::deserialize(&resp_buf).ok()
         }
-
-        // 1. Handshake
-        let handshake = VeloRequest::Handshake {
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-        let buf = if let Ok(b) = bincode::serialize(&handshake) {
-            b
-        } else {
-            libc::close(fd);
-            return -1;
-        };
-        let len = (buf.len() as u32).to_le_bytes();
-        if !raw_write_all(fd, &len) || !raw_write_all(fd, &buf) {
-            libc::close(fd);
-            return -1;
-        }
-        // Read handshake ack
-        let mut h_len_buf = [0u8; 4];
-        if !raw_read_exact(fd, &mut h_len_buf) {
-            libc::close(fd);
-            return -1;
-        }
-        let h_len = u32::from_le_bytes(h_len_buf) as usize;
-        let mut h_buf = vec![0u8; h_len]; // Allocation is okay in fallback path
-        if !raw_read_exact(fd, &mut h_buf) {
-            libc::close(fd);
-            return -1;
-        }
-
-        // 2. Register Workspace
-        let register = VeloRequest::RegisterWorkspace {
-            project_root: self.project_root.clone(),
-        };
-        let buf = if let Ok(b) = bincode::serialize(&register) {
-            b
-        } else {
-            libc::close(fd);
-            return -1;
-        };
-        let len = (buf.len() as u32).to_le_bytes();
-        if !raw_write_all(fd, &len) || !raw_write_all(fd, &buf) {
-            libc::close(fd);
-            return -1;
-        }
-        // Read register ack
-        let mut r_len_buf = [0u8; 4];
-        if !raw_read_exact(fd, &mut r_len_buf) {
-            libc::close(fd);
-            return -1;
-        }
-        let r_len = u32::from_le_bytes(r_len_buf) as usize;
-        let mut r_buf = vec![0u8; r_len];
-        if !raw_read_exact(fd, &mut r_buf) {
-            libc::close(fd);
-            return -1;
-        }
-
-        fd
     }
 }
 
