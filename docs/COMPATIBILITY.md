@@ -14,7 +14,7 @@ The deep forensic audit and Proof of Failure (PoF) suite v2.0 have confirmed the
 2.  **Shim Stabilization**:
     -   `munmap` and `dlsym` are now fully intercepted and stable.
     -   **Variadic ABI Hazard Resolved**: Assembly stubs correctly handle `open` and `fcntl` stack-passed arguments on macOS ARM64.
-    -   **DYLD Initialization Deadlock Resolved**: `INITIALIZING` flag forces early-boot passthrough, `IN_SHIM` thread-local guard prevents recursion.
+    -   **DYLD Initialization Deadlock Resolved**: `pthread_key_t` TLS provides bootstrap safety, `INITIALIZING` AtomicBool forces early-boot passthrough.
 3.  **Vulnerability Perimeter Locked**:
     -   All critical gaps (Path Normalization, FD Leakage, State Leakage) have been quantified and captured in the PoF suite for automated regression tracking.
 
@@ -144,9 +144,9 @@ These are "invisible" behaviors discovered during deep forensic audit that may c
 - **Exploit**: Paths like `/vrift/../etc/passwd` or `/vrift//file.txt` may bypass VFS redirection and hit the host OS directly.
 - **Remediation Required**: Port the `path_normalize` logic from `vrift-core` into the shim's hot path.
 
-### 3. Path Virtualization ~~Leaks~~ (`getcwd`/`realpath`)
-- **Status**: 🔄 Implemented in Feb 2026 (Needs E2E Verification)
-- `getcwd()`, `realpath()`, `chdir()` now have VFS virtualization via manifest lookup.
+### 3. Path Virtualization (`getcwd`/`realpath`/`chdir`)
+- **Status**: 🔄 Implemented (Feb 2026) - Needs E2E Verification
+- `getcwd()`, `realpath()`, `chdir()` now have VFS virtualization via `VIRTUAL_CWD` tracking and manifest lookup.
 - See **Unified Syscall Registry** above for current status.
 
 ---
@@ -169,7 +169,7 @@ These are "invisible" behaviors discovered during deep forensic audit that may c
 | **Basic Metadata** | 95% | ✅ Strong | `statx` (Linux-specific partial) |
 | **File I/O** | 90% | ✅ Strong | `preadv`/`pwritev`, `sendfile` |
 | **Directory Ops** | 100% | ✅ Strong | None (Read-only traversal complete) |
-| **Namespace/Path** | 60% | ⚠️ Partial | `chdir`, `fchdir`, `getcwd` |
+| **Namespace/Path** | 80% | ✅ Good | `fchdir` (not yet intercepted) |
 | **Mutation (P0)** | 10% | 🛑 **Critical Gap** | `unlink`, `rename`, `mkdir`, `rmdir` |
 | **Permissions** | 80% | ✅ Good | `chmod`, `chown` (Passthrough risks) |
 | **Dynamic Loading**| 100% | ✅ Full | None |
