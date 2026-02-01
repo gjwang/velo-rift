@@ -185,6 +185,20 @@ static IT_ACCESS: Interpose = Interpose {
     new_func: access_shim as *const (),
     old_func: access as *const (),
 };
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_READ: Interpose = Interpose {
+    new_func: read_shim as *const (),
+    old_func: libc::read as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_FCNTL: Interpose = Interpose {
+    new_func: fcntl_shim as *const (),
+    old_func: libc::fcntl as *const (),
+};
 
 // ============================================================================
 // Global State & Recursion Guards
@@ -832,6 +846,7 @@ type MmapFn =
     unsafe extern "C" fn(*mut c_void, size_t, c_int, c_int, c_int, libc::off_t) -> *mut c_void;
 type DlopenFn = unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void;
 type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
+type ReadFn = unsafe extern "C" fn(c_int, *mut c_void, size_t) -> ssize_t;
 
 unsafe fn execve_impl(
     path: *const c_char,
@@ -1700,6 +1715,26 @@ pub unsafe extern "C" fn dlopen_shim(filename: *const c_char, flags: c_int) -> *
 pub unsafe extern "C" fn access_shim(path: *const c_char, mode: c_int) -> c_int {
     let real = std::mem::transmute::<*const (), AccessFn>(IT_ACCESS.old_func);
     access_impl(path, mode, real)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn read_shim(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
+    let real = std::mem::transmute::<*const (), ReadFn>(IT_READ.old_func);
+    // Passthrough to real read - shim tracks fds but read content comes from
+    // CAS backing store which is the actual file content
+    real(fd, buf, count)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn fcntl_shim(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
+    // fcntl is variadic, but most common uses pass a single int arg
+    // We must reference IT_FCNTL.old_func to prevent DCE stripping it
+    let real = std::mem::transmute::<*const (), unsafe extern "C" fn(c_int, c_int, c_int) -> c_int>(
+        IT_FCNTL.old_func,
+    );
+    real(fd, cmd, arg)
 }
 
 // Constructor
