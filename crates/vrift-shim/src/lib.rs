@@ -19,13 +19,96 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use vrift_cas::CasStore;
 
-thread_local! {
-    static VIRTUAL_CWD: RefCell<Option<String>> = const { RefCell::new(None) };
+// ============================================================================
+// VIRTUAL_CWD: pthread_key based thread-local storage (TLS-safe for dyld)
+// ============================================================================
+// RFC-0043: Avoid Rust's TLS macro which causes TLS bootstrap deadlock
+// on macOS ARM64 during early dyld initialization. Use pthread_key_t instead.
+
+static VIRTUAL_CWD_KEY_INIT: AtomicBool = AtomicBool::new(false);
+static VIRTUAL_CWD_KEY_VALUE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Get or create the pthread key for VIRTUAL_CWD storage.
+/// Returns 0 if creation fails (will be treated as no virtual CWD).
+fn get_virtual_cwd_key() -> libc::pthread_key_t {
+    // Fast path: already initialized
+    if VIRTUAL_CWD_KEY_INIT.load(Ordering::Acquire) {
+        return VIRTUAL_CWD_KEY_VALUE.load(Ordering::Relaxed) as libc::pthread_key_t;
+    }
+
+    // Destructor to free the String when thread exits
+    extern "C" fn destructor(ptr: *mut c_void) {
+        if !ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(ptr as *mut String);
+            }
+        }
+    }
+
+    // Slow path: initialize (only one thread will succeed)
+    let mut key: libc::pthread_key_t = 0;
+    let ret = unsafe { libc::pthread_key_create(&mut key, Some(destructor)) };
+    if ret != 0 {
+        return 0;
+    }
+
+    // Try to be the one to set the value (CAS)
+    let expected = 0usize;
+    if VIRTUAL_CWD_KEY_VALUE
+        .compare_exchange(expected, key as usize, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        VIRTUAL_CWD_KEY_INIT.store(true, Ordering::Release);
+        key
+    } else {
+        // Another thread beat us, clean up and use their key
+        unsafe { libc::pthread_key_delete(key) };
+        VIRTUAL_CWD_KEY_VALUE.load(Ordering::Relaxed) as libc::pthread_key_t
+    }
+}
+
+/// Get the current virtual CWD for this thread (if set).
+fn get_virtual_cwd() -> Option<String> {
+    let key = get_virtual_cwd_key();
+    if key == 0 {
+        return None;
+    }
+    let ptr = unsafe { libc::pthread_getspecific(key) };
+    if ptr.is_null() {
+        None
+    } else {
+        unsafe { Some((*(ptr as *const String)).clone()) }
+    }
+}
+
+/// Set the virtual CWD for this thread.
+fn set_virtual_cwd(path: Option<String>) {
+    let key = get_virtual_cwd_key();
+    if key == 0 {
+        return;
+    }
+
+    // Free old value if any
+    let old_ptr = unsafe { libc::pthread_getspecific(key) };
+    if !old_ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(old_ptr as *mut String);
+        }
+    }
+
+    // Set new value
+    let new_ptr = match path {
+        Some(s) => Box::into_raw(Box::new(s)) as *mut c_void,
+        None => ptr::null_mut(),
+    };
+    unsafe {
+        libc::pthread_setspecific(key, new_ptr);
+    }
 }
 
 // ============================================================================
@@ -1167,7 +1250,7 @@ unsafe fn resolve_path_with_cwd(path: &str, out: &mut [u8]) -> Option<usize> {
         return raw_path_normalize(path, out);
     }
 
-    if let Some(vpath) = VIRTUAL_CWD.with(|cwd| cwd.borrow().clone()) {
+    if let Some(vpath) = get_virtual_cwd() {
         let mut tmp = [b'/'; 1024];
         let vbytes = vpath.as_bytes();
         if vbytes.len() < tmp.len() {
@@ -2681,7 +2764,7 @@ pub unsafe extern "C" fn getcwd_shim(buf: *mut c_char, size: size_t) -> *mut c_c
         }
     };
 
-    if let Some(vpath) = VIRTUAL_CWD.with(|cwd| cwd.borrow().clone()) {
+    if let Some(vpath) = get_virtual_cwd() {
         let vbytes = vpath.as_bytes();
         if size != 0 && size < vbytes.len() + 1 {
             set_errno(libc::ERANGE);
@@ -2729,9 +2812,7 @@ pub unsafe extern "C" fn chdir_shim(path: *const c_char) -> c_int {
                 // Check if it exists and is a directory in manifest
                 if let Some(entry) = state.psfs_lookup(resolved_path) {
                     if (entry.mode as u32 & libc::S_IFMT as u32) == libc::S_IFDIR as u32 {
-                        VIRTUAL_CWD.with(|cwd| {
-                            *cwd.borrow_mut() = Some(resolved_path.to_string());
-                        });
+                        set_virtual_cwd(Some(resolved_path.to_string()));
                         return 0;
                     } else {
                         set_errno(libc::ENOTDIR);
@@ -2743,7 +2824,7 @@ pub unsafe extern "C" fn chdir_shim(path: *const c_char) -> c_int {
                 }
             } else {
                 // Moving out of virtual domain - clear virtual CWD
-                VIRTUAL_CWD.with(|cwd| *cwd.borrow_mut() = None);
+                set_virtual_cwd(None);
             }
         }
     }
