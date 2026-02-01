@@ -60,14 +60,52 @@ Velo Rift is currently **macOS-Optimized**.
 
 ---
 
+## 🛡️ VFS Security Invariants ("The Iron Law")
+
+Velo Rift enforces strict security boundaries to prevent CAS-based attacks.
+
+1.  **Execution Circuit Breaker**: All files ingested into the CAS (TheSource) are stripped of execution bits (`chmod 0444`). This prevents direct execution of payloads from the binary store.
+2.  **Immutability enforcement**: The `Protect` IPC command (supported by `chflags UF_IMMUTABLE` on macOS and `FS_IMMUTABLE_FL` on Linux) allows locking VFS paths against ANY mutation, even by the owner.
+3.  **Recursion Guard**: Every intercepted syscall is protected by `ShimGuard::enter()`, preventing stack overflows during initialization or nested library calls.
+
+---
+
+## ⚙️ Undocumented Environment Variable Registry
+
+| Variable | Purpose | Default | Discovery |
+| :--- | :--- | :--- | :--- |
+| `VR_THE_SOURCE` | CAS root directory. | `/tmp/vrift/the_source` | Core storage location. |
+| `VRIFT_VFS_PREFIX` | Virtual mount point. | `/vrift` | Path projection root. |
+| `VRIFT_DEBUG` | Enables stderr logging. | Disabled | Diagnostic stream. |
+| `VRIFT_SHIM_PATH` | Path to the `.dylib`/`.so`. | Internal | Dynamic injection. |
+
+---
+
+## 🚀 Advanced CoW & Optimization Behaviors
+
+Velo Rift uses platform-specific optimizations for Copy-on-Write (CoW) and metadata lookup.
+
+-   **Linux Zero-Copy CoW**: Uses `ioctl(FICLONE)` to create reflinks on supporting filesystems (XFS, Btrfs) and falls back to `copy_file_range(2)` for zero-copy data transfer.
+-   **macO_TMPFILE Simulation**: Uses `linkat` via `/proc/self/fd/` on Linux to simulate atomic file replacement during link breakage.
+-   **RFC-0044 Hot Stat Cache**:
+    -   **O(1) Complexity**: Bloom Filter + Mmap'd Hash Table lookups.
+    -   **Zero-Allocation**: Safe for use during `dyld` initialization before `malloc` is ready.
+
+---
+
 ## 🚩 Known Passthrough Gaps (Universal)
 
-The following syscalls are currently **completely unintercepted** by the rift and will hit the Host OS directly. Using these on virtual paths will likely result in `ENOENT` or host leakage.
+The following syscalls are currently **completely unintercepted** and hit the Host OS directly.
 
-- **Mutation**: `rename`, `unlink`, `mkdir`, `rmdir`, `chmod`, `chown`, `utimes`.
-- **Positioning**: `lseek`, `pread`, `pwrite` (mostly handled by host on redirected FDs).
-- **Advanced IO**: `sendfile`, `copy_file_range`, `sync`, `fsync`.
-- **Locking**: `flock` (partially shimmed in some builds, but currently standard passthrough).
+| Syscall | Impact | Priority |
+| :--- | :--- | :---: |
+| **`statx`** | Modern Linux tools (systemd) fail to see virtual metadata. | **P2** |
+| **`getdents`** | Directory listing via raw syscalls (some Go binaries). | **P2** |
+| **`rename`** | Moves virtual folders out of the VFS domain. | **P0** |
+| **`unlink`** | Attempts to delete the underlying CAS backing store. | **P0** |
+| **`mkdir`/`rmdir`** | Cannot create/delete virtual folder trees. | **P1** |
+| **`chmod`/`chown`** | Permission changes do not persist in manifest. | **P2** |
+| **`utimes`** | Timestamp modifications are lost on next ingest. | **P2** |
 
 ---
 
