@@ -13,6 +13,29 @@ Velo Rift's goal is **compiler/build acceleration** through content-addressable 
 
 ---
 
+## The VFS Inception Model
+
+> *"An idea is like a virus... The smallest seed of an idea can grow."* — Inception
+
+The VFS shim must maintain a **perfect illusion** that processes are operating on a normal
+filesystem. Like the dream layers in Inception, the virtualization must be undetectable.
+
+### Threat Model
+
+Any detectable inconsistency could cause:
+
+| Threat | Impact |
+|--------|--------|
+| **Build failures** | Compiler/linker exits with error |
+| **Silent corruption** | Wrong output, undetected |
+| **Performance regression** | Fallback to slow paths |
+| **Detection escape** | Process realizes it's in VFS |
+
+### The Illusion Checklist
+
+✅ **Perfect Illusion** = Compiler cannot tell it's in VFS  
+❌ **Broken Illusion** = Compiler detects VFS through syscall behavior
+
 ## Compiler Workflow Analysis
 
 ```
