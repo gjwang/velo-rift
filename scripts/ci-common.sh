@@ -309,6 +309,7 @@ run_python_tests() {
     local json_report="/tmp/pytest_results_$$.json"
     
     set +e # Allow test failure to capture artifacts
+
     uv run --active python -m pytest $test_paths $parallel_args -v --tb=short \
         --json-report --json-report-file="$json_report" ${EXTRA_PY_ARGS:-}
     local EXIT_CODE=$?
@@ -543,6 +544,21 @@ run_full_ci() {
         2) tier_tests=("${TIER2_TESTS[@]}") ;;
         3) tier_tests=("${TIER3_TESTS[@]}") ;;
         4) tier_tests=("${TIER4_TESTS[@]}") ;;
+        quick)
+            log_info "Running Quick checks ($TEST_PATHS_QUICK)..."
+            run_python_tests "$venv_path" "$TEST_PATHS_QUICK"
+            return
+            ;;
+        full)
+            log_info "Running Full Python suite ($TEST_PATHS_FULL)..."
+            run_python_tests "$venv_path" "$TEST_PATHS_FULL"
+            return
+            ;;
+        docker)
+            log_info "Running Docker-specific tests ($TEST_PATHS_DOCKER)..."
+            run_python_tests "$venv_path" "$TEST_PATHS_DOCKER"
+            return
+            ;;
         *) 
             log_info "Running custom test path: $tier"
             run_python_tests "$venv_path" "$tier"
