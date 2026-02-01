@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     libfuse3-dev \
     ca-certificates \
     gnupg \
+    strace \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 20.x LTS (required for demo_gc.sh npm tests)

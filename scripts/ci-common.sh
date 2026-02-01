@@ -220,9 +220,9 @@ build_rust() {
     log_step "Building Rust ($mode)..."
     
     if [[ "$mode" == "release" ]]; then
-        cargo build --release
+        cargo build --release --workspace
     else
-        cargo build
+        cargo build --workspace
     fi
     
     log_success "Rust build complete"
@@ -525,8 +525,8 @@ run_full_ci() {
     if [[ "$skip_build" == "true" ]] && ([[ -f "target/release/vrift" ]] || [[ -f "target/release/velo" ]]); then
         log_success "Reusing existing binary (SKIP_BUILD=true)"
     else
-        # We build vrift-cli specifically to ensure all features (FUSE etc) are handled
-        cargo build --release -p vrift-cli
+        # Use workspace build to ensure shim and other crates are updated
+        build_rust "release"
     fi
     
     echo ""

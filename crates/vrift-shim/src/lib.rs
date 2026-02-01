@@ -8,6 +8,8 @@
 
 use std::ffi::{CStr, CString};
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -1425,32 +1427,18 @@ unsafe fn execve_impl(
     real_execve(path, argv, vec.as_ptr())
 }
 
-unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: OpenFn) -> c_int {
+unsafe fn open_impl(path: *const c_char, flags: c_int, _mode: mode_t) -> Option<c_int> {
     // Early bailout during ShimState initialization to prevent CasStore::new recursion
     if INITIALIZING.load(Ordering::SeqCst) {
-        return real_open(path, flags, mode);
+        return None;
     }
 
     // Note: Don't check SHIM_STATE.is_null() here - ShimState::get() handles lazy init properly
 
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => {
-            return real_open(path, flags, mode);
-        }
-    };
+    let _guard = ShimGuard::enter()?;
+    let state = ShimState::get()?;
 
-    // Get or init state - this triggers initialization if needed
-    let Some(state) = ShimState::get() else {
-        return real_open(path, flags, mode);
-    };
-
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            return real_open(path, flags, mode);
-        }
-    };
+    let path_str = CStr::from_ptr(path).to_str().ok()?;
 
     let mut path_buf = [0u8; 1024];
     let resolved_len = match resolve_path_with_cwd(path_str, &mut path_buf) {
@@ -1461,12 +1449,16 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: 
 
     let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC)) != 0;
 
-    if resolved_path.starts_with(&*state.vfs_prefix) {
+    // RFC-0046/RFC-0043: Robust check with mandatory exclusions
+    if resolved_path.starts_with(&*state.vfs_prefix)
+        && !resolved_path.contains("/.vrift/")
+        && !resolved_path.starts_with(&*state.cas_root)
+    {
         // Query with full path since manifest stores full paths (e.g., /vrift/testfile.txt)
         if let Some(entry) = state.query_manifest(resolved_path) {
             if entry.is_dir() {
                 set_errno(libc::EISDIR);
-                return -1;
+                return Some(-1);
             }
             if let Some(cas_guard) = state.get_cas() {
                 if let Some(cas) = cas_guard.as_ref() {
@@ -1491,7 +1483,7 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: 
                         if tmp_fd >= 0 {
                             libc::write(tmp_fd, content.as_ptr() as *const c_void, content.len());
                             libc::lseek(tmp_fd, 0, libc::SEEK_SET);
-                            return tmp_fd;
+                            return Some(tmp_fd);
                         }
                     }
                 }
@@ -1502,21 +1494,15 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: 
     if is_write && path_str.starts_with(&*state.vfs_prefix) {
         let _ = break_link(path_str);
 
-        let fd = real_open(path, flags, mode);
-        if fd >= 0 {
-            let mut fds = state.open_fds.lock().unwrap();
-            fds.insert(
-                fd,
-                OpenFile {
-                    vpath: path_str[state.vfs_prefix.len()..].to_string(),
-                    original_path: path_str.to_string(),
-                },
-            );
-        }
-        return fd;
+        // For write operations on VFS paths, we let the real open happen
+        // and track the fd for re-ingest. We return None here to indicate
+        // that the real open should be called by the shim.
+        // The tracking of the fd will happen in the shim's wrapper function
+        // after the real_open call.
+        return None;
     }
 
-    real_open(path, flags, mode)
+    None
 }
 
 unsafe fn write_impl(fd: c_int, buf: *const c_void, count: size_t, real_write: WriteFn) -> ssize_t {
@@ -1560,29 +1546,20 @@ unsafe fn close_impl(fd: c_int, real_close: CloseFn) -> c_int {
 type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
 type FstatFn = unsafe extern "C" fn(c_int, *mut libc::stat) -> c_int;
 
-unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: StatFn) -> c_int {
-    // Early bailout during ShimState initialization to prevent CasStore::new recursion
+unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat) -> Option<c_int> {
+    // Early bailout during ShimState initialization
     if INITIALIZING.load(Ordering::SeqCst) {
-        return real_stat(path, buf);
+        return None;
     }
 
     // Skip if ShimState is not yet initialized (avoids malloc during dyld __malloc_init)
     if SHIM_STATE.load(Ordering::Acquire).is_null() {
-        return real_stat(path, buf);
+        return None;
     }
 
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => return real_stat(path, buf),
-    };
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => return real_stat(path, buf),
-    };
-
-    let Some(state) = ShimState::get() else {
-        return real_stat(path, buf);
-    };
+    let _guard = ShimGuard::enter()?;
+    let path_str = CStr::from_ptr(path).to_str().ok()?;
+    let state = ShimState::get()?;
 
     let mut path_buf = [0u8; 1024];
     let resolved_len = match resolve_path_with_cwd(path_str, &mut path_buf) {
@@ -1598,11 +1575,14 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
         (*buf).st_nlink = 2;
         (*buf).st_uid = libc::getuid();
         (*buf).st_gid = libc::getgid();
-        return 0;
+        return Some(0);
     }
 
-    // RFC-0044 PSFS: Hot Stat path - check VFS domain membership first
-    if resolved_path.starts_with(&*state.vfs_prefix) {
+    // PHYSICAL DOMAIN CHECK (RFC-0044 Fast Path with RFC-0046 exclusions)
+    if resolved_path.starts_with(&*state.vfs_prefix)
+        && !resolved_path.contains("/.vrift/")
+        && !resolved_path.starts_with(&*state.cas_root)
+    {
         // ★ RFC-0044 Hot Stat Cache: O(1) mmap lookup (NO IPC, NO ALLOC)
         let manifest_path = if resolved_path.len() > state.vfs_prefix.len() {
             &resolved_path[state.vfs_prefix.len()..].trim_start_matches('/')
@@ -1620,8 +1600,8 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
             }
             #[cfg(target_os = "linux")]
             {
-                (*buf).st_mtim.tv_sec = mmap_entry.mtime;
-                (*buf).st_mtim.tv_nsec = mmap_entry.mtime_nsec;
+                (*buf).st_mtime = mmap_entry.mtime as libc::time_t;
+                (*buf).st_mtime_nsec = mmap_entry.mtime_nsec;
             }
             (*buf).st_mode = mmap_entry.mode as libc::mode_t;
             if mmap_entry.is_dir() {
@@ -1634,18 +1614,18 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
             (*buf).st_nlink = 1;
             (*buf).st_uid = libc::getuid();
             (*buf).st_gid = libc::getgid();
-            return 0;
+            return Some(0);
         }
 
         // Fallback: IPC-based manifest lookup (slower but more complete)
         if let Some(entry) = state.psfs_lookup(path_str) {
+            // Fill stat buffer from manifest entry
             ptr::write_bytes(buf, 0, 1);
-            (*buf).st_size = entry.size as libc::off_t;
-            // mtime is stored as nanoseconds - convert to seconds + nanoseconds
             let mtime_secs = (entry.mtime / 1_000_000_000) as libc::time_t;
             let mtime_nsecs = (entry.mtime % 1_000_000_000) as libc::c_long;
-            (*buf).st_mtime = mtime_secs;
 
+            (*buf).st_size = entry.size as libc::off_t;
+            (*buf).st_mtime = mtime_secs;
             // Platform-specific nanosecond field
             #[cfg(target_os = "macos")]
             {
@@ -1653,9 +1633,14 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
             }
             #[cfg(target_os = "linux")]
             {
+                (*buf).st_atime = mtime_secs;
+                (*buf).st_atime_nsec = mtime_nsecs;
                 (*buf).st_mtime = mtime_secs;
                 (*buf).st_mtime_nsec = mtime_nsecs;
+                (*buf).st_ctime = mtime_secs;
+                (*buf).st_ctime_nsec = mtime_nsecs;
             }
+
             (*buf).st_mode = entry.mode as libc::mode_t;
             if entry.is_dir() {
                 (*buf).st_mode |= libc::S_IFDIR;
@@ -1667,34 +1652,32 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
             (*buf).st_nlink = 1;
             (*buf).st_uid = libc::getuid();
             (*buf).st_gid = libc::getgid();
-            return 0;
+            (*buf).st_blksize = 4096;
+            (*buf).st_blocks = entry.size.div_ceil(512) as libc::blkcnt_t;
+            shim_log("[VRift-Shim] fstat returned virtual metadata for: ");
+            shim_log(path_str);
+            shim_log("\n");
+            return Some(0);
         }
     }
 
-    // RFC-0044 Cold Stat: pure transparent passthrough
-    real_stat(path, buf)
+    None
 }
 
-unsafe fn fstat_impl(fd: c_int, buf: *mut libc::stat, real_fstat: FstatFn) -> c_int {
+unsafe fn fstat_impl(fd: c_int, buf: *mut libc::stat) -> Option<c_int> {
     // Early bailout during ShimState initialization to prevent CasStore::new recursion
     if INITIALIZING.load(Ordering::SeqCst) {
-        return real_fstat(fd, buf);
+        return None;
     }
 
     // Skip if ShimState is not yet initialized (avoids malloc during dyld __malloc_init)
-    // We do NOT trigger init here - init happens on first user-level stat/open call
     if SHIM_STATE.load(Ordering::Acquire).is_null() {
-        return real_fstat(fd, buf);
+        return None;
     }
 
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => return real_fstat(fd, buf),
-    };
+    let _guard = ShimGuard::enter()?;
 
-    let Some(state) = ShimState::get() else {
-        return real_fstat(fd, buf);
-    };
+    let state = ShimState::get()?;
 
     // Check if this fd belongs to a VFS file we're tracking
     let fds = state.open_fds.lock().unwrap();
@@ -1719,8 +1702,12 @@ unsafe fn fstat_impl(fd: c_int, buf: *mut libc::stat, real_fstat: FstatFn) -> c_
             }
             #[cfg(target_os = "linux")]
             {
+                (*buf).st_atime = mtime_secs;
+                (*buf).st_atime_nsec = mtime_nsecs;
                 (*buf).st_mtime = mtime_secs;
                 (*buf).st_mtime_nsec = mtime_nsecs;
+                (*buf).st_ctime = mtime_secs;
+                (*buf).st_ctime_nsec = mtime_nsecs;
             }
 
             (*buf).st_mode = entry.mode as libc::mode_t;
@@ -1739,49 +1726,40 @@ unsafe fn fstat_impl(fd: c_int, buf: *mut libc::stat, real_fstat: FstatFn) -> c_
             shim_log("[VRift-Shim] fstat returned virtual metadata for: ");
             shim_log(&vpath);
             shim_log("\n");
-            return 0;
+            return Some(0);
         }
-        // Fall through to real fstat if manifest miss
     } else {
         drop(fds);
     }
 
-    real_fstat(fd, buf)
+    None
 }
 
 /// access() syscall implementation for VFS
 /// Checks if a VFS path is accessible based on manifest entries
-unsafe fn access_impl(path: *const c_char, mode: c_int, real_access: AccessFn) -> c_int {
+unsafe fn access_impl(path: *const c_char, mode: c_int) -> Option<c_int> {
     // Early bailout during ShimState initialization
     if INITIALIZING.load(Ordering::SeqCst) {
-        return real_access(path, mode);
+        return None;
     }
 
     // Skip if ShimState is not yet initialized
     if SHIM_STATE.load(Ordering::Acquire).is_null() {
-        return real_access(path, mode);
+        return None;
     }
 
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => return real_access(path, mode),
-    };
+    let _guard = ShimGuard::enter()?;
 
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => return real_access(path, mode),
-    };
+    let state = ShimState::get()?;
 
-    let Some(state) = ShimState::get() else {
-        return real_access(path, mode);
-    };
+    let path_str = CStr::from_ptr(path).to_str().ok()?;
 
     // Check if this is a VFS path
     if state.psfs_applicable(path_str) {
         if let Some(entry) = state.psfs_lookup(path_str) {
             // F_OK (0) = check existence
             if mode == libc::F_OK {
-                return 0; // File exists in manifest
+                return Some(0); // File exists in manifest
             }
 
             // Check permission bits from manifest entry mode
@@ -1792,7 +1770,7 @@ unsafe fn access_impl(path: *const c_char, mode: c_int, real_access: AccessFn) -
                 // Check user/group/other read bits
                 if (file_mode & 0o444) == 0 {
                     set_errno(libc::EACCES);
-                    return -1;
+                    return Some(-1);
                 }
             }
 
@@ -1806,18 +1784,18 @@ unsafe fn access_impl(path: *const c_char, mode: c_int, real_access: AccessFn) -
             // X_OK (1) = check execute permission
             if (mode & libc::X_OK) != 0 && (file_mode & 0o111) == 0 {
                 set_errno(libc::EACCES);
-                return -1;
+                return Some(-1);
             }
 
             shim_log("[VRift-Shim] access() returned 0 for VFS path: ");
             shim_log(path_str);
             shim_log("\n");
-            return 0;
+            return Some(0);
         }
         // Path is in VFS prefix but not in manifest - let real syscall handle ENOENT
     }
 
-    real_access(path, mode)
+    None
 }
 
 
@@ -2035,36 +2013,27 @@ unsafe fn closedir_impl(dir: *mut libc::DIR, real_closedir: ClosedirFn) -> c_int
     real_closedir(dir)
 }
 
-unsafe fn readlink_impl(
-    path: *const c_char,
-    buf: *mut c_char,
-    bufsiz: size_t,
-    real_readlink: ReadlinkFn,
-) -> ssize_t {
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => return real_readlink(path, buf, bufsiz),
-    };
+unsafe fn readlink_impl(path: *const c_char, buf: *mut c_char, bufsiz: size_t) -> Option<ssize_t> {
+    // Early bailout during ShimState initialization
+    if INITIALIZING.load(Ordering::SeqCst) {
+        return None;
+    }
 
-    let Some(state) = ShimState::get() else {
-        return real_readlink(path, buf, bufsiz);
-    };
+    let _guard = ShimGuard::enter()?;
 
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => return real_readlink(path, buf, bufsiz),
-    };
+    let state = ShimState::get()?;
 
-    if path_str.starts_with(&*state.vfs_prefix) {
-        let vpath = &path_str[state.vfs_prefix.len()..];
-        if let Some(entry) = state.query_manifest(vpath) {
+    let path_str = CStr::from_ptr(path).to_str().ok()?;
+
+    if state.psfs_applicable(path_str) {
+        if let Some(entry) = state.query_manifest(path_str) {
             if entry.is_symlink() {
                 if let Some(cas_guard) = state.get_cas() {
                     if let Some(cas) = cas_guard.as_ref() {
                         if let Ok(data) = cas.get(&entry.content_hash) {
                             let len = std::cmp::min(data.len(), bufsiz);
                             ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, len);
-                            return len as ssize_t;
+                            return Some(len as ssize_t);
                         }
                     }
                 }
@@ -2072,7 +2041,7 @@ unsafe fn readlink_impl(
         }
     }
 
-    real_readlink(path, buf, bufsiz)
+    None
 }
 
 // ============================================================================
@@ -2103,7 +2072,30 @@ macro_rules! get_real {
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn open(p: *const c_char, f: c_int, m: mode_t) -> c_int {
-    open_impl(p, f, m, get_real!(REAL_OPEN, "open", OpenFn))
+    shim_log("[Shim] open called\n");
+    let real = get_real!(REAL_OPEN, "open", OpenFn);
+    open_impl(p, f, m).unwrap_or_else(|| real(p, f, m))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn open64(p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    shim_log("[Shim] open64 called\n");
+    open(p, f, m)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn __open_2(p: *const c_char, f: c_int) -> c_int {
+    shim_log("[Shim] __open_2 called\n");
+    open(p, f, 0)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn __open64_2(p: *const c_char, f: c_int) -> c_int {
+    shim_log("[Shim] __open64_2 called\n");
+    open(p, f, 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -2120,6 +2112,18 @@ static REAL_LSTAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static REAL_FSTAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 #[cfg(target_os = "linux")]
 static REAL_EXECVE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_OPENAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_FSTATAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_FACCESSAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_MMAP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_DLOPEN: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_READLINK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
@@ -2130,19 +2134,40 @@ pub unsafe extern "C" fn close(fd: c_int) -> c_int {
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn stat(p: *const c_char, b: *mut libc::stat) -> c_int {
-    stat_common(p, b, get_real!(REAL_STAT, "stat", StatFn))
+    let real = get_real!(REAL_STAT, "stat", StatFn);
+    stat_common(p, b).unwrap_or_else(|| real(p, b))
+}
+
+#[no_mangle]
+#[cfg(target_os = "linux")]
+pub unsafe extern "C" fn __xstat(_ver: c_int, p: *const c_char, b: *mut libc::stat) -> c_int {
+    stat(p, b)
 }
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn lstat(p: *const c_char, b: *mut libc::stat) -> c_int {
-    stat_common(p, b, get_real!(REAL_LSTAT, "lstat", StatFn))
+    let real = get_real!(REAL_LSTAT, "lstat", StatFn);
+    stat_common(p, b).unwrap_or_else(|| real(p, b))
+}
+
+#[no_mangle]
+#[cfg(target_os = "linux")]
+pub unsafe extern "C" fn __lxstat(_ver: c_int, p: *const c_char, b: *mut libc::stat) -> c_int {
+    lstat(p, b)
 }
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn fstat(fd: c_int, b: *mut libc::stat) -> c_int {
-    fstat_impl(fd, b, get_real!(REAL_FSTAT, "fstat", FstatFn))
+    let real = get_real!(REAL_FSTAT, "fstat", FstatFn);
+    fstat_impl(fd, b).unwrap_or_else(|| real(fd, b))
+}
+
+#[no_mangle]
+#[cfg(target_os = "linux")]
+pub unsafe extern "C" fn __fxstat(_ver: c_int, fd: c_int, b: *mut libc::stat) -> c_int {
+    fstat(fd, b)
 }
 
 #[cfg(target_os = "linux")]
@@ -2155,11 +2180,98 @@ pub unsafe extern "C" fn execve(
     execve_impl(path, argv, envp, get_real!(REAL_EXECVE, "execve", ExecveFn))
 }
 
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn openat(dirfd: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    shim_log("[Shim] openat called\n");
+    let real = get_real!(REAL_OPENAT, "openat", OpenatFn);
+    open_impl(p, f, m).unwrap_or_else(|| real(dirfd, p, f, m))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn openat64(dirfd: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    shim_log("[Shim] openat64 called\n");
+    openat(dirfd, p, f, m)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn __openat_2(dirfd: c_int, p: *const c_char, f: c_int) -> c_int {
+    shim_log("[Shim] __openat_2 called\n");
+    openat(dirfd, p, f, 0)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn __openat64_2(dirfd: c_int, p: *const c_char, f: c_int) -> c_int {
+    shim_log("[Shim] __openat64_2 called\n");
+    openat(dirfd, p, f, 0)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn fstatat(
+    dirfd: c_int,
+    p: *const c_char,
+    b: *mut libc::stat,
+    f: c_int,
+) -> c_int {
+    let real = get_real!(REAL_FSTATAT, "fstatat", FstatatFn);
+    stat_common(p, b).unwrap_or_else(|| real(dirfd, p, b, f))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn fstatat64(
+    dirfd: c_int,
+    p: *const c_char,
+    b: *mut libc::stat,
+    f: c_int,
+) -> c_int {
+    fstatat(dirfd, p, b, f)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn faccessat(dirfd: c_int, p: *const c_char, m: c_int, f: c_int) -> c_int {
+    let real = get_real!(REAL_FACCESSAT, "faccessat", FaccessatFn);
+    access_impl(p, m).unwrap_or_else(|| real(dirfd, p, m, f))
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn mmap(
+    addr: *mut c_void,
+    len: size_t,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: libc::off_t,
+) -> *mut c_void {
+    let real = get_real!(REAL_MMAP, "mmap", MmapFn);
+    real(addr, len, prot, flags, fd, offset)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void {
+    let real = get_real!(REAL_DLOPEN, "dlopen", DlopenFn);
+    real(filename, flags)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn readlink(p: *const c_char, b: *mut c_char, s: size_t) -> ssize_t {
+    let real = get_real!(REAL_READLINK, "readlink", ReadlinkFn);
+    readlink_impl(p, b, s).unwrap_or_else(|| real(p, b, s))
+}
+
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn open_shim(p: *const c_char, f: c_int, m: mode_t) -> c_int {
     let real = std::mem::transmute::<*const (), OpenFn>(IT_OPEN.old_func);
-    open_impl(p, f, m, real)
+    open_impl(p, f, m).unwrap_or_else(|| real(p, f, m))
 }
 
 #[cfg(target_os = "macos")]
@@ -2181,21 +2293,21 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
 pub unsafe extern "C" fn stat_shim(p: *const c_char, b: *mut libc::stat) -> c_int {
     // Use IT_STAT.old_func to get the real libc stat, avoiding recursion
     let real = std::mem::transmute::<*const (), StatFn>(IT_STAT.old_func);
-    stat_common(p, b, real)
+    stat_common(p, b).unwrap_or_else(|| real(p, b))
 }
 
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn lstat_shim(p: *const c_char, b: *mut libc::stat) -> c_int {
     let real = std::mem::transmute::<*const (), StatFn>(IT_LSTAT.old_func);
-    stat_common(p, b, real)
+    stat_common(p, b).unwrap_or_else(|| real(p, b))
 }
 
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn fstat_shim(fd: c_int, b: *mut libc::stat) -> c_int {
     let real = std::mem::transmute::<*const (), FstatFn>(IT_FSTAT.old_func);
-    fstat_impl(fd, b, real)
+    fstat_impl(fd, b).unwrap_or_else(|| real(fd, b))
 }
 
 #[cfg(target_os = "macos")]
@@ -2223,7 +2335,7 @@ pub unsafe extern "C" fn closedir_shim(d: *mut libc::DIR) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn readlink_shim(p: *const c_char, b: *mut c_char, s: size_t) -> ssize_t {
     let real = std::mem::transmute::<*const (), ReadlinkFn>(IT_READLINK.old_func);
-    readlink_impl(p, b, s, real)
+    readlink_impl(p, b, s).unwrap_or_else(|| real(p, b, s))
 }
 
 #[cfg(target_os = "macos")]
@@ -2417,7 +2529,7 @@ pub unsafe extern "C" fn dlsym_shim(handle: *mut c_void, symbol: *const c_char) 
 #[no_mangle]
 pub unsafe extern "C" fn access_shim(path: *const c_char, mode: c_int) -> c_int {
     let real = std::mem::transmute::<*const (), AccessFn>(IT_ACCESS.old_func);
-    access_impl(path, mode, real)
+    access_impl(path, mode).unwrap_or_else(|| real(path, mode))
 }
 
 #[cfg(target_os = "macos")]

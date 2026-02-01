@@ -1,6 +1,20 @@
 #!/bin/bash
 set -e
 
+# Helper for cleaning up files that might be immutable (Solid hardlinks)
+safe_rm() {
+    local target="$1"
+    if [ -e "$target" ]; then
+        if [ "$(uname -s)" == "Darwin" ]; then
+            chflags -R nouchg "$target" 2>/dev/null || true
+        else
+            # Try chattr -i on Linux if available
+            chattr -R -i "$target" 2>/dev/null || true
+        fi
+        rm -rf "$target"
+    fi
+}
+
 echo "=== Velo Rift E2E Verification ==="
 
 # 1. Build project
@@ -30,7 +44,7 @@ CAS_DIR="$TEST_DIR/cas"
 DATA_DIR="$TEST_DIR/data"
 MANIFEST="$TEST_DIR/vrift.manifest"
 
-rm -rf "$TEST_DIR"
+safe_rm "$TEST_DIR"
 mkdir -p "$CAS_DIR" "$DATA_DIR"
 export VR_THE_SOURCE="$CAS_DIR"
 
@@ -312,7 +326,7 @@ fi
 # End
 # Create an orphan:
 # 1. Modify file1.txt content (Remove first as it might be a read-only hard link from Solid ingest)
-rm "$DATA_DIR/file1.txt"
+safe_rm "$DATA_DIR/file1.txt"
 echo "New Content" > "$DATA_DIR/file1.txt"
 # 2. Ingest again (creates new blob, updates manifest, leaving old blob "Hello Velo Rift" orphan)
 # Note: In a real scenario, we'd probably want to use a fresh manifest or update existing. 

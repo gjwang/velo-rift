@@ -1,6 +1,20 @@
 #!/bin/bash
 set -e
 
+# Helper for cleaning up files that might be immutable (Solid hardlinks)
+safe_rm() {
+    local target="$1"
+    if [ -e "$target" ]; then
+        if [ "$(uname -s)" == "Darwin" ]; then
+            chflags -R nouchg "$target" 2>/dev/null || true
+        else
+            # Try chattr -i on Linux if available
+            chattr -R -i "$target" 2>/dev/null || true
+        fi
+        rm -rf "$target"
+    fi
+}
+
 # Setup paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VELO_BIN="$SCRIPT_DIR/../target/debug/vrift"
@@ -104,5 +118,5 @@ else
 fi
 
 echo "GC + Phantom Mode Test Passed!"
-chflags -R nouchg "$TEST_DIR" 2>/dev/null || true
-rm -rf "$TEST_DIR"
+echo "GC + Phantom Mode Test Passed!"
+safe_rm "$TEST_DIR"
