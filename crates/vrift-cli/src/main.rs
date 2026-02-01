@@ -874,6 +874,13 @@ async fn cmd_ingest(
     for (path, entry) in lmdb_manifest.iter()? {
         legacy_manifest.insert(&path, entry.vnode);
     }
+    // Ensure parent directory exists for legacy manifest
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
     legacy_manifest
         .save(output)
         .with_context(|| format!("Failed to save binary manifest to {}", output.display()))?;

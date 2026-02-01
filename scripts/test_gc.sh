@@ -17,106 +17,100 @@ safe_rm() {
 
 # Setup paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VELO_BIN="$SCRIPT_DIR/../target/debug/vrift"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+VELO_BIN="$SCRIPT_DIR/../target/release/vrift"
 if [ ! -f "$VELO_BIN" ]; then
-    VELO_BIN="$SCRIPT_DIR/../target/release/vrift"
+    VELO_BIN="$SCRIPT_DIR/../target/debug/vrift"
 fi
 
-TEST_DIR=$(mktemp -d)
+# 1. Setup Environment
+TEST_DIR="${PROJECT_ROOT}/test_gc_run"
+safe_rm "$TEST_DIR"
+mkdir -p "$TEST_DIR"
+
+MANIFEST_ABS="${TEST_DIR}/manifest.bin"
+PHANTOM_MANIFEST_ABS="${TEST_DIR}/phantom.bin"
 
 echo "Testing Velo GC in $TEST_DIR"
+cd "$TEST_DIR"
 
-CAS_DIR="$TEST_DIR/cas"
-MANIFEST_DIR="$TEST_DIR/manifests"
-mkdir -p "$CAS_DIR"
-mkdir -p "$MANIFEST_DIR"
+# Sub-dirs for ingest
+mkdir -p used_dir garbage_dir cas
 
-# 1. Create content
-mkdir -p "$TEST_DIR/used_dir"
-echo "Used Content" > "$TEST_DIR/used_dir/file.txt"
+echo "Used Content" > used_dir/file.txt
+echo "Garbage Content" > garbage_dir/file.txt
 
-mkdir -p "$TEST_DIR/garbage_dir"
-echo "Garbage Content" > "$TEST_DIR/garbage_dir/file.txt"
+# 2. Ingest "Used" content
+echo "[*] Ingesting USED content..."
+"$VELO_BIN" --the-source-root cas ingest used_dir --output "$MANIFEST_ABS"
+ls -la "$MANIFEST_ABS" || { echo "ERROR: $MANIFEST_ABS NOT FOUND"; find /workspace -name "manifest.bin"; exit 1; }
 
-# 2. Ingest "Used" content to create a manifest
-$VELO_BIN --the-source-root "$CAS_DIR" ingest "$TEST_DIR/used_dir" --output "$MANIFEST_DIR/manifest.bin"
+# 3. Ingest "Garbage" content then throw away manifest
+echo "[*] Ingesting GARBAGE content..."
+"$VELO_BIN" --the-source-root cas ingest garbage_dir --output "${TEST_DIR}/garbage.bin"
+rm -f "${TEST_DIR}/garbage.bin"
 
-echo "Ingested used content (Solid Mode)."
-
-# 3. Manually insert "Garbage" content (ingest and then throw away manifest)
-$VELO_BIN --the-source-root "$CAS_DIR" ingest "$TEST_DIR/garbage_dir" --output "$TEST_DIR/garbage_manifest.bin"
-rm "$TEST_DIR/garbage_manifest.bin"
-
-echo "Inserted garbage content and removed its manifest."
-
-# 4. Verify CAS contains both
-COUNT=$(find "$CAS_DIR" -type f | wc -l)
+# 4. Verify CAS contains both blobs
+COUNT=$(find cas -type f | wc -l)
 echo "CAS files found: $COUNT"
 
-# 5. Run GC in dry Run
-echo "Running GC (Dry Run)..."
-OUTPUT=$($VELO_BIN --the-source-root "$CAS_DIR" gc --manifest "$MANIFEST_DIR/manifest.bin")
+# 5. Run GC (Dry Run)
+echo "[*] Running GC (Dry Run)..."
+OUTPUT=$("$VELO_BIN" --the-source-root cas gc --manifest "$MANIFEST_ABS")
 echo "$OUTPUT"
 
 if echo "$OUTPUT" | grep -q "Orphaned:      1"; then
-    echo "Correctly identified 1 garbage blob."
+    echo "[PASS] Correctly identified 1 garbage blob."
 else
-    echo "Error: Did not identify exactly 1 garbage blob."
+    echo "ERROR: GC failed to identify exactly 1 garbage blob."
     exit 1
 fi
 
-# 6. Run GC with Delete
-echo "Running GC (Delete)..."
-$VELO_BIN --the-source-root "$CAS_DIR" gc --manifest "$MANIFEST_DIR/manifest.bin" --delete --yes
+# 6. Run GC (Delete)
+echo "[*] Running GC (Delete)..."
+"$VELO_BIN" --the-source-root cas gc --manifest "$MANIFEST_ABS" --delete --yes
 
 # 7. Verify Garbage is gone
-FINAL_OUTPUT=$($VELO_BIN --the-source-root "$CAS_DIR" gc --manifest "$MANIFEST_DIR/manifest.bin")
+FINAL_OUTPUT=$("$VELO_BIN" --the-source-root cas gc --manifest "$MANIFEST_ABS")
 if echo "$FINAL_OUTPUT" | grep -q "Orphaned:      0"; then
-    echo "GC successful: 0 garbage blobs remaining."
+    echo "[PASS] GC successful: 0 garbage blobs remaining."
 else
-    echo "Error: Garbage blobs still exist."
+    echo "ERROR: Garbage blobs still exist."
     exit 1
 fi
 
 # 8. Test Phantom Mode Ingest
-echo "Testing Phantom Mode Ingest (RFC-0039)..."
-# Use a fresh CAS and manifest to isolate Phantom mode demo
-PHANTOM_CAS="$TEST_DIR/cas_phantom"
-PHANTOM_MAN_DIR="$TEST_DIR/manifests_phantom"
-mkdir -p "$PHANTOM_CAS" "$PHANTOM_MAN_DIR"
-
-mkdir -p "$TEST_DIR/phantom_dir"
-echo "Phantom Content" > "$TEST_DIR/phantom_dir/pfile.txt"
+echo "[*] Testing Phantom Mode Ingest (RFC-0039)..."
+mkdir -p phantom_dir
+echo "Phantom Content" > phantom_dir/pfile.txt
 
 # Ingest with Phantom Mode (renames file into CAS)
-$VELO_BIN --the-source-root "$PHANTOM_CAS" ingest "$TEST_DIR/phantom_dir" --mode phantom --output "$PHANTOM_MAN_DIR/phantom.bin"
+"$VELO_BIN" --the-source-root cas_phantom ingest phantom_dir --mode phantom --output "$PHANTOM_MANIFEST_ABS"
 
 # Verify source file is MOVED (should not exist in phantom_dir)
-if [ -f "$TEST_DIR/phantom_dir/pfile.txt" ]; then
-    echo "Error: Phantom mode did not move the file!"
+if [ -f "phantom_dir/pfile.txt" ]; then
+    echo "ERROR: Phantom mode did not move the file!"
     exit 1
 fi
 
 # Verify CAS has the file
-COUNT=$(find "$PHANTOM_CAS" -type f | wc -l)
+COUNT=$(find cas_phantom -type f | wc -l)
 if [ "$COUNT" -eq 0 ]; then
-    echo "Error: CAS is empty after phantom ingest!"
+    echo "ERROR: CAS is empty after phantom ingest!"
     exit 1
 fi
-
-echo "Phantom ingest successful: Source file moved to CAS."
+echo "[PASS] Phantom ingest successful."
 
 # 9. Verify GC preserves phantom blobs
-echo "Running GC to verify phantom blob preservation..."
-FINAL_PHANTOM=$($VELO_BIN --the-source-root "$PHANTOM_CAS" gc --manifest "$PHANTOM_MAN_DIR/phantom.bin")
+echo "[*] Running GC to verify phantom blob preservation..."
+FINAL_PHANTOM=$("$VELO_BIN" --the-source-root cas_phantom gc --manifest "$PHANTOM_MANIFEST_ABS")
 if echo "$FINAL_PHANTOM" | grep -q "Orphaned:      0"; then
-    echo "GC correctly preserved phantom blobs."
+    echo "[PASS] GC correctly preserved phantom blobs."
 else
-    echo "Error: Phantom blob identified as garbage!"
-    echo "$FINAL_PHANTOM"
+    echo "ERROR: Phantom blob identified as garbage!"
     exit 1
 fi
 
-echo "GC + Phantom Mode Test Passed!"
-echo "GC + Phantom Mode Test Passed!"
+echo "=== GC + Phantom Mode Test Passed ==="
+cd "$PROJECT_ROOT"
 safe_rm "$TEST_DIR"

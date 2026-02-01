@@ -76,7 +76,37 @@ def print_warn(msg: str):
     print(f"      ⚠️  {msg}")
 
 
+def robust_rmtree(path: Path):
+    """Robustly remove a directory tree, handling read-only or immutable files."""
+    if not path.exists():
+        return
+        
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            p = Path(root) / name
+            try:
+                # Try to clear read-only/immutable flags
+                os.chmod(p, 0o666)
+                if sys.platform != "win32":
+                    subprocess.run(["chattr", "-i", str(p)], capture_output=True)
+                p.unlink()
+            except Exception:
+                pass
+        for name in dirs:
+            p = Path(root) / name
+            try:
+                os.chmod(p, 0o777)
+                p.rmdir()
+            except Exception:
+                pass
+    try:
+        shutil.rmtree(path)
+    except Exception:
+        pass
+
+
 def main():
+    global VRIFT_BINARY
     print("=" * 60)
     print("VRift GC E2E Test (RFC-0041)")
     print("STRICT SAFETY VERIFICATION")
@@ -84,9 +114,14 @@ def main():
     
     # Check binary
     if not VRIFT_BINARY.exists():
-        print(f"\n❌ Binary not found: {VRIFT_BINARY}")
-        print("   Run: cargo build --release -p vrift-cli")
-        sys.exit(1)
+        # Try debug if release not found
+        debug_bin = PROJECT_ROOT / "target" / "debug" / "vrift"
+        if debug_bin.exists():
+             VRIFT_BINARY = debug_bin
+        else:
+            print(f"\n❌ Binary not found: {VRIFT_BINARY}")
+            print("   Run: cargo build --release -p vrift-cli")
+            sys.exit(1)
     
     # Backup existing registry
     registry_backup = None
@@ -95,14 +130,16 @@ def main():
         print(f"\n📦 Backed up existing registry")
     
     passed = True
+    tmp_dir = None
     
     try:
         # Clear registry for clean test
         if REGISTRY_PATH.exists():
             REGISTRY_PATH.unlink()
         
-        with tempfile.TemporaryDirectory(prefix="vrift-gc-e2e-") as tmp:
-            work_dir = Path(tmp)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="vrift-gc-e2e-"))
+        if True:
+            work_dir = tmp_dir
             cas_dir = work_dir / "cas"
             cas_dir.mkdir()
             
@@ -289,6 +326,10 @@ def main():
                 print_warn(f"{len(blobs_final)} blobs remain (may be from other sources)")
     
     finally:
+        # Clean up temporary directory
+        if tmp_dir and tmp_dir.exists():
+            robust_rmtree(tmp_dir)
+            
         # Restore original registry
         if registry_backup is not None:
             REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
