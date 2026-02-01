@@ -17,17 +17,18 @@ fi
 echo "[1] Code Verification:"
 SHIM_SRC="$(dirname "$0")/../../crates/vrift-shim/src/lib.rs"
 
-# Verify stat_common returns virtual mtime from mmap or IPC
-if grep -q "mmap_entry.mtime\|entry.mtime" "$SHIM_SRC" 2>/dev/null; then
-    echo "    ✅ stat returns virtual mtime from Manifest"
+# Verify stat_common returns virtual metadata
+# Code uses mmap_entry.mtime OR mtime_secs variable
+if grep -q "st_mtime = mmap_entry.mtime\|st_mtime = mtime_secs" "$SHIM_SRC" 2>/dev/null; then
+    echo "    ✅ stat returns mtime from Manifest (mmap_entry.mtime/mtime_secs)"
 else
     echo "    ❌ stat does NOT return virtual mtime"
     exit 1
 fi
 
-# Verify stat_common returns virtual size from mmap or IPC
-if grep -q "mmap_entry.size\|entry.size" "$SHIM_SRC" 2>/dev/null; then
-    echo "    ✅ stat returns virtual size from Manifest"
+# Code uses mmap_entry.size OR entry.size
+if grep -q "st_size = mmap_entry.size\|st_size = entry.size" "$SHIM_SRC" 2>/dev/null; then
+    echo "    ✅ stat returns size from Manifest (mmap_entry.size/entry.size)"
 else
     echo "    ❌ stat does NOT return virtual size"
     exit 1
@@ -41,8 +42,8 @@ echo "    • This would break incremental builds (always rebuild all)"
 echo ""
 
 echo "[3] Verification:"
-echo "    stat_common() calls psfs_lookup() or mmap_lookup() which returns metadata"
-echo "    Metadata contains: size, mtime, mode from original file"
+echo "    stat_common() calls psfs_lookup() which returns VnodeEntry"
+echo "    VnodeEntry contains: size, mtime, mode from original file"
 echo "    This ensures incremental builds work correctly"
 echo ""
 
