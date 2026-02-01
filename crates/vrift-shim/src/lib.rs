@@ -19,7 +19,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use libc::{
-    c_char, c_int, c_void, flock, mkdir, mmap, mode_t, munmap, size_t, ssize_t, symlink, utimensat,
+    c_char, c_int, c_void, flock, mkdir, mode_t, munmap, size_t, ssize_t, symlink, utimensat,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -345,7 +345,7 @@ static IT_POSIX_SPAWNP: Interpose = Interpose {
 #[used]
 static IT_MMAP: Interpose = Interpose {
     new_func: mmap_shim as *const (),
-    old_func: mmap as *const (),
+    old_func: libc::mmap as *const (),
 };
 #[cfg(target_os = "macos")]
 #[link_section = "__DATA,__interpose"]
@@ -2697,7 +2697,6 @@ static REAL_SYMLINK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 #[cfg(target_os = "linux")]
 static REAL_FLOCK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 #[cfg(target_os = "linux")]
-static REAL_MMAP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 #[cfg(target_os = "linux")]
 static REAL_MUNMAP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
