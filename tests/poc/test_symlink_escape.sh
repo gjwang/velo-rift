@@ -11,6 +11,7 @@ VRIFT_MANIFEST="/tmp/symlink_escape.manifest"
 TEST_DIR="/tmp/symlink_escape_test"
 
 cleanup() {
+    chflags -R nouchg "$VR_THE_SOURCE" "$TEST_DIR" 2>/dev/null || true
     rm -rf "$VR_THE_SOURCE" "$TEST_DIR" "$VRIFT_MANIFEST" 2>/dev/null || true
 }
 trap cleanup EXIT

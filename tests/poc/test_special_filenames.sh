@@ -11,6 +11,7 @@ VRIFT_MANIFEST="/tmp/special.manifest"
 TEST_DIR="/tmp/special_test"
 
 cleanup() {
+    chflags -R nouchg "$VR_THE_SOURCE" "$TEST_DIR" 2>/dev/null || true
     rm -rf "$VR_THE_SOURCE" "$TEST_DIR" "$VRIFT_MANIFEST" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -63,6 +64,19 @@ if ! "${PROJECT_ROOT}/target/debug/vrift" --the-source-root "$VR_THE_SOURCE" \
 fi
 
 echo "[3] Verifying manifest created..."
+# VRift uses LMDB manifest, not bincode output file
+LMDB_MANIFEST="$TEST_DIR/.vrift/manifest.lmdb"
+if [ -d "$LMDB_MANIFEST" ]; then
+    MF_SIZE=$(du -sk "$LMDB_MANIFEST" | cut -f1)
+    if [ "$MF_SIZE" -gt 0 ]; then
+        echo "✅ PASS: Special filenames handled correctly"
+        echo "    LMDB Manifest size: ${MF_SIZE}KB"
+        echo "    Files ingested: $PASS_COUNT"
+        exit 0
+    fi
+fi
+
+# Fallback: check if bincode manifest exists
 if [ -f "$VRIFT_MANIFEST" ]; then
     MF_SIZE=$(wc -c < "$VRIFT_MANIFEST")
     if [ "$MF_SIZE" -gt 50 ]; then

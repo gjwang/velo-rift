@@ -11,6 +11,7 @@ VRIFT_MANIFEST="/tmp/deep_path.manifest"
 TEST_DIR="/tmp/deep_path_test"
 
 cleanup() {
+    chflags -R nouchg "$VR_THE_SOURCE" "$TEST_DIR" 2>/dev/null || true
     rm -rf "$VR_THE_SOURCE" "$TEST_DIR" "$VRIFT_MANIFEST" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -40,19 +41,27 @@ if ! "${PROJECT_ROOT}/target/debug/vrift" --the-source-root "$VR_THE_SOURCE" \
     exit 1
 fi
 
-if [ ! -f "$VRIFT_MANIFEST" ]; then
-    echo "[FAIL] Manifest not created for deep path"
-    exit 1
+echo "[3] Checking manifest contains deep entry..."
+# VRift uses LMDB manifest, not bincode output file
+LMDB_MANIFEST="$TEST_DIR/.vrift/manifest.lmdb"
+if [ -d "$LMDB_MANIFEST" ]; then
+    MANIFEST_SIZE=$(du -sk "$LMDB_MANIFEST" | cut -f1)
+    if [ "$MANIFEST_SIZE" -gt 0 ]; then
+        echo "    LMDB Manifest size: ${MANIFEST_SIZE}KB"
+        echo "✅ PASS: Deep path (50 levels) successfully ingested"
+        exit 0
+    fi
 fi
 
-echo "[3] Checking manifest contains deep entry..."
-# Binary manifest - just check it's non-trivial
-MANIFEST_SIZE=$(wc -c < "$VRIFT_MANIFEST")
-if [ "$MANIFEST_SIZE" -gt 100 ]; then
-    echo "    Manifest size: $MANIFEST_SIZE bytes"
-    echo "✅ PASS: Deep path (100 levels) successfully ingested"
-    exit 0
-else
-    echo "[FAIL] Manifest too small"
-    exit 1
+# Fallback: check if bincode manifest exists
+if [ -f "$VRIFT_MANIFEST" ]; then
+    MANIFEST_SIZE=$(wc -c < "$VRIFT_MANIFEST")
+    if [ "$MANIFEST_SIZE" -gt 100 ]; then
+        echo "    Manifest size: $MANIFEST_SIZE bytes"
+        echo "✅ PASS: Deep path successfully ingested"
+        exit 0
+    fi
 fi
+
+echo "[FAIL] Manifest not created for deep path"
+exit 1
