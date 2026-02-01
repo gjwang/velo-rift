@@ -68,7 +68,7 @@ Any detectable inconsistency could cause:
 
 | Syscall | Rationale |
 |---------|-----------|
-| `read/write` | FD already points to correct file |
+| `read/write` | FD already points to correct file* | *Assumption: `open` redirected FD to CoW temp |
 | `lseek/pread/pwrite` | FD-local operation |
 | `ftruncate` | Works on CoW temp |
 | `fsync/fdatasync` | CAS already durable |
