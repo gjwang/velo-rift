@@ -888,6 +888,7 @@ impl ShimState {
     }
 
     /// Query daemon for directory listing (for opendir/readdir)
+    #[allow(dead_code)]
     fn query_dir_listing(&self, path: &str) -> Option<Vec<vrift_ipc::DirEntry>> {
         use vrift_ipc::{VeloRequest, VeloResponse};
 
@@ -1349,6 +1350,8 @@ unsafe fn break_link_fallback(path_str: &str) -> Result<(), c_int> {
 
     let tmp_ptr = tmp_path_buf.as_ptr() as *const c_char;
     let path_ptr = CString::new(path_str).map_err(|_| libc::EINVAL)?;
+    // Ensure we can rename it even if it's currently read-only (e.g. from Step 1)
+    let _ = libc::chmod(path_ptr.as_ptr(), 0o644);
 
     if libc::rename(path_ptr.as_ptr(), tmp_ptr) != 0 {
         return Err(libc::EACCES);
@@ -1369,20 +1372,24 @@ type WriteFn = unsafe extern "C" fn(c_int, *const c_void, size_t) -> ssize_t;
 type CloseFn = unsafe extern "C" fn(c_int) -> c_int;
 type ExecveFn =
     unsafe extern "C" fn(*const c_char, *const *const c_char, *const *const c_char) -> c_int;
+#[allow(dead_code)]
 type PosixSpawnFn = unsafe extern "C" fn(
-    *mut libc::pid_t,
-    *const c_char,
-    *const c_void,
-    *const c_void,
-    *const *const c_char,
-    *const *const c_char,
+    pid: *mut libc::pid_t,
+    path: *const c_char,
+    file_actions: *const c_void,
+    attrp: *const c_void,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
 ) -> c_int;
 type MmapFn =
     unsafe extern "C" fn(*mut c_void, size_t, c_int, c_int, c_int, libc::off_t) -> *mut c_void;
 type DlopenFn = unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void;
+#[allow(dead_code)]
 type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
+#[allow(dead_code)]
 type ReadFn = unsafe extern "C" fn(c_int, *mut c_void, size_t) -> ssize_t;
 type OpenatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, mode_t) -> c_int;
+#[allow(dead_code)]
 type FaccessatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_int) -> c_int;
 type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
 
@@ -1492,7 +1499,7 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, _mode: mode_t) -> Option<
     }
 
     if is_write && path_str.starts_with(&*state.vfs_prefix) {
-        let _ = break_link(path_str);
+        let _ = unsafe { break_link(path_str) };
 
         // For write operations on VFS paths, we let the real open happen
         // and track the fd for re-ingest. We return None here to indicate
@@ -1813,9 +1820,11 @@ type ReaddirFn = unsafe extern "C" fn(*mut libc::DIR) -> *mut libc::dirent;
 type ClosedirFn = unsafe extern "C" fn(*mut libc::DIR) -> c_int;
 
 /// Synthetic DIR handle counter (unique per synthetic directory)
+#[allow(dead_code)]
 static SYNTHETIC_DIR_COUNTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0x7F000000);
 
+#[allow(dead_code)]
 unsafe fn opendir_impl(path: *const c_char, real_opendir: OpendirFn) -> *mut libc::DIR {
     // Early bailout during ShimState initialization to prevent CasStore::new recursion
     if INITIALIZING.load(Ordering::SeqCst) {
