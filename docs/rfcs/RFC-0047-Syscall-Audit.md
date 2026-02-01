@@ -116,10 +116,39 @@ if is_write && path_str.starts_with(&*state.vfs_prefix) {
 
 ## Priority Fixes
 
+### P0: Permission mode check
+
+**Issue:** `open()` does not check `entry.mode` before allowing writes.
+
+**Verified:** Line 1547-1591 in `vrift-shim/src/lib.rs` - no mode check before line 1583 write handling.
+
+**Fix:**
+```rust
+// In open_impl, before allowing write:
+if is_write {
+    if let Some(entry) = state.query_manifest(resolved_path) {
+        if (entry.mode & 0o200) == 0 {  // No write permission
+            set_errno(libc::EACCES);
+            return Some(-1);
+        }
+    }
+}
+```
+
+---
+
 ### P0: Remove EROFS from mutations
-- `unlink_shim` → Remove Manifest entry
-- `rename_shim` → Update Manifest path  
+
+**Issue:** `unlink`, `rename`, `rmdir` return EROFS for VFS paths, breaking compilers.
+
+**Verified:** Lines 2851-2854, 2890-2893, 2915-2918 in `vrift-shim/src/lib.rs`.
+
+**Fix:** Replace EROFS with Manifest operations:
+- `unlink_shim` → Call `manifest.remove(path)`
+- `rename_shim` → Update Manifest path entry
 - `rmdir_shim` → Remove Manifest dir entry
+
+---
 
 ### P1: Complete CoW write path
 - `open(O_WRONLY)` → Create temp, track FD
@@ -127,3 +156,16 @@ if is_write && path_str.starts_with(&*state.vfs_prefix) {
 
 ### P2: mkdir
 - `mkdir_shim` → Add Manifest dir entry
+
+---
+
+## Verification Status
+
+| Component | Status | Evidence |
+|-----------|--------|----------|
+| VnodeEntry has mode | ✅ | `vrift-manifest/lib.rs:77` |
+| stat() returns mode | ✅ | `vrift-shim/lib.rs:1730` |
+| open() checks mode | ❌ | No check in `open_impl` |
+| Manifest.remove() | ✅ | Exists but shim doesn't call |
+| unlink/rename/rmdir | ❌ | Return EROFS instead of Manifest ops |
+
