@@ -29,38 +29,54 @@ The deep forensic audit and Proof of Failure (PoF) suite v2.0 have confirmed the
 | **Linux** | x86_64 | ✅ Tier 1 | Kernel 5.15+, User Namespaces enabled |
 | **Linux** | ARM64 | ✅ Tier 2 | Kernel 5.15+ |
 | **Windows** | x86_64 | ❌ Unsupported | N/A (WSL2 recommended) |
-
 ---
 
-## 📋 Definitive Syscall Registry (23 Intercepted Interfaces)
+## 📋 Unified Syscall Registry
 
-This table lists every interface currently handled by the Velo Rift shim and its platform availability.
+All syscalls relevant to VFS virtualization. Status indicates implementation state:
+- ✅ Implemented & Tested
+- 🔄 Implemented (Needs E2E Verification)
+- ⏳ Pending (Passthrough)
+- ❌ Not Applicable
 
-| Syscall | Category | macOS | Linux | Implementation Detail |
-| :--- | :--- | :---: | :---: | :--- |
-| **`open`** | File Ops | ✅ | ✅ | Virtual path -> CAS temp file redirection. |
-| **`openat`** | File Ops | ✅ | ❌ | dirfd-relative open. **Linux: Passthrough.** |
-| **`close`** | File Ops | ✅ | ✅ | Triggers Sync-on-Close IPC for CoW files. |
-| **`read`** | File Ops | ✅ | ❌ | Redirected by `open`. **Linux: Passthrough.** |
-| **`write`** | File Ops | ✅ | ✅ | Tracking for re-ingest trigger. |
-| **`stat`** | Metadata | ✅ | ✅ | O(1) Hot Stat via Mmap manifest. |
-| **`lstat`** | Metadata | ✅ | ✅ | Symlink-aware virtual metadata. |
-| **`fstat`** | Metadata | ✅ | ✅ | FD-to-Vpath tracking injection. |
-| **`fstatat`** | Metadata | ✅ | ❌ | dirfd-relative stat. **Linux: Passthrough.** |
-| **`access`** | Metadata | ✅ | ❌ | Virtual bitmask checks. **Linux: Passthrough.** |
-| **`faccessat`**| Metadata | ✅ | ❌ | dirfd-relative access. **Linux: Passthrough.** |
-| **`opendir`** | Discovery| ✅ | ❌ | Synthetic DIR handle `0x7F...`. **Linux: Passthrough.** |
-| **`readdir`** | Discovery| ✅ | ❌ | Virtual entries from cache. **Linux: Passthrough.** |
-| **`closedir`**| Discovery| ✅ | ❌ | Synthetic state cleanup. **Linux: Passthrough.** |
-| **`readlink`**| Discovery| ✅ | ❌ | Returns target from manifest. **Linux: Passthrough.** |
-| **`execve`** | Execution| ✅ | ✅ | Persistent Env Inheritance. |
-| **`posix_spawn`**| Execution| ✅ | ❌ | Recursion-safe spawning. **Linux: Passthrough.** |
-| **`posix_spawnp`**| Execution| ✅ | ❌ | PATH-resolving spawning. **Linux: Passthrough.** |
-| **`mmap`** | Memory | ✅ | ❌ | VFS FD to CAS store parity. **Linux: Passthrough.** |
-| **`munmap`** | Memory | ✅ | ❌ | Memory release tracking. **Linux: Passthrough.** |
-| **`dlopen`** | Dynamic | ✅ | ❌ | Virtual library extraction. **Linux: Passthrough.** |
-| **`dlsym`** | Dynamic | ✅ | ❌ | Extracted symbol binding. **Linux: Passthrough.** |
-| **`fcntl`** | Control | ✅ | ❌ | O_APPEND/Flags tracking. **Linux: Passthrough.** |
+| Syscall | Category | Status | macOS | Linux | Test | Notes |
+| :--- | :--- | :---: | :---: | :---: | :--- | :--- |
+| **`open`** | File Ops | ✅ | ✅ | ✅ | `test_open_*` | Virtual path → CAS redirection |
+| **`openat`** | File Ops | ✅ | ✅ | ⏳ | `test_openat_*` | dirfd-relative open |
+| **`close`** | File Ops | ✅ | ✅ | ✅ | `test_close_*` | Sync-on-Close IPC |
+| **`read`** | File Ops | ✅ | ✅ | ⏳ | `test_read_*` | FD passthrough |
+| **`write`** | File Ops | ✅ | ✅ | ✅ | `test_write_*` | CoW tracking |
+| **`stat`** | Metadata | ✅ | ✅ | ✅ | `test_stat_*` | O(1) Hot Stat |
+| **`lstat`** | Metadata | ✅ | ✅ | ✅ | `test_stat_*` | Symlink-aware |
+| **`fstat`** | Metadata | ✅ | ✅ | ✅ | `test_fstat_*` | FD-to-Vpath |
+| **`fstatat`** | Metadata | ✅ | ✅ | ⏳ | `test_at_*` | dirfd-relative |
+| **`access`** | Metadata | ✅ | ✅ | ⏳ | `test_access_*` | Virtual bitmask |
+| **`faccessat`** | Metadata | ✅ | ✅ | ⏳ | `test_at_*` | dirfd-relative |
+| **`opendir`** | Discovery | ✅ | ✅ | ⏳ | `test_opendir_*` | Synthetic DIR |
+| **`readdir`** | Discovery | ✅ | ✅ | ⏳ | `test_opendir_*` | Virtual entries |
+| **`closedir`** | Discovery | ✅ | ✅ | ⏳ | `test_opendir_*` | State cleanup |
+| **`readlink`** | Discovery | ✅ | ✅ | ⏳ | `test_readlink_*` | Manifest target |
+| **`realpath`** | Namespace | 🔄 | ✅ | ⏳ | `test_realpath_virtual` | VFS path resolution |
+| **`getcwd`** | Namespace | 🔄 | ✅ | ⏳ | `test_getcwd_chdir_*` | Virtual CWD |
+| **`chdir`** | Namespace | 🔄 | ✅ | ⏳ | `test_getcwd_chdir_*` | Manifest lookup |
+| **`execve`** | Execution | ✅ | ✅ | ✅ | `test_execve_*` | Env inheritance |
+| **`posix_spawn`** | Execution | ✅ | ✅ | ⏳ | `test_spawn_*` | Recursion-safe |
+| **`posix_spawnp`** | Execution | ✅ | ✅ | ⏳ | `test_spawn_*` | PATH-resolving |
+| **`mmap`** | Memory | ✅ | ✅ | ⏳ | `test_mmap_*` | FD parity |
+| **`munmap`** | Memory | ✅ | ✅ | ⏳ | `test_munmap_*` | Memory tracking |
+| **`dlopen`** | Dynamic | ✅ | ✅ | ⏳ | `test_dlopen_*` | Library extraction |
+| **`dlsym`** | Dynamic | ✅ | ✅ | ⏳ | `test_dlsym_*` | Symbol binding |
+| **`fcntl`** | Control | ✅ | ✅ | ⏳ | `test_fcntl_*` | Flags tracking |
+| **`rename`** | Mutation | ⏳ | ⏳ | ⏳ | `test_fail_rename_*` | **P0: Passthrough** |
+| **`unlink`** | Mutation | ⏳ | ⏳ | ⏳ | `test_fail_unlink_*` | **P0: Hits CAS** |
+| **`mkdir`** | Mutation | ⏳ | ⏳ | ⏳ | `test_mkdir_*` | **P1: Not virtual** |
+| **`rmdir`** | Mutation | ⏳ | ⏳ | ⏳ | `test_mkdir_*` | **P1: Not virtual** |
+| **`chmod`** | Mutation | ⏳ | ⏳ | ⏳ | `test_permission_*` | P2: No manifest persist |
+| **`chown`** | Mutation | ⏳ | ⏳ | ⏳ | - | P2: No manifest persist |
+| **`utimes`** | Mutation | ⏳ | ⏳ | ⏳ | `test_mtime_*` | P2: Lost on reingest |
+| **`statx`** | Metadata | ❌ | ❌ | ⏳ | `test_statx_*` | Linux-only |
+| **`getdents`** | Discovery | ❌ | ❌ | ⏳ | - | Linux raw syscall |
+
 
 ---
 
@@ -128,31 +144,23 @@ These are "invisible" behaviors discovered during deep forensic audit that may c
 - **Exploit**: Paths like `/vrift/../etc/passwd` or `/vrift//file.txt` may bypass VFS redirection and hit the host OS directly.
 - **Remediation Required**: Port the `path_normalize` logic from `vrift-core` into the shim's hot path.
 
-### 3. Path Virtualization Leaks (`getcwd`/`realpath`)
-- **Risk**: `getcwd`, `realpath`, and `chdir` are currently **standard passthrough**.
-- **Impact**:
-    - `getcwd()` returns the physical host path (e.g., `/tmp/vrift-mem-...`) instead of the virtual path (`/vrift/...`).
-    - `realpath()` on a virtual symlink fails or returns the host backing store path.
-    - `chdir()` into a virtual directory fails as the directory does not physically exist.
+### 3. Path Virtualization ~~Leaks~~ (`getcwd`/`realpath`)
+- **Status**: 🔄 Implemented in Feb 2026 (Needs E2E Verification)
+- `getcwd()`, `realpath()`, `chdir()` now have VFS virtualization via manifest lookup.
+- See **Unified Syscall Registry** above for current status.
 
 ---
 
-## 🚩 Known Passthrough Gaps (Universal)
+## 🚩 Passthrough Gap Summary
 
-| Syscall | Impact | Priority |
-| :--- | :--- | :---: |
-| **`realpath`** | Tools resolving symlinks perceive host paths instead of VFS paths. | **P0** |
-| **`getcwd`** | CWD-dependent tools (make, git) leak host path state. | **P0** |
-| **`chdir`** | Cannot change directory into virtual folders. | **P0** |
-| **`statx`** | Modern Linux tools (systemd) fail to see virtual metadata. | **P2** |
-| **`getdents`** | Directory listing via raw syscalls (some Go binaries). | **P2** |
-| **`rename`** | Moves virtual folders out of the VFS domain. | **P0** |
-| **`unlink`** | Attempts to delete the underlying CAS backing store. | **P0** |
-| **`mkdir`/`rmdir`** | Cannot create/delete virtual folder trees. | **P1** |
-| **`chmod`/`chown`** | Permission changes do not persist in manifest. | **P2** |
-| **`utimes`** | Timestamp modifications are lost on next ingest. | **P2** |
+> All gaps are now tracked in the **Unified Syscall Registry** table above.
+> Look for rows with Status = ⏳ (Pending) to see remaining work.
 
----
+**Priority Distribution:**
+- **P0 (Critical)**: `rename`, `unlink`
+- **P1 (High)**: `mkdir`, `rmdir`
+- **P2 (Medium)**: `chmod`, `chown`, `utimes`, `statx`, `getdents`
+
 
 ## 📜 POSIX Compliance Matrix (Syscall Level)
 
