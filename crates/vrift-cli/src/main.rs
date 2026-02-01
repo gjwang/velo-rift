@@ -666,7 +666,7 @@ async fn cmd_ingest(
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
+            .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
 
         if metadata.is_dir() {

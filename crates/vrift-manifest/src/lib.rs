@@ -71,7 +71,7 @@ pub struct VnodeEntry {
     pub content_hash: Blake3Hash,
     /// File size in bytes
     pub size: u64,
-    /// Modification time (Unix epoch seconds)
+    /// Modification time (nanoseconds since Unix epoch)
     pub mtime: u64,
     /// Permission mode bits (e.g., 0o644)
     pub mode: u32,
