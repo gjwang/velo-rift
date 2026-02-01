@@ -1585,6 +1585,53 @@ unsafe fn sync_ipc_manifest_symlink(socket_path: &str, link_path: &str, _target:
     )
 }
 
+/// Sync IPC to daemon for CoW reingest (close of dirty FD)
+/// Daemon will read temp_path, hash it, insert to CAS, update Manifest for vpath
+unsafe fn sync_ipc_manifest_reingest(socket_path: &str, vpath: &str, temp_path: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let request = vrift_ipc::VeloRequest::ManifestReingest {
+        vpath: vpath.to_string(),
+        temp_path: temp_path.to_string(),
+    };
+
+    let req_bytes = match bincode::serialize(&request) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let mut stream = stream;
+    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
+    if stream.write_all(&len_bytes).is_err() {
+        return false;
+    }
+    if stream.write_all(&req_bytes).is_err() {
+        return false;
+    }
+
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return false;
+    }
+    let resp_len = u32::from_le_bytes(len_buf) as usize;
+
+    let mut resp_buf = vec![0u8; resp_len];
+    if stream.read_exact(&mut resp_buf).is_err() {
+        return false;
+    }
+
+    matches!(
+        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
+        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+    )
+}
+
 // ============================================================================
 // Core Logic
 // ============================================================================
@@ -1902,16 +1949,17 @@ unsafe fn close_impl(fd: c_int, real_close: CloseFn) -> c_int {
         };
 
         if let Some(file) = open_file {
-            // QA Fix: Do NOT use fs::read here - it blocks and allocates!
-            // Instead, send a non-blocking IPC to daemon for async re-ingest
-            // The manifest sync will happen via daemon's ManifestUpsert handler
-            shim_log("[VRift-Shim] File closed, needs re-ingest: ");
-            shim_log(&file.vpath);
-            shim_log("\n");
-
-            // Fire-and-forget IPC to daemon (non-blocking)
-            // Daemon will handle the actual re-ingest asynchronously
-            // For now, just mark it in the log - daemon will pick it up on next scan
+            // RFC-0047: CoW close path - reingest modified file back to CAS and Manifest
+            // Daemon will read temp file, hash it, insert to CAS, update Manifest
+            if sync_ipc_manifest_reingest(&state.socket_path, &file.vpath, &file.original_path) {
+                shim_log("[VRift-Shim] File re-ingested successfully: ");
+                shim_log(&file.vpath);
+                shim_log("\n");
+            } else {
+                shim_log("[VRift-Shim] File reingest IPC failed: ");
+                shim_log(&file.vpath);
+                shim_log("\n");
+            }
         }
     }
 

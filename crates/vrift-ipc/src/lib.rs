@@ -44,6 +44,13 @@ pub enum VeloRequest {
         path: String,
         mtime_ns: u64,
     },
+    /// RFC-0047: Reingest a modified temp file back to CAS and Manifest (for CoW close)
+    ManifestReingest {
+        /// Virtual path in the VFS (where it should appear in Manifest)
+        vpath: String,
+        /// Actual temp file path to read and hash
+        temp_path: String,
+    },
     /// List directory entries for VFS synthesis
     ManifestListDir {
         path: String,
