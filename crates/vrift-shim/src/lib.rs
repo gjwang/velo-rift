@@ -345,6 +345,113 @@ struct SyntheticDir {
     position: usize,
 }
 
+// ============================================================================
+// RFC-0044 Hot Stat Cache: mmap-based O(1) Stat Lookup
+// ============================================================================
+
+/// Open mmap'd manifest file for O(1) stat lookup.
+/// Returns (ptr, size) or (null, 0) if unavailable.
+/// Uses raw libc to avoid recursion through shim.
+fn open_manifest_mmap() -> (*const u8, usize) {
+    // Use raw libc to avoid triggering shim recursion
+    let path = c"/tmp/vrift-manifest.mmap";
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
+    if fd < 0 {
+        return (ptr::null(), 0);
+    }
+
+    // Get file size via fstat (using raw syscall)
+    let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat_buf) } != 0 {
+        unsafe { libc::close(fd) };
+        return (ptr::null(), 0);
+    }
+    let size = stat_buf.st_size as usize;
+
+    // mmap the file read-only
+    let ptr = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            size,
+            libc::PROT_READ,
+            libc::MAP_PRIVATE,
+            fd,
+            0,
+        )
+    };
+    unsafe { libc::close(fd) };
+
+    if ptr == libc::MAP_FAILED {
+        return (ptr::null(), 0);
+    }
+
+    // Validate header magic
+    if size < vrift_ipc::ManifestMmapHeader::SIZE {
+        unsafe { libc::munmap(ptr, size) };
+        return (ptr::null(), 0);
+    }
+    let header = unsafe { &*(ptr as *const vrift_ipc::ManifestMmapHeader) };
+    if !header.is_valid() {
+        unsafe { libc::munmap(ptr, size) };
+        return (ptr::null(), 0);
+    }
+
+    (ptr as *const u8, size)
+}
+
+/// O(1) mmap-based stat lookup for Hot Stat Cache.
+/// Returns None if entry not found or mmap not available.
+/// ZERO ALLOCATIONS - safe to call from any context.
+#[inline(always)]
+fn mmap_lookup(
+    mmap_ptr: *const u8,
+    mmap_size: usize,
+    path: &str,
+) -> Option<vrift_ipc::MmapStatEntry> {
+    if mmap_ptr.is_null() || mmap_size == 0 {
+        return None;
+    }
+
+    let header = unsafe { &*(mmap_ptr as *const vrift_ipc::ManifestMmapHeader) };
+
+    // Check bloom filter first (O(1) rejection)
+    let bloom_offset = header.bloom_offset as usize;
+    let bloom_ptr = unsafe { mmap_ptr.add(bloom_offset) };
+    let (h1, h2) = vrift_ipc::bloom_hashes(path);
+    let b1 = h1 % (vrift_ipc::BLOOM_SIZE * 8);
+    let b2 = h2 % (vrift_ipc::BLOOM_SIZE * 8);
+    unsafe {
+        let v1 = *bloom_ptr.add(b1 / 8) & (1 << (b1 % 8));
+        let v2 = *bloom_ptr.add(b2 / 8) & (1 << (b2 % 8));
+        if v1 == 0 || v2 == 0 {
+            return None; // Bloom filter rejection
+        }
+    }
+
+    // Hash table lookup with linear probing
+    let path_hash = vrift_ipc::fnv1a_hash(path);
+    let table_offset = header.table_offset as usize;
+    let table_capacity = header.table_capacity as usize;
+    let table_ptr = unsafe { mmap_ptr.add(table_offset) as *const vrift_ipc::MmapStatEntry };
+
+    // Linear probing
+    let start_slot = (path_hash as usize) % table_capacity;
+    for i in 0..table_capacity {
+        let slot = (start_slot + i) % table_capacity;
+        let entry = unsafe { &*table_ptr.add(slot) };
+
+        if entry.is_empty() {
+            return None; // Empty slot = not found
+        }
+
+        if entry.path_hash == path_hash {
+            return Some(*entry); // Found!
+        }
+    }
+
+    None // Table full, not found
+}
+
 struct ShimState {
     cas: std::sync::Mutex<Option<CasStore>>, // Lazy init to avoid fs calls during dylib load
     cas_root: std::borrow::Cow<'static, str>,
@@ -354,6 +461,9 @@ struct ShimState {
     /// Synthetic directories for VFS readdir (DIR* pointer -> SyntheticDir)
     open_dirs: Mutex<HashMap<usize, SyntheticDir>>,
     bloom_ptr: *const u8,
+    /// RFC-0044 Hot Stat Cache: mmap'd manifest for O(1) stat lookup
+    mmap_ptr: *const u8,
+    mmap_size: usize,
 }
 
 impl ShimState {
@@ -391,6 +501,10 @@ impl ShimState {
         // that might retrigger the interposition during early dyld phases
         let bloom_ptr = ptr::null(); // Defer to later
 
+        // RFC-0044 Hot Stat Cache: Try to open mmap'd manifest file
+        // If not available, we fall back to IPC (no error, just slower)
+        let (mmap_ptr, mmap_size) = open_manifest_mmap();
+
         let state = Box::new(ShimState {
             cas: std::sync::Mutex::new(None),
             cas_root,
@@ -399,6 +513,8 @@ impl ShimState {
             open_fds: Mutex::new(HashMap::new()),
             open_dirs: Mutex::new(HashMap::new()),
             bloom_ptr,
+            mmap_ptr,
+            mmap_size,
         });
 
         Some(Box::into_raw(state))
@@ -1077,7 +1193,35 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
 
     // RFC-0044 PSFS: Hot Stat path - check VFS domain membership first
     if state.psfs_applicable(path_str) {
-        // O(1) manifest lookup with Bloom filter fast-path rejection
+        // ★ RFC-0044 Hot Stat Cache: O(1) mmap lookup (NO IPC, NO ALLOC)
+        if let Some(mmap_entry) = mmap_lookup(state.mmap_ptr, state.mmap_size, path_str) {
+            ptr::write_bytes(buf, 0, 1);
+            (*buf).st_size = mmap_entry.size as libc::off_t;
+            (*buf).st_mtime = mmap_entry.mtime as libc::time_t;
+            #[cfg(target_os = "macos")]
+            {
+                (*buf).st_mtime_nsec = mmap_entry.mtime_nsec;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                (*buf).st_mtim.tv_sec = mmap_entry.mtime;
+                (*buf).st_mtim.tv_nsec = mmap_entry.mtime_nsec;
+            }
+            (*buf).st_mode = mmap_entry.mode as libc::mode_t;
+            if mmap_entry.is_dir() {
+                (*buf).st_mode |= libc::S_IFDIR;
+            } else if mmap_entry.is_symlink() {
+                (*buf).st_mode |= libc::S_IFLNK;
+            } else {
+                (*buf).st_mode |= libc::S_IFREG;
+            }
+            (*buf).st_nlink = 1;
+            (*buf).st_uid = libc::getuid();
+            (*buf).st_gid = libc::getgid();
+            return 0;
+        }
+
+        // Fallback: IPC-based manifest lookup (slower but more complete)
         if let Some(entry) = state.psfs_lookup(path_str) {
             ptr::write_bytes(buf, 0, 1);
             (*buf).st_size = entry.size as libc::off_t;

@@ -76,6 +76,101 @@ pub fn default_socket_path() -> &'static str {
 
 pub const BLOOM_SIZE: usize = 128 * 1024;
 
+// ============================================================================
+// Manifest Mmap Shared Memory (RFC-0044 Hot Stat Cache)
+// ============================================================================
+
+/// Magic number for manifest mmap file: "VMMP" (Vrift Manifest MmaP)
+pub const MMAP_MAGIC: u32 = 0x504D4D56;
+/// Current mmap format version
+pub const MMAP_VERSION: u32 = 1;
+/// Maximum entries in the hash table (power of 2 for fast modulo)
+pub const MMAP_MAX_ENTRIES: usize = 65536;
+/// Default mmap file path
+pub const MMAP_DEFAULT_PATH: &str = "/tmp/vrift-manifest.mmap";
+
+/// Header for the mmap'd manifest file
+/// Layout: [Header][Bloom Filter][Hash Table]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ManifestMmapHeader {
+    pub magic: u32,
+    pub version: u32,
+    pub entry_count: u32,
+    pub bloom_offset: u32,   // Offset to bloom filter
+    pub table_offset: u32,   // Offset to hash table
+    pub table_capacity: u32, // Number of slots in hash table
+    pub _reserved: [u32; 2], // Future use
+}
+
+impl ManifestMmapHeader {
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    pub fn new(entry_count: u32, table_capacity: u32) -> Self {
+        Self {
+            magic: MMAP_MAGIC,
+            version: MMAP_VERSION,
+            entry_count,
+            bloom_offset: Self::SIZE as u32,
+            table_offset: (Self::SIZE + BLOOM_SIZE) as u32,
+            table_capacity,
+            _reserved: [0; 2],
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.magic == MMAP_MAGIC && self.version == MMAP_VERSION
+    }
+}
+
+/// Single stat entry in the hash table
+/// Uses open addressing with linear probing
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MmapStatEntry {
+    pub path_hash: u64, // FNV-1a hash of path (0 = empty slot)
+    pub size: u64,
+    pub mtime: i64,
+    pub mtime_nsec: i64,
+    pub mode: u32,
+    pub flags: u32, // EntryFlags: is_dir, is_symlink, etc.
+}
+
+impl MmapStatEntry {
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    pub fn is_empty(&self) -> bool {
+        self.path_hash == 0
+    }
+
+    pub fn is_dir(&self) -> bool {
+        (self.flags & 0x01) != 0
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        (self.flags & 0x02) != 0
+    }
+}
+
+/// Calculate FNV-1a hash for path strings (deterministic, no alloc)
+#[inline(always)]
+pub fn fnv1a_hash(s: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in s.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// Calculate total mmap file size for given capacity
+pub fn mmap_file_size(table_capacity: usize) -> usize {
+    ManifestMmapHeader::SIZE + BLOOM_SIZE + (table_capacity * MmapStatEntry::SIZE)
+}
+
 pub fn bloom_hashes(s: &str) -> (usize, usize) {
     let mut h1: usize = 5381;
     let mut h2: usize = 0;
