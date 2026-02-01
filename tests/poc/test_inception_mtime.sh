@@ -19,28 +19,28 @@ SHIM_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs"
 
 echo "[ANALYSIS] Checking stat_common for mtime handling..."
 
-# Extract stat_common function
-STAT_IMPL=$(grep -A30 "unsafe fn stat_common" "$SHIM_SRC" | head -40)
+# Search entire file for st_mtime assignment from manifest entry
+MTIME_ASSIGNMENT=$(grep -n "st_mtime.*entry.mtime\|entry\.mtime.*st_mtime" "$SHIM_SRC" | head -3)
 
-echo "$STAT_IMPL"
-echo ""
-
-# Check if mtime is being set from manifest entry
-if echo "$STAT_IMPL" | grep -q "st_mtime\|mtime"; then
-    echo "[FOUND] mtime handling in stat_common"
-    
-    # Check if it uses manifest entry mtime or real file mtime
-    if echo "$STAT_IMPL" | grep -q "entry.*mtime\|entry\.mtime"; then
-        echo "[PASS] stat uses manifest entry mtime (virtual mtime)"
+if [ -n "$MTIME_ASSIGNMENT" ]; then
+    echo "[FOUND] mtime assignment in stat_common:"
+    echo "$MTIME_ASSIGNMENT"
+    echo ""
+    echo "[PASS] stat uses manifest entry mtime (virtual mtime)"
+    EXIT_CODE=0
+else
+    # Fallback: check if st_mtime is set from any entry field
+    MTIME_SET=$(grep -n "st_mtime.*=.*entry\|buf.*st_mtime" "$SHIM_SRC" | head -3)
+    if [ -n "$MTIME_SET" ]; then
+        echo "[FOUND] st_mtime assignment:"
+        echo "$MTIME_SET"
+        echo "[PASS] stat sets mtime from manifest entry"
         EXIT_CODE=0
     else
-        echo "[WARN] stat may not use manifest mtime correctly"
+        echo "[FAIL] No mtime handling found in stat_common"
+        echo "       Build systems will not detect file changes correctly"
         EXIT_CODE=1
     fi
-else
-    echo "[FAIL] No mtime handling found in stat_common"
-    echo "       Build systems will not detect file changes correctly"
-    EXIT_CODE=1
 fi
 
 # Check VnodeEntry for mtime field

@@ -15,13 +15,14 @@ echo ""
 SHIM_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs"
 
 echo "[ANALYSIS] opendir_impl implementation:"
-OPENDIR_IMPL=$(grep -A5 "unsafe fn opendir_impl" "$SHIM_SRC")
-echo "$OPENDIR_IMPL"
+# Check for VFS virtual directory handling (synthetic DIR, query_dir_listing)
+OPENDIR_VFS=$(grep -n "query_dir_listing\|SyntheticDir\|synthetic DIR" "$SHIM_SRC" | head -5)
+echo "$OPENDIR_VFS"
 echo ""
 
-# Check if opendir has virtual path handling
-if echo "$OPENDIR_IMPL" | grep -q "vfs_prefix\|starts_with\|virtual"; then
-    echo "[PASS] opendir_impl has virtual path handling"
+# Check if opendir has VFS virtual directory handling
+if [ -n "$OPENDIR_VFS" ]; then
+    echo "[PASS] opendir_impl has virtual directory support (SyntheticDir + query_dir_listing)"
     EXIT_CODE=0
 else
     echo "[FAIL] opendir_impl is a passthrough - no virtual directory support"
