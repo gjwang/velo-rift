@@ -1085,7 +1085,22 @@ unsafe fn fstat_impl(fd: c_int, buf: *mut libc::stat, real_fstat: FstatFn) -> c_
             // Return virtual metadata from manifest
             ptr::write_bytes(buf, 0, 1);
             (*buf).st_size = entry.size as libc::off_t;
-            (*buf).st_mtime = entry.mtime as libc::time_t;
+
+            // mtime is stored as nanoseconds - convert to seconds + nanoseconds
+            let mtime_secs = (entry.mtime / 1_000_000_000) as libc::time_t;
+            let mtime_nsecs = (entry.mtime % 1_000_000_000) as libc::c_long;
+            (*buf).st_mtime = mtime_secs;
+            // Platform-specific nanosecond field
+            #[cfg(target_os = "macos")]
+            {
+                (*buf).st_mtime_nsec = mtime_nsecs;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                (*buf).st_mtim.tv_sec = mtime_secs;
+                (*buf).st_mtim.tv_nsec = mtime_nsecs;
+            }
+
             (*buf).st_mode = entry.mode as libc::mode_t;
             if entry.is_dir() {
                 (*buf).st_mode |= libc::S_IFDIR;
