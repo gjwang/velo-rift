@@ -146,14 +146,12 @@ pub async fn run(cas_root: &Path, args: GcArgs) -> Result<()> {
         let mut orphan_bytes = 0u64;
 
         if let Ok(iter) = cas.iter() {
-            for hash_res in iter {
-                if let Ok(hash) = hash_res {
-                    if !keep_set.contains(&hash) {
-                        orphan_count += 1;
-                        if let Some(p) = cas.blob_path_for_hash(&hash) {
-                            if let Ok(meta) = std::fs::metadata(p) {
-                                orphan_bytes += meta.len();
-                            }
+            for hash in iter.flatten() {
+                if !keep_set.contains(&hash) {
+                    orphan_count += 1;
+                    if let Some(p) = cas.blob_path_for_hash(&hash) {
+                        if let Ok(meta) = std::fs::metadata(p) {
+                            orphan_bytes += meta.len();
                         }
                     }
                 }

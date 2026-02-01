@@ -1450,10 +1450,7 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, _mode: mode_t) -> Option<
     let path_str = CStr::from_ptr(path).to_str().ok()?;
 
     let mut path_buf = [0u8; 1024];
-    let resolved_len = match unsafe { resolve_path_with_cwd(path_str, &mut path_buf) } {
-        Some(len) => len,
-        None => return None,
-    };
+    let resolved_len = (unsafe { resolve_path_with_cwd(path_str, &mut path_buf) })?;
     let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..resolved_len]) };
 
     let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC)) != 0;
@@ -1571,10 +1568,7 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat) -> Option<c_int
     let state = ShimState::get()?;
 
     let mut path_buf = [0u8; 1024];
-    let resolved_len = match unsafe { resolve_path_with_cwd(path_str, &mut path_buf) } {
-        Some(len) => len,
-        None => return None,
-    };
+    let resolved_len = (unsafe { resolve_path_with_cwd(path_str, &mut path_buf) })?;
     let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..resolved_len]) };
 
     // RFC-0044 PSFS: VFS prefix root (special case)
@@ -2312,7 +2306,7 @@ pub unsafe extern "C" fn open_shim(p: *const c_char, f: c_int, m: mode_t) -> c_i
     if INITIALIZING.load(Ordering::Relaxed) {
         return real(p, f, m);
     }
-    open_impl(p, f, m, real)
+    open_impl(p, f, m).unwrap_or_else(|| real(p, f, m))
 }
 
 #[cfg(target_os = "macos")]

@@ -31,8 +31,8 @@ fi
 # Step 2: Check for virtual CWD tracking
 echo ""
 echo "[2] Virtual CWD Tracking:"
-if grep -q "get_virtual_cwd\|set_virtual_cwd" "$SHIM_SRC"; then
-    echo "    ✅ Virtual CWD tracking implemented"
+if grep -q "VIRTUAL_CWD" "$SHIM_SRC"; then
+    echo "    ✅ Virtual CWD tracking implemented (VIRTUAL_CWD)"
 else
     echo "    ❌ Virtual CWD tracking NOT found"
     exit 1
