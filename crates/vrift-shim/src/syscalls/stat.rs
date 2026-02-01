@@ -57,7 +57,7 @@ unsafe fn stat_impl(
     let ret = real_stat(path, buf);
     if ret == 0 {
         (*buf).st_dev = 0x4C4F474F;
-        (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str);
+        // Keep real st_ino from stat
     }
     Some(ret)
 }
