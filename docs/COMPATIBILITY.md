@@ -16,6 +16,49 @@ This report provides the definitive status of Velo Rift's compatibility with hos
 
 ---
 
+## 📋 Definitive Syscall Registry (23 Intercepted Interfaces)
+
+This table lists every interface currently handled by the Velo Rift shim.
+
+| Syscall | Category | Implementation Level | Logic Detail |
+| :--- | :--- | :--- | :--- |
+| **`open`** | File Ops | ✅ Full (Redirection) | Virtual path -> CAS temp file extraction. |
+| **`openat`** | File Ops | ⚠️ Passthrough Stub | Hooks entry but passes to `libc::openat`. |
+| **`close`** | File Ops | ✅ Full (Tracking) | Triggers async sync-on-close IPC if modified. |
+| **`read`** | File Ops | ✅ Full (Passthrough) | Redirected by `open`, operates on host temp file. |
+| **`write`** | File Ops | ⚠️ Passthrough (Tracked)| Allowed on CoW files; tracked for re-ingest. |
+| **`stat`** | Metadata | ✅ Full (Virtual) | O(1) Hot Stat via Mmap manifest. |
+| **`lstat`** | Metadata | ✅ Full (Virtual) | Symlink-aware virtual metadata injection. |
+| **`fstat`** | Metadata | ✅ Full (Virtual) | Injects metadata based on FD-to-Vpath tracking. |
+| **`fstatat`** | Metadata | ⚠️ Passthrough Stub | Hooks entry for future dir-relative resolution. |
+| **`access`** | Metadata | ✅ Full (Virtual) | Checks manifest for existence and virtual bits. |
+| **`faccessat`**| Metadata | ⚠️ Passthrough Stub | Hooks entry. |
+| **`opendir`** | Discovery| ✅ Full (Synthetic) | Returns synthetic handle `0x7F...`. |
+| **`readdir`** | Discovery| ✅ Full (Synthetic) | Returns virtual entries from daemon cache. |
+| **`closedir`**| Discovery| ✅ Full (Synthetic) | Releases synthetic handle state. |
+| **`readlink`**| Discovery| ✅ Full (Virtual) | Returns symlink target directly from manifest. |
+| **`execve`** | Execution| ✅ Full (Inheritance) | Persistent DYLD/LD_PRELOAD injection. |
+| **`posix_spawn`**| Execution| ✅ Full (Guard) | Recursion-safe process spawning. |
+| **`posix_spawnp`**| Execution| ✅ Full (Guard) | PATH-resolving process spawning. |
+| **`mmap`** | Memory | ✅ Full (Parity) | Ensures virtual FD maps to CAS backing store. |
+| **`munmap`** | Memory | ⚠️ Passthrough Hook | Tracks memory release for heavy-IO cleanup. |
+| **`dlopen`** | Dynamic | ✅ Full (Extraction) | Extracts virtual libraries to `/tmp` for linker. |
+| **`dlsym`** | Dynamic | ⚠️ Passthrough Hook | Ensures symbols can be found in extracted libs. |
+| **`fcntl`** | Control | ⚠️ Passthrough Hook | Tracks O_APPEND/Flags (Locking partial). |
+
+---
+
+## 🚩 Known Passthrough Gaps (Unintercepted)
+
+The following syscalls are currently **completely unintercepted** by the rift and will hit the Host OS directly. Using these on virtual paths will likely result in `ENOENT` or host leakage.
+
+- **Mutation**: `rename`, `unlink`, `mkdir`, `rmdir`, `chmod`, `chown`, `utimes`.
+- **Positioning**: `lseek`, `pread`, `pwrite` (mostly handled by host on redirected FDs).
+- **Advanced IO**: `sendfile`, `copy_file_range`, `sync`, `fsync`.
+- **Locking**: `flock` (partially shimmed in some builds, but currently standard passthrough).
+
+---
+
 ## 📜 POSIX Compliance Matrix (Syscall Level)
 
 | Category | Compliance | Status | Key Missing Operations |
