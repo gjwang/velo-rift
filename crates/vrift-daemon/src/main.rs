@@ -479,6 +479,49 @@ async fn handle_request(
                 VeloResponse::Error("Workspace not registered".to_string())
             }
         }
+        // RFC-0047: ManifestRemove for unlink/rmdir operations
+        VeloRequest::ManifestRemove { path } => {
+            if let Some(ref ws) = current_workspace {
+                let manifest = ws.manifest.lock().unwrap();
+                manifest.remove(&path);
+                let _ = manifest.commit();
+                export_mmap_cache(&manifest, &ws.project_root);
+                tracing::info!("vriftd: ManifestRemove '{}' -> SUCCESS", path);
+                VeloResponse::ManifestAck { entry: None }
+            } else {
+                VeloResponse::Error("Workspace not registered".to_string())
+            }
+        }
+        // RFC-0047: ManifestRename for rename operations
+        VeloRequest::ManifestRename { old_path, new_path } => {
+            if let Some(ref ws) = current_workspace {
+                let manifest = ws.manifest.lock().unwrap();
+                // Get the entry at old_path
+                let entry_opt = match manifest.get(&old_path) {
+                    Ok(Some(e)) => Some(e.vnode.clone()),
+                    _ => None,
+                };
+                if let Some(entry) = entry_opt {
+                    // Remove old, insert new
+                    manifest.remove(&old_path);
+                    manifest.insert(&new_path, entry, AssetTier::Tier2Mutable);
+                    ws.bloom.add(&new_path);
+                    let _ = manifest.commit();
+                    export_mmap_cache(&manifest, &ws.project_root);
+                    tracing::info!(
+                        "vriftd: ManifestRename '{}' -> '{}' SUCCESS",
+                        old_path,
+                        new_path
+                    );
+                    VeloResponse::ManifestAck { entry: None }
+                } else {
+                    tracing::warn!("vriftd: ManifestRename '{}' -> NOT FOUND", old_path);
+                    VeloResponse::Error(format!("Entry not found: {}", old_path))
+                }
+            } else {
+                VeloResponse::Error("Workspace not registered".to_string())
+            }
+        }
         VeloRequest::CasSweep { bloom_filter } => {
             match state.cas.sweep(&bloom_filter) {
                 Ok((deleted_count, reclaimed_bytes)) => {
