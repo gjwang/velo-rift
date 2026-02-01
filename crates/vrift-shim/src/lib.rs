@@ -69,7 +69,9 @@ extern "C" {
         fd: c_int,
         offset: libc::off_t,
     ) -> *mut c_void;
+    fn munmap(addr: *mut c_void, len: size_t) -> c_int;
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn access(path: *const c_char, mode: c_int) -> c_int;
 }
 
@@ -177,6 +179,20 @@ static IT_MMAP: Interpose = Interpose {
 static IT_DLOPEN: Interpose = Interpose {
     new_func: dlopen_shim as *const (),
     old_func: dlopen as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_MUNMAP: Interpose = Interpose {
+    new_func: munmap_shim as *const (),
+    old_func: munmap as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_DLSYM: Interpose = Interpose {
+    new_func: dlsym_shim as *const (),
+    old_func: dlsym as *const (),
 };
 #[cfg(target_os = "macos")]
 #[link_section = "__DATA,__interpose"]
@@ -1821,6 +1837,26 @@ pub unsafe extern "C" fn mmap_shim(
 
 #[cfg(target_os = "macos")]
 #[no_mangle]
+pub unsafe extern "C" fn munmap_shim(addr: *mut c_void, len: size_t) -> c_int {
+    type MunmapFn = unsafe extern "C" fn(*mut c_void, size_t) -> c_int;
+    let real = std::mem::transmute::<*const (), MunmapFn>(IT_MUNMAP.old_func);
+
+    // Early bailout during initialization
+    if INITIALIZING.load(Ordering::SeqCst) {
+        return real(addr, len);
+    }
+
+    // Guard recursion
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real(addr, len),
+    };
+
+    real(addr, len)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
 pub unsafe extern "C" fn dlopen_shim(filename: *const c_char, flags: c_int) -> *mut c_void {
     let real = std::mem::transmute::<*const (), DlopenFn>(IT_DLOPEN.old_func);
 
@@ -1850,8 +1886,6 @@ pub unsafe extern "C" fn dlopen_shim(filename: *const c_char, flags: c_int) -> *
         return real(filename, flags);
     };
 
-    // For VFS paths, we need to extract the library to a temp file first
-    // because dlopen requires a real filesystem path
     if state.psfs_applicable(path_str) {
         if let Some(entry) = state.psfs_lookup(path_str) {
             // Get content from CAS and write to temp file
@@ -1880,6 +1914,26 @@ pub unsafe extern "C" fn dlopen_shim(filename: *const c_char, flags: c_int) -> *
 
     // Passthrough for non-VFS paths and fallback
     real(filename, flags)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn dlsym_shim(handle: *mut c_void, symbol: *const c_char) -> *mut c_void {
+    type DlsymFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
+    let real = std::mem::transmute::<*const (), DlsymFn>(IT_DLSYM.old_func);
+
+    // Early bailout during initialization
+    if INITIALIZING.load(Ordering::SeqCst) {
+        return real(handle, symbol);
+    }
+
+    // Guard recursion
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real(handle, symbol),
+    };
+
+    real(handle, symbol)
 }
 
 #[cfg(target_os = "macos")]
