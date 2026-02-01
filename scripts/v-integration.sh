@@ -103,20 +103,14 @@ echo "[PASS] Status commands work."
 
 # 5. Test Delegated Execution
 echo "[*] Testing Delegated Execution..."
-OUTPUT=$(vrift run --daemon -- /bin/echo "Delegated Works")
-if [[ "$OUTPUT" != *"Delegated Works"* ]]; then
-    echo "ERROR: Delegated execution output mismatch: $OUTPUT"
-    # exit 1 
-    # (Output capturing might be tricky if daemon logs it effectively. 
-    # For MVP we just check exit code of the run command if possible, 
-    # or rely on the previous functional tests which showed it lands in logs.
-    # But `velo run` currently prints the PID, not the stdout of the child?
-    # Ah, implementation of `spawn_command` prints "Daemon successfully spawned process. PID: ...".
-    # The actual echo output goes to daemon stdout/stderr.
-    # So checking for "Delegated Works" in OUTPUT of `velo run` is WRONG based on current impl.
-    # We should check if `velo run` succeeded.)
+# Note: `vrift run --daemon` returns successfully when the daemon spawns the process.
+# The actual output goes to the daemon's stdout/stderr.
+if vrift run --daemon -- /bin/echo "Delegated Works" > /dev/null; then
+    echo "[PASS] Delegated execution command succeeded."
+else
+    echo "ERROR: Delegated execution command failed."
+    exit 1
 fi
-echo "[PASS] Delegated execution command succeeded."
 
 # 6. Test Persistence (Restart)
 echo "[*] Testing Persistence..."
@@ -194,8 +188,10 @@ if [ "$OS" == "Linux" ]; then
         SHIM_LIB=""
         if [ -f "target/release/libvrift_shim.so" ]; then
             SHIM_LIB="target/release/libvrift_shim.so"
-        elif [ -f "target/release/deps/libvrift_shim.so" ]; then
-            SHIM_LIB="target/release/deps/libvrift_shim.so"
+        elif [ -f "/usr/local/bin/libvrift_shim.so" ]; then
+            SHIM_LIB="/usr/local/bin/libvrift_shim.so"
+        elif [ -f "target/release/libvelo_shim.so" ]; then
+             SHIM_LIB="target/release/libvelo_shim.so"
         fi
         
         if [ -z "$SHIM_LIB" ]; then

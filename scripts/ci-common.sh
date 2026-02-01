@@ -220,9 +220,9 @@ build_rust() {
     log_step "Building Rust ($mode)..."
     
     if [[ "$mode" == "release" ]]; then
-        cargo build --release --workspace
+        cargo build --release --workspace --features fuse
     else
-        cargo build --workspace
+        cargo build --workspace --features fuse
     fi
     
     log_success "Rust build complete"
@@ -510,25 +510,28 @@ run_full_ci() {
     local skip_build="${SKIP_BUILD:-false}"
     local venv_path=".venv"
     
-    echo ""
-    echo "==================== Phase 1: Setup ===================="
-    check_env_fast
-    setup_python_env "$venv_path"
-    
-    # SSOT: Force ABI Alignment
-    if command -v uv &>/dev/null; then
-        export PYO3_PYTHON=$(uv python find)
-        log_info "ABI Alignment: PYO3_PYTHON=$PYO3_PYTHON"
-    fi
-    
-    echo ""
-    echo "==================== Phase 2: Build ===================="
-    # Check for release binary (both names supported during transition)
-    if [[ "$skip_build" == "true" ]] && ([[ -f "target/release/vrift" ]] || [[ -f "target/release/velo" ]]); then
-        log_success "Reusing existing binary (SKIP_BUILD=true)"
-    else
-        # Use workspace build to ensure shim and other crates are updated
-        build_rust "release"
+    # Skip Setup/Build if directed (e.g. during multi-tier aggregate)
+    if [[ "${SKIP_ENV_PHASES:-false}" == "false" ]]; then
+        echo ""
+        echo "==================== Phase 1: Setup ===================="
+        check_env_fast
+        setup_python_env "$venv_path"
+        
+        # SSOT: Force ABI Alignment
+        if command -v uv &>/dev/null; then
+            export PYO3_PYTHON=$(uv python find)
+            log_info "ABI Alignment: PYO3_PYTHON=$PYO3_PYTHON"
+        fi
+        
+        echo ""
+        echo "==================== Phase 2: Build ===================="
+        # Check for release binary (both names supported during transition)
+        if [[ "$skip_build" == "true" ]] && ([[ -f "target/release/vrift" ]] || [[ -f "target/release/velo" ]]); then
+            log_success "Reusing existing binary (SKIP_BUILD=true)"
+        else
+            # Use workspace build to ensure shim and other crates are updated
+            build_rust "release"
+        fi
     fi
     
     echo ""
@@ -550,8 +553,16 @@ run_full_ci() {
             return
             ;;
         full)
-            log_info "Running Full Python suite ($TEST_PATHS_FULL)..."
-            run_python_tests "$venv_path" "$TEST_PATHS_FULL"
+            log_info "🚀 Starting Comprehensive Full Regression (T0 + T1 + T2)..."
+            # Prevent redundant setup/build phases in sub-calls
+            export SKIP_ENV_PHASES=true
+            export SKIP_BUILD=true
+            
+            run_full_ci 0
+            run_full_ci 1
+            run_full_ci 2
+            
+            log_success "✨ Comprehensive Full Regression PASSED!"
             return
             ;;
         docker)
@@ -617,8 +628,8 @@ run_full_ci() {
         if [[ "$task" == python* ]] || [[ "$task" == ./* ]]; then
             # Run as shell command
             eval "$task"
-        elif [[ "$task" == cargo* ]]; then
-            # Run cargo command
+        elif [[ "$task" == cargo* ]] || [[ "$task" == run_rust_tests ]]; then
+            # Run cargo command or rust test helper
             eval "$task"
         else
             # Default to pytest
