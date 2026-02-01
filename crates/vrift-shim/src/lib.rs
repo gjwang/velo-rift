@@ -395,7 +395,7 @@ static IT_FSTATAT: Interpose = Interpose {
 
 static SHIM_STATE: AtomicPtr<ShimState> = AtomicPtr::new(ptr::null_mut());
 /// Flag to indicate shim is still initializing. All syscalls passthrough during this phase.
-static INITIALIZING: AtomicBool = AtomicBool::new(true);
+static INITIALIZING: AtomicBool = AtomicBool::new(false);
 static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // Lock-free recursion key using atomic instead of OnceLock (avoids mutex deadlock during library init)
