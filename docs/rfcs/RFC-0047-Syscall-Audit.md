@@ -210,9 +210,9 @@ stat(vfs_path) → st_ino = hash(path) % 2^32
 
 | Status | Count | Syscalls |
 |--------|-------|----------|
-| ✅ PASS | 2 | flock_semantic, symlink |
+| ✅ PASS | 4 | flock_semantic, symlink, mmap, utimes |
 | ⚠️ WARNING | 5 | ctime, readdir_order, st_dev, st_nlink, xattr |
-| ❌ FAIL | 10 | copy_file_range, dup, fchdir, fcntl, ftruncate, inode, lseek, mmap, sendfile, utimes |
+| ❌ FAIL | 8 | copy_file_range, dup, fchdir, fcntl, ftruncate, inode, lseek, sendfile |
 
 ### Component Status
 
@@ -223,7 +223,7 @@ stat(vfs_path) → st_ino = hash(path) % 2^32
 | utimes/utimensat | ✅ Implemented |
 | flock VFS semantic | ✅ Implemented |
 | symlink interception | ✅ Implemented |
+| mmap tracking | ✅ Implemented |
 | Mutation (unlink, rename, rmdir) | ⚠️ EPERM (CAS protected) |
-| mmap tracking | ❌ Not implemented |
 | Inode virtualization | ❌ Not implemented |
 

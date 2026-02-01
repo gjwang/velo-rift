@@ -62,18 +62,19 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 | **`execve`** | Execution | ✅ | ✅ | ✅ | `test_execve_*` | Env inheritance |
 | **`posix_spawn`** | Execution | ✅ | ✅ | ⏳ | `test_spawn_*` | Recursion-safe |
 | **`posix_spawnp`** | Execution | ✅ | ✅ | ⏳ | `test_spawn_*` | PATH-resolving |
-| **`mmap`** | Memory | ✅ | ✅ | ⏳ | `test_mmap_*` | FD parity |
-| **`munmap`** | Memory | ✅ | ✅ | ⏳ | `test_munmap_*` | Memory tracking |
+| **`mmap`** | Memory | ✅ | ✅ | ✅ | `test_gap_mmap_shared` | CoW-aware tracking |
+| **`munmap`** | Memory | ✅ | ✅ | ✅ | `test_gap_mmap_shared` | Re-ingest trigger |
 | **`dlopen`** | Dynamic | ✅ | ✅ | ⏳ | `test_dlopen_*` | Library extraction |
 | **`dlsym`** | Dynamic | ✅ | ✅ | ⏳ | `test_dlsym_*` | Symbol binding |
 | **`fcntl`** | Control | ✅ | ✅ | ⏳ | `test_fcntl_*` | Flags tracking |
+| **`flock`** | Control | ✅ | ✅ | ✅ | `test_gap_flock_semantic` | Daemon Lock Manager |
 | **`rename`** | Mutation | ✅ | ✅ | ⏳ | - | VFS: EROFS guard |
 | **`unlink`** | Mutation | ✅ | ✅ | ⏳ | - | VFS: EROFS guard |
 | **`mkdir`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
 | **`rmdir`** | Mutation | ✅ | ✅ | ⏳ | - | VFS: EROFS guard |
 | **`chmod`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
 | **`chown`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
-| **`utimes`** | Mutation | ✅ | ✅ | ⏳ | `test_gap_utimes` | VFS mtime update via IPC |
+| **`utimes`** | Mutation | ✅ | ✅ | ✅ | `test_gap_utimes` | VFS mtime via IPC |
 | **`statx`** | Metadata | ❌ | ❌ | ⏳ | `test_statx_*` | Linux-only |
 | **`getdents`** | Discovery | ❌ | ❌ | ⏳ | - | Linux raw syscall |
 

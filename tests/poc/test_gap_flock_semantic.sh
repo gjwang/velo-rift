@@ -74,8 +74,16 @@ export VELO_PROJECT_ROOT="${SCRIPT_DIR}/test_flock_root"
 mkdir -p "$VELO_PROJECT_ROOT/.vrift"
 rm -rf "$VELO_PROJECT_ROOT/.vrift/socket"
 DAEMON_BIN="${PROJECT_ROOT}/target/debug/vriftd"
-$DAEMON_BIN start &
-DAEMON_PID=$!
+# Start Daemon (isolate from shim injection)
+(
+    unset DYLD_INSERT_LIBRARIES
+    unset DYLD_FORCE_FLAT_NAMESPACE
+    unset LD_PRELOAD
+    export RUST_LOG=debug
+    $DAEMON_BIN start > "$VELO_PROJECT_ROOT/daemon.log" 2>&1 &
+    echo $! > "$VELO_PROJECT_ROOT/daemon.pid"
+)
+DAEMON_PID=$(cat "$VELO_PROJECT_ROOT/daemon.pid")
 sleep 2
 
 # Register workspace logic (mimic CLI)
@@ -94,15 +102,26 @@ sleep 2
 
 mkdir -p "$HOME/.vrift/registry"
 echo "{\"manifests\": {\"test\": {\"project_root\": \"$VELO_PROJECT_ROOT\"}}}" > "$HOME/.vrift/registry/manifests.json"
-kill $DAEMON_PID
+kill $DAEMON_PID || true
 sleep 1
-$DAEMON_BIN start &
-DAEMON_PID=$!
+(
+    unset DYLD_INSERT_LIBRARIES
+    unset DYLD_FORCE_FLAT_NAMESPACE
+    unset LD_PRELOAD
+    export RUST_LOG=debug
+    $DAEMON_BIN start >> "$VELO_PROJECT_ROOT/daemon.log" 2>&1 &
+    echo $! > "$VELO_PROJECT_ROOT/daemon.pid"
+)
+DAEMON_PID=$(cat "$VELO_PROJECT_ROOT/daemon.pid")
 sleep 2
 
 echo ""
 echo "[3] Running functional test..."
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
+if [[ "$(uname)" == "Darwin" ]]; then
+    export DYLD_INSERT_LIBRARIES="$LD_PRELOAD"
+    export DYLD_FORCE_FLAT_NAMESPACE=1
+fi
 if [[ "$(uname)" == "Linux" ]]; then
     export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
 fi
@@ -149,6 +168,8 @@ if (( WAIT_MS > 500 )); then
     exit 0
 else
     echo "❌ FAIL: Flock acquired immediately (Wait: ${WAIT_MS} ms). Isolation failed."
+    echo "=== Daemon Logs ==="
+    cat "$VELO_PROJECT_ROOT/daemon.log"
     rm flock_test flock_test.c output_b.txt
     exit 1
 fi

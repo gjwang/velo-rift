@@ -68,21 +68,37 @@ export VELO_PROJECT_ROOT="${SCRIPT_DIR}/test_mmap_root"
 mkdir -p "$VELO_PROJECT_ROOT/.vrift"
 rm -rf "$VELO_PROJECT_ROOT/.vrift/socket"
 DAEMON_BIN="${PROJECT_ROOT}/target/debug/vriftd"
-$DAEMON_BIN start &
-DAEMON_PID=$!
+(
+    unset DYLD_INSERT_LIBRARIES
+    unset DYLD_FORCE_FLAT_NAMESPACE
+    unset LD_PRELOAD
+    $DAEMON_BIN start &
+    echo $! > "$VELO_PROJECT_ROOT/daemon.pid"
+)
+DAEMON_PID=$(cat "$VELO_PROJECT_ROOT/daemon.pid")
 sleep 2
 
 # Register workspace
 mkdir -p "$HOME/.vrift/registry"
 echo "{\"manifests\": {\"test_mmap\": {\"project_root\": \"$VELO_PROJECT_ROOT\"}}}" > "$HOME/.vrift/registry/manifests.json"
-kill $DAEMON_PID
+kill $DAEMON_PID || true
 sleep 1
-$DAEMON_BIN start &
-DAEMON_PID=$!
+(
+    unset DYLD_INSERT_LIBRARIES
+    unset DYLD_FORCE_FLAT_NAMESPACE
+    unset LD_PRELOAD
+    $DAEMON_BIN start &
+    echo $! > "$VELO_PROJECT_ROOT/daemon.pid"
+)
+DAEMON_PID=$(cat "$VELO_PROJECT_ROOT/daemon.pid")
 sleep 2
 
 echo "[3] Running functional test..."
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
+if [[ "$(uname)" == "Darwin" ]]; then
+    export DYLD_INSERT_LIBRARIES="$LD_PRELOAD"
+    export DYLD_FORCE_FLAT_NAMESPACE=1
+fi
 if [[ "$(uname)" == "Linux" ]]; then
     export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
 fi
