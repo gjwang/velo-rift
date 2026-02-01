@@ -1,10 +1,15 @@
-use crate::interpose::*;
 use crate::ipc::*;
 use crate::state::*;
 use libc::c_int;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::Ordering;
+
+#[cfg(target_os = "macos")]
+use crate::interpose::*;
+#[cfg(target_os = "linux")]
+use std::ptr;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicPtr;
-use std::sync::atomic::Ordering;
 
 // ============================================================================
 // Miscellaneous Implementation

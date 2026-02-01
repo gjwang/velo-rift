@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t};
 
 // Import all shims from crate root (lib.rs) for IT_* initialization

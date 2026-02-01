@@ -1,8 +1,13 @@
-use crate::interpose::*; // Helper logic might be needed? No, direct shims.
 use crate::state::*;
 use libc::{c_char, c_int, c_void};
 use std::ffi::CStr;
 use std::ptr;
+
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicPtr;
+
+#[cfg(target_os = "macos")]
+use crate::interpose::*;
 
 // ============================================================================
 // Process / Execution

@@ -1,8 +1,15 @@
-use crate::interpose::*;
-use crate::ipc::*;
-use crate::state::*;
+use crate::ipc::sync_ipc_manifest_reingest;
+use crate::state::{ShimGuard, ShimState, SHIM_STATE};
 use libc::{c_int, c_void, size_t, ssize_t};
 use std::sync::atomic::Ordering;
+
+#[cfg(target_os = "linux")]
+use std::ptr;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicPtr;
+
+#[cfg(target_os = "macos")]
+use crate::interpose::*;
 
 // ============================================================================
 // I/O Implementations
@@ -33,13 +40,13 @@ unsafe fn close_impl(fd: c_int, real_close: CloseFn) -> c_int {
             // RFC-0047: CoW close path - reingest modified file back to CAS and Manifest
             // Daemon will read temp file, hash it, insert to CAS, update Manifest
             if sync_ipc_manifest_reingest(&state.socket_path, &file.vpath, &file.temp_path) {
-                shim_log("[VRift-Shim] File re-ingested successfully: ");
-                shim_log(&file.vpath);
-                shim_log("\n");
+                shim_log!("[VRift-Shim] File re-ingested successfully: ");
+                shim_log!(&file.vpath);
+                shim_log!("\n");
             } else {
-                shim_log("[VRift-Shim] File reingest IPC failed: ");
-                shim_log(&file.vpath);
-                shim_log("\n");
+                shim_log!("[VRift-Shim] File reingest IPC failed: ");
+                shim_log!(&file.vpath);
+                shim_log!("\n");
             }
         }
     }

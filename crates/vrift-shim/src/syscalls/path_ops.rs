@@ -1,5 +1,8 @@
+#[cfg(target_os = "linux")]
+use libc::size_t;
 use libc::{c_char, c_int};
 use std::ffi::CString;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::ptr;
 
@@ -13,7 +16,7 @@ pub(crate) unsafe fn break_link(path_str: &str) -> Result<(), c_int> {
         Ok(m) => m,
         Err(_) => return Ok(()),
     };
-    if std::os::unix::fs::MetadataExt::nlink(&metadata) < 2 {
+    if metadata.nlink() < 2 {
         return Ok(());
     }
 
@@ -79,9 +82,7 @@ unsafe fn break_link_linux(path_str: &str) -> Result<(), c_int> {
         let mut offset_in: libc::off_t = 0;
         let mut offset_out: libc::off_t = 0;
         // Use std::fs::metadata again or reuse?
-        let len = std::fs::metadata(path_str)
-            .map(|m| std::os::unix::fs::MetadataExt::len(&m))
-            .unwrap_or(0);
+        let len = std::fs::metadata(path_str).map(|m| m.len()).unwrap_or(0);
         libc::copy_file_range(
             src_fd,
             &mut offset_in,

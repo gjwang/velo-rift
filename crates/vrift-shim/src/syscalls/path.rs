@@ -1,4 +1,3 @@
-use crate::interpose::*;
 use crate::ipc::*;
 use crate::path::*;
 use crate::state::*;
@@ -6,6 +5,9 @@ use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t};
 use std::ffi::CStr;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
+
+#[cfg(target_os = "macos")]
+use crate::interpose::*;
 
 // ============================================================================
 // Path Implementation

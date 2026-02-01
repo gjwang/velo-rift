@@ -10,10 +10,14 @@ pub mod process;
 pub mod stat;
 
 // Re-export specific shims that need to be visible to interpose or extern C
+#[cfg(target_os = "macos")]
 pub use dir::*;
 pub use io::*;
+#[cfg(target_os = "macos")]
 pub use mem::*;
+#[cfg(target_os = "macos")]
 pub use misc::*;
+#[cfg(target_os = "macos")]
 pub use open::*;
 pub use path::*;
 pub use process::*;

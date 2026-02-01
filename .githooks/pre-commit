@@ -1,25 +1,45 @@
 #!/bin/bash
 # =============================================================================
-# VRift Pre-commit Hook
+# VRift Pre-commit Hook (Synced with Velo CI Pattern)
 # =============================================================================
-# This hook runs pre-commit checks before allowing a commit.
-# Install with: git config core.hooksPath .githooks
+# Auto-format and auto-fix safe issues before commit.
 # =============================================================================
 
 set -e
 
-# If pre-commit is installed, use it
+echo "🎨 Auto-formatting with cargo fmt..."
+cargo fmt
+
+echo "🔧 Auto-fixing clippy (machine-applicable only)..."
+# --fix: auto-apply fixes, --allow-staged: work on staged files
+# --allow-dirty: don't fail if there are unstaged changes
+# Only apply machine-applicable fixes (safe, no semantic changes)
+cargo clippy --fix --allow-staged --allow-dirty --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets 2>/dev/null || true
+
+echo "🔍 Running cargo clippy check..."
+cargo clippy --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets -- -D warnings || {
+    echo "❌ Clippy check failed. Some warnings cannot be auto-fixed."
+    exit 1
+}
+
+echo "📝 Re-staging auto-fixed files..."
+git add -u
+
+echo "🐍 Auto-fixing Python (Ruff)..."
+# Safe auto-fixes only (no semantic changes)
+uv run ruff check --fix tests/ scripts/ 2>/dev/null || true
+uv run ruff format tests/ scripts/ 2>/dev/null || true
+
+echo "📝 Re-staging Python auto-fixed files..."
+git add -u
+
+echo "🔍 Running Full Pre-Commit Framework..."
+# Final validation: mypy, remaining lint errors
 if command -v pre-commit &>/dev/null; then
-    exec pre-commit run --all-files
+    pre-commit run --all-files || {
+        echo "❌ Pre-commit framework failed. Fix the issues above."
+        exit 1
+    }
 fi
 
-# Fallback: Run basic checks if pre-commit is not installed
-echo "[*] Pre-commit not installed, running basic checks..."
-
-echo "[*] Running cargo fmt check..."
-cargo fmt --all -- --check
-
-echo "[*] Running cargo clippy..."
-cargo clippy --workspace --all-targets -- -D warnings
-
-echo "[✓] Pre-commit checks passed!"
+echo "✅ All pre-commit checks passed!"

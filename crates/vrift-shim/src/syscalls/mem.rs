@@ -1,10 +1,20 @@
-use crate::interpose::*;
 use crate::ipc::*;
-use crate::path::*;
+#[cfg(target_os = "macos")]
+use crate::path::resolve_path_with_cwd;
 use crate::state::*;
 use libc::{c_char, c_int, c_void, size_t};
+#[cfg(target_os = "macos")]
 use std::ffi::{CStr, CString};
+#[cfg(target_os = "macos")]
 use std::sync::atomic::Ordering;
+
+#[cfg(target_os = "linux")]
+use std::ptr;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicPtr;
+
+#[cfg(target_os = "macos")]
+use crate::interpose::*;
 
 // ============================================================================
 // Memory Mapping & Dynamic Loading

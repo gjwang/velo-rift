@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use crate::interpose::*;
 use crate::path::*;
 use crate::state::*;
@@ -5,6 +6,8 @@ use crate::syscalls::path_ops::break_link;
 use libc::{c_char, c_int, c_void, mode_t};
 use std::ffi::CStr;
 use std::ptr;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering;
 
 // ============================================================================

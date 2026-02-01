@@ -1,12 +1,17 @@
-use crate::interpose::*;
 use crate::path::*;
 use crate::state::*;
 use libc::{c_char, c_int, c_long};
 use std::ffi::CStr;
 use std::ptr;
+use std::sync::atomic::Ordering;
+
+#[cfg(target_os = "linux")]
+use libc::c_void;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicPtr;
-use std::sync::atomic::Ordering;
+
+#[cfg(target_os = "macos")]
+use crate::interpose::*;
 
 // ============================================================================
 // Stat Implementation

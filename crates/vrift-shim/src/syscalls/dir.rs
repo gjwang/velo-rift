@@ -1,9 +1,11 @@
-use crate::interpose::*;
 use crate::state::*;
 use libc::{c_char, c_int};
 use std::ffi::CStr;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(target_os = "macos")]
+use crate::interpose::*;
 
 // ============================================================================
 // Directory Implementation
@@ -32,7 +34,7 @@ unsafe fn opendir_impl(path: *const c_char, real_opendir: OpendirFn) -> *mut lib
         None => return real_opendir(path),
     };
 
-    let path_str = match CStr::from_ptr(path).to_str() {
+    let path_str: &str = match CStr::from_ptr(path).to_str() {
         Ok(s) => s,
         Err(_) => return real_opendir(path),
     };

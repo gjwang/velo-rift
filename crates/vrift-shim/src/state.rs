@@ -74,13 +74,19 @@ impl Drop for ShimGuard {
 }
 
 pub(crate) const LOG_BUF_SIZE: usize = 64 * 1024;
-pub(crate) struct Logger {
+pub struct Logger {
     buffer: [u8; LOG_BUF_SIZE],
-    head: std::sync::atomic::AtomicUsize,
+    pub(crate) head: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for Logger {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Logger {
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             buffer: [0u8; LOG_BUF_SIZE],
             head: std::sync::atomic::AtomicUsize::new(0),
@@ -141,7 +147,7 @@ impl Logger {
     }
 }
 
-pub(crate) static LOGGER: Logger = Logger::new();
+pub static LOGGER: Logger = Logger::new();
 
 pub(crate) unsafe fn shim_log(msg: &str) {
     LOGGER.log(msg);

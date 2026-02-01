@@ -18,6 +18,7 @@ pub mod path;
 pub mod state;
 pub mod syscalls;
 
+pub use state::LOGGER;
 pub use syscalls::*;
 
 #[allow(dead_code)]
