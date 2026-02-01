@@ -9,6 +9,7 @@ on:
       - 'LICENSE'
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch: # Enable manual triggering
 
 # Cancel in-progress runs on same ref
 concurrency:
