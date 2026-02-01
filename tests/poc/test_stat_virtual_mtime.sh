@@ -18,12 +18,12 @@ int main(int argc, char *argv[]) {
     struct stat sb;
     if (stat(argv[1], &sb) != 0) { perror("stat"); return 1; }
     printf("dev=0x%llx size=%lld\n", (unsigned long long)sb.st_dev, (long long)sb.st_size);
-    // LOGO device ID = 0x4C4F474F
-    if (sb.st_dev == 0x4C4F474F) {
-        printf("✅ PASS: VFS device ID detected (LOGO)\n");
+    // RIFT device ID = 0x52494654
+    if (sb.st_dev == 0x52494654) {
+        printf("✅ PASS: VFS device ID detected (RIFT)\n");
         return 0;
     } else {
-        printf("❌ FAIL: Not VFS device (expected 0x4C4F474F)\n");
+        printf("❌ FAIL: Not VFS device (expected 0x52494654)\n");
         return 1;
     }
 }
