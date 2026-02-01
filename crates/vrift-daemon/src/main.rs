@@ -156,6 +156,48 @@ struct DaemonState {
     bloom: BloomFilter,
 }
 
+/// RFC-0044 Hot Stat Cache: Export manifest to mmap file for O(1) shim access
+fn export_mmap_cache(manifest: &LmdbManifest) {
+    use vrift_ipc::{ManifestMmapBuilder, MMAP_DEFAULT_PATH};
+
+    let mut builder = ManifestMmapBuilder::new();
+
+    // Iterate all manifest entries and add to builder
+    if let Ok(entries) = manifest.iter() {
+        for (path, entry) in entries {
+            let flags = entry.vnode.mode;
+            let is_dir = entry.vnode.is_dir();
+            let is_symlink = entry.vnode.is_symlink();
+            builder.add_entry(
+                &path,
+                entry.vnode.size,
+                entry.vnode.mtime as i64,
+                flags,
+                is_dir,
+                is_symlink,
+            );
+        }
+    }
+
+    if builder.is_empty() {
+        return;
+    }
+
+    // Write mmap file atomically
+    match builder.write_to_file(MMAP_DEFAULT_PATH) {
+        Ok(()) => {
+            tracing::info!(
+                "RFC-0044 Hot Stat Cache: Exported {} entries to {}",
+                builder.len(),
+                MMAP_DEFAULT_PATH
+            );
+        }
+        Err(e) => {
+            tracing::warn!("Failed to export mmap cache: {}", e);
+        }
+    }
+}
+
 async fn start_daemon() -> Result<()> {
     tracing::info!("vriftd: Starting daemon...");
 
@@ -234,6 +276,12 @@ async fn start_daemon() -> Result<()> {
         manifest: std::sync::Mutex::new(manifest),
         bloom,
     });
+
+    // RFC-0044 Hot Stat Cache: Warm up mmap-based shared memory stat cache from existing manifest
+    {
+        let manifest = state.manifest.lock().unwrap();
+        export_mmap_cache(&manifest);
+    }
 
     // Start background scan (Warm-up)
     let scan_state = state.clone();
@@ -392,6 +440,8 @@ async fn handle_request(
             if let Err(e) = manifest.commit() {
                 tracing::error!("Failed to commit manifest: {}", e);
             }
+            // RFC-0044 Hot Stat Cache: Update mmap'd manifest for zero-latency shim access
+            export_mmap_cache(&manifest);
             VeloResponse::ManifestAck { entry: None }
         }
         VeloRequest::ManifestListDir { path } => {

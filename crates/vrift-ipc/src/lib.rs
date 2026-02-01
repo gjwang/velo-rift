@@ -171,6 +171,126 @@ pub fn mmap_file_size(table_capacity: usize) -> usize {
     ManifestMmapHeader::SIZE + BLOOM_SIZE + (table_capacity * MmapStatEntry::SIZE)
 }
 
+/// Builder for creating mmap manifest files (RFC-0044 Hot Stat Cache)
+/// Used by daemon to export manifest to shared memory for O(1) shim access
+#[derive(Debug)]
+pub struct ManifestMmapBuilder {
+    entries: Vec<(String, MmapStatEntry)>,
+    bloom: Vec<u8>,
+}
+
+impl Default for ManifestMmapBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ManifestMmapBuilder {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            bloom: vec![0u8; BLOOM_SIZE],
+        }
+    }
+
+    /// Add a manifest entry to the builder
+    pub fn add_entry(
+        &mut self,
+        path: &str,
+        size: u64,
+        mtime: i64,
+        mode: u32,
+        is_dir: bool,
+        is_symlink: bool,
+    ) {
+        let path_hash = fnv1a_hash(path);
+        let flags = if is_dir { 0x01 } else { 0 } | if is_symlink { 0x02 } else { 0 };
+
+        // Add to bloom filter
+        let (h1, h2) = bloom_hashes(path);
+        let b1 = h1 % (BLOOM_SIZE * 8);
+        let b2 = h2 % (BLOOM_SIZE * 8);
+        self.bloom[b1 / 8] |= 1 << (b1 % 8);
+        self.bloom[b2 / 8] |= 1 << (b2 % 8);
+
+        let entry = MmapStatEntry {
+            path_hash,
+            size,
+            mtime,
+            mtime_nsec: 0,
+            mode,
+            flags,
+        };
+        self.entries.push((path.to_string(), entry));
+    }
+
+    /// Write mmap file to disk
+    pub fn write_to_file(&self, path: &str) -> std::io::Result<()> {
+        use std::io::Write;
+
+        // Calculate capacity (2x for 50% load factor)
+        let table_capacity = (self.entries.len() * 2).clamp(1024, MMAP_MAX_ENTRIES);
+        let file_size = mmap_file_size(table_capacity);
+
+        // Create buffer
+        let mut buffer = vec![0u8; file_size];
+
+        // Write header
+        let header = ManifestMmapHeader::new(self.entries.len() as u32, table_capacity as u32);
+        let header_bytes = unsafe {
+            std::slice::from_raw_parts(&header as *const _ as *const u8, ManifestMmapHeader::SIZE)
+        };
+        buffer[..ManifestMmapHeader::SIZE].copy_from_slice(header_bytes);
+
+        // Write bloom filter
+        let bloom_start = header.bloom_offset as usize;
+        buffer[bloom_start..bloom_start + BLOOM_SIZE].copy_from_slice(&self.bloom);
+
+        // Write hash table with linear probing
+        let table_start = header.table_offset as usize;
+        for (_path, entry) in &self.entries {
+            let start_slot = (entry.path_hash as usize) % table_capacity;
+            for i in 0..table_capacity {
+                let slot = (start_slot + i) % table_capacity;
+                let offset = table_start + slot * MmapStatEntry::SIZE;
+
+                // Check if slot is empty
+                let existing_hash =
+                    u64::from_le_bytes(buffer[offset..offset + 8].try_into().unwrap());
+                if existing_hash == 0 {
+                    // Write entry
+                    let entry_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            entry as *const _ as *const u8,
+                            MmapStatEntry::SIZE,
+                        )
+                    };
+                    buffer[offset..offset + MmapStatEntry::SIZE].copy_from_slice(entry_bytes);
+                    break;
+                }
+            }
+        }
+
+        // Write atomically (write to temp, then rename)
+        let temp_path = format!("{}.tmp", path);
+        let mut file = std::fs::File::create(&temp_path)?;
+        file.write_all(&buffer)?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+
+        Ok(())
+    }
+
+    /// Get entry count
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 pub fn bloom_hashes(s: &str) -> (usize, usize) {
     let mut h1: usize = 5381;
     let mut h2: usize = 0;
