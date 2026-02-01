@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 #[allow(unused_imports)]
 use libc::{
-    c_char, c_int, c_void, flock, mkdir, mode_t, munmap, size_t, ssize_t, symlink, utimensat,
+    c_char, c_int, c_void, flock, mkdir, mmap, mode_t, munmap, size_t, ssize_t, symlink, utimensat,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -313,9 +313,7 @@ static IT_FLOCK: Interpose = Interpose {
     new_func: flock_shim as *const (),
     old_func: flock as *const (),
 };
-#[cfg(target_os = "macos")]
-#[link_section = "__DATA,__interpose"]
-#[used]
+
 static IT_READLINK: Interpose = Interpose {
     new_func: readlink_shim as *const (),
     old_func: readlink as *const (),
@@ -3299,8 +3297,8 @@ pub unsafe extern "C" fn rename_shim(oldpath: *const c_char, newpath: *const c_c
             p.starts_with(&*state.vfs_prefix)
         });
 
-        if old_is_vfs || new_is_vfs {
-            // RFC-0047: Update Manifest via IPC instead of EROFS
+        if old_is_vfs && new_is_vfs {
+            // RFC-0047: Pure VFS rename - Update Manifest via IPC
             let old_resolved = old_res
                 .map(|len| unsafe { std::str::from_utf8_unchecked(&buf_old[..len]) })
                 .unwrap_or("");
@@ -3310,7 +3308,28 @@ pub unsafe extern "C" fn rename_shim(oldpath: *const c_char, newpath: *const c_c
             if sync_ipc_manifest_rename(&state.socket_path, old_resolved, new_resolved) {
                 return 0; // Success - manifest entry renamed
             }
-            // IPC failed - fallback to real rename
+            // IPC failed - fallback to real rename (risky but consistent with failure)
+        } else if old_is_vfs != new_is_vfs {
+            // Cross-Domain Rename (VFS <-> Host)
+            // MUST return EXDEV to trigger `mv` fallback to copy + unlink
+            unsafe {
+                #[cfg(target_os = "linux")]
+                extern "C" {
+                    fn __errno_location() -> *mut c_int;
+                }
+                #[cfg(target_os = "macos")]
+                extern "C" {
+                    fn __error() -> *mut c_int;
+                }
+
+                #[cfg(target_os = "linux")]
+                let errno_ptr = __errno_location();
+                #[cfg(target_os = "macos")]
+                let errno_ptr = __error();
+
+                *errno_ptr = libc::EXDEV;
+            }
+            return -1;
         }
     }
 
