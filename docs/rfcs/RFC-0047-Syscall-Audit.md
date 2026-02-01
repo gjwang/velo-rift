@@ -94,6 +94,9 @@ These syscalls execute natively because `open` has already **swizzled** the file
 | `sendfile` | bypass | Decompose to read+write | `test_gap_sendfile` |
 | `copy_file_range` | bypass | Decompose to read+write | `test_gap_copy_file_range` |
 | `flock` | temp file | Shadow lock in daemon | `test_gap_flock_semantic` |
+| `chmod` | passthrough | `EROFS` on VFS path | `test_gap_permission_bypass` |
+| `chown` | passthrough | `EPERM` on VFS path | `test_gap_permission_bypass` |
+
 
 ### ⚠️ P1: May Cause Issues
 
@@ -210,9 +213,9 @@ stat(vfs_path) → st_ino = hash(path) % 2^32
 
 | Status | Count | Syscalls |
 |--------|-------|----------|
-| ✅ PASS | 4 | flock_semantic, symlink, mmap, utimes |
+| ✅ PASS | 4 | flock_semantic, symlink, mmap, utimes (Linux) |
 | ⚠️ WARNING | 5 | ctime, readdir_order, st_dev, st_nlink, xattr |
-| ❌ FAIL | 11 | copy_file_range, dup, fchdir, fcntl, ftruncate, inode, lseek, sendfile, rename_boundary, hardlink, renameat |
+| ❌ FAIL | 16 | copy_file_range, dup, fchdir, fcntl, ftruncate, inode, lseek, sendfile, **rename, unlink, rmdir, link, renameat, chmod, chown (macOS Regression)** |
 
 ### Component Status
 
