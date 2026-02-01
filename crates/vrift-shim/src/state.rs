@@ -87,11 +87,13 @@ impl ShimGuard {
         let res = (|| {
             let key = get_recursion_key();
             if key == 0 {
-                return None;
+                // TLS key creation failed - allow proceed without recursion guard
+                // This is safe because at this point SHIM_STATE is initialized
+                return Some(ShimGuard(false));
             }
             let val = unsafe { libc::pthread_getspecific(key) };
             if !val.is_null() {
-                None
+                None // Already in shim - recursion detected
             } else {
                 unsafe { libc::pthread_setspecific(key, std::ptr::dangling::<c_void>()) };
                 Some(ShimGuard(true))

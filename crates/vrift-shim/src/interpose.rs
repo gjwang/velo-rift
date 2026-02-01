@@ -3,7 +3,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use crate::syscalls::dir::{closedir_shim, opendir_shim, readdir_shim};
-use crate::syscalls::misc::{rename_shim, renameat_shim};
+use crate::syscalls::misc::{link_shim, linkat_shim, rename_shim, renameat_shim};
 use crate::syscalls::mmap::{mmap_shim, munmap_shim};
 use crate::syscalls::open::{open_shim, openat_shim};
 use crate::syscalls::path::{readlink_shim, realpath_shim};
@@ -141,20 +141,7 @@ pub unsafe extern "C" fn faccessat_shim(d: c_int, p: *const c_char, m: c_int, f:
     faccessat(d, p, m, f)
 }
 // Note: openat_shim imported from syscalls/open.rs
-#[no_mangle]
-pub unsafe extern "C" fn link_shim(o: *const c_char, n: *const c_char) -> c_int {
-    link(o, n)
-}
-#[no_mangle]
-pub unsafe extern "C" fn linkat_shim(
-    f1: c_int,
-    p1: *const c_char,
-    f2: c_int,
-    p2: *const c_char,
-    f: c_int,
-) -> c_int {
-    linkat(f1, p1, f2, p2, f)
-}
+// Note: link_shim, linkat_shim imported from syscalls/misc.rs with VFS boundary logic
 // Note: renameat_shim imported from syscalls/misc.rs with EXDEV logic
 #[no_mangle]
 pub unsafe extern "C" fn symlink_shim(p1: *const c_char, p2: *const c_char) -> c_int {

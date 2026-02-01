@@ -85,10 +85,13 @@ if [[ "$(uname)" == "Darwin" ]]; then
     # export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 export RUST_LOG=debug
+# Set VFS prefix to the project workspace so psfs_applicable matches correctly
+export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 
 echo "Running rename..."
 set +e
-(cd "$VELO_PROJECT_ROOT" && "$TEST_DIR/boundary_test" test.txt "$EXTERNAL_DIR/test.txt")
+# Use absolute path for source so it matches VRIFT_VFS_PREFIX
+"$TEST_DIR/boundary_test" "$VELO_PROJECT_ROOT/test.txt" "$EXTERNAL_DIR/test.txt"
 RET=$?
 set -e
 

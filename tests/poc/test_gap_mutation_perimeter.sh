@@ -32,6 +32,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
     export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 export VRIFT_socket_path="/tmp/vrift.sock"
+export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 
 RESULTS=""
 

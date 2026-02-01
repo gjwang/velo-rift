@@ -71,10 +71,13 @@ if [[ "$(uname)" == "Darwin" ]]; then
     export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 export VRIFT_socket_path="/tmp/vrift.sock"
+# Set VFS prefix for psfs_applicable to match correctly
+export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 
 echo "Running link() test..."
 set +e
-(cd "$VELO_PROJECT_ROOT" && "$TEST_DIR/link_test" blobs.txt "$EXPORT_PATH")
+# Use absolute path for source file
+"$TEST_DIR/link_test" "$VELO_PROJECT_ROOT/blobs.txt" "$EXPORT_PATH"
 RET=$?
 set -e
 
