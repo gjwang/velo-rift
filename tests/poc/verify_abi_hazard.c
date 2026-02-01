@@ -27,8 +27,8 @@ int main() {
     return 1;
   }
 
-  printf("[Test 1] Invoking fcntl(fd, 67, 100)...\n");
-  int new_fd = fcntl(fd, 67, 100);
+  printf("[Test 1] Invoking fcntl(fd, F_DUPFD_CLOEXEC, 100)...\n");
+  int new_fd = fcntl(fd, F_DUPFD_CLOEXEC, 100);
 
   if (new_fd < 0) {
     printf("FAILED: fcntl F_DUPFD_CLOEXEC returned errno %d (%s)\n", errno,
