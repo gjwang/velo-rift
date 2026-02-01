@@ -4,26 +4,92 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
 VELO_PROJECT_ROOT="$TEST_DIR/workspace"
-DAEMON_BIN="${PROJECT_ROOT}/target/debug/vriftd"
 
 echo "=== P0 Gap Test: Mutation Perimeter (macOS) ==="
+
+# Compile C test program
+cat > "$TEST_DIR/mutation_test.c" << 'EOF'
+#include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/xattr.h>
+
+int test_chmod(const char *path) {
+    printf("Testing chmod on %s...\n", path);
+    if (chmod(path, 0644) == 0) {
+        printf("  chmod SUCCESS (bypass!)\n");
+        return 1;
+    } else {
+        printf("  chmod BLOCKED: %s\n", strerror(errno));
+        return 0;
+    }
+}
+
+int test_truncate(const char *path) {
+    printf("Testing truncate on %s...\n", path);
+    if (truncate(path, 0) == 0) {
+        printf("  truncate SUCCESS (bypass!)\n");
+        return 1;
+    } else {
+        printf("  truncate BLOCKED: %s\n", strerror(errno));
+        return 0;
+    }
+}
+
+int test_setxattr(const char *path) {
+    printf("Testing setxattr on %s...\n", path);
+    if (setxattr(path, "user.test", "value", 5, 0, 0) == 0) {
+        printf("  setxattr SUCCESS (bypass!)\n");
+        return 1;
+    } else {
+        printf("  setxattr BLOCKED: %s\n", strerror(errno));
+        return 0;
+    }
+}
+
+int test_chflags(const char *path) {
+    printf("Testing chflags on %s...\n", path);
+    if (chflags(path, 0x10) == 0) {  // UF_IMMUTABLE
+        printf("  chflags SUCCESS (bypass!)\n");
+        chflags(path, 0);  // cleanup
+        return 1;
+    } else {
+        printf("  chflags BLOCKED: %s\n", strerror(errno));
+        return 0;
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <path>\n", argv[0]);
+        return 2;
+    }
+    const char *path = argv[1];
+    
+    int bypassed = 0;
+    bypassed += test_chmod(path);
+    bypassed += test_truncate(path);
+    bypassed += test_setxattr(path);
+    bypassed += test_chflags(path);
+    
+    printf("\n=== Summary ===\n");
+    if (bypassed == 0) {
+        printf("✅ PASS: All mutations blocked\n");
+        return 0;
+    } else {
+        printf("❌ FAIL: %d mutation(s) bypassed\n", bypassed);
+        return 1;
+    }
+}
+EOF
+
+gcc -o "$TEST_DIR/mutation_test" "$TEST_DIR/mutation_test.c"
 
 # Prepare VFS
 mkdir -p "$VELO_PROJECT_ROOT/.vrift"
 echo "PROTECTED_CONTENT_1234567890" > "$VELO_PROJECT_ROOT/mutation_test.txt"
-# Make it read-only for baseline
-chmod 444 "$VELO_PROJECT_ROOT/mutation_test.txt"
-
-# Start Daemon
-rm -f /tmp/vrift.sock
-(
-    unset DYLD_INSERT_LIBRARIES
-    unset LD_PRELOAD
-    $DAEMON_BIN start > "$TEST_DIR/daemon.log" 2>&1 &
-    echo $! > "$TEST_DIR/daemon.pid"
-)
-DAEMON_PID=$(cat "$TEST_DIR/daemon.pid")
-sleep 2
 
 # Setup Shim
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
@@ -34,60 +100,8 @@ fi
 export VRIFT_socket_path="/tmp/vrift.sock"
 export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 
-RESULTS=""
+"$TEST_DIR/mutation_test" "$VELO_PROJECT_ROOT/mutation_test.txt"
+RET=$?
 
-echo "Test 1: chained chmod + truncate()"
-# Chained exploit: first chmod to bypass OS read-only check, then truncate.
-# Since Shim is bypassed, both hit the host OS.
-if (cd "$VELO_PROJECT_ROOT" && chmod 644 mutation_test.txt && truncate -s 0 mutation_test.txt) 2>/dev/null; then
-    SIZE=$(stat -f %z "$VELO_PROJECT_ROOT/mutation_test.txt")
-    if [[ "$SIZE" == "0" ]]; then
-        echo "❌ FAIL: Chained mutation bypass detected (File destroyed)"
-        RESULTS="$RESULTS\ntruncate_chained: FAIL"
-    else
-        echo "✅ PASS: Mutation blocked"
-        RESULTS="$RESULTS\ntruncate_chained: PASS"
-    fi
-else
-    echo "✅ PASS: Mutation returned error"
-    RESULTS="$RESULTS\ntruncate_chained: PASS"
-fi
-
-echo "Test 2: xattr"
-if (cd "$VELO_PROJECT_ROOT" && xattr -w user.test value mutation_test.txt) 2>/dev/null; then
-    VAL=$(xattr -p user.test "$VELO_PROJECT_ROOT/mutation_test.txt" 2>/dev/null || echo "")
-    if [[ "$VAL" == "value" ]]; then
-        echo "❌ FAIL: xattr bypass detected (Metadata modified)"
-        RESULTS="$RESULTS\nxattr: FAIL"
-    else
-         echo "✅ PASS: xattr blocked or virtualized"
-         RESULTS="$RESULTS\nxattr: PASS"
-    fi
-else
-    echo "✅ PASS: xattr returned error"
-    RESULTS="$RESULTS\nxattr: PASS"
-fi
-
-echo "Test 3: chflags (macOS only)"
-if [[ "$(uname)" == "Darwin" ]]; then
-    if (cd "$VELO_PROJECT_ROOT" && chflags uchg mutation_test.txt) 2>/dev/null; then
-        FLAGS=$(stat -f %f "$VELO_PROJECT_ROOT/mutation_test.txt")
-        if [[ "$FLAGS" != "0" ]]; then
-            echo "❌ FAIL: chflags bypass detected (Flags modified)"
-            RESULTS="$RESULTS\nchflags: FAIL"
-            # Cleanup flags so we can delete temp dir
-            chflags nouchg "$VELO_PROJECT_ROOT/mutation_test.txt"
-        else
-            echo "✅ PASS: chflags blocked or virtualized"
-            RESULTS="$RESULTS\nchflags: PASS"
-        fi
-    else
-        echo "✅ PASS: chflags returned error"
-        RESULTS="$RESULTS\nchflags: PASS"
-    fi
-fi
-
-kill $DAEMON_PID || true
 rm -rf "$TEST_DIR"
-
-echo -e "\n=== Summary ===$RESULTS"
+exit $RET

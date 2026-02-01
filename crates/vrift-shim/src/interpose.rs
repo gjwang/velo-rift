@@ -5,7 +5,10 @@
 #[cfg(target_os = "macos")]
 use crate::syscalls::dir::{closedir_shim, opendir_shim, readdir_shim};
 #[cfg(target_os = "macos")]
-use crate::syscalls::misc::{link_shim, linkat_shim, rename_shim, renameat_shim};
+use crate::syscalls::misc::{
+    chflags_shim, chmod_shim, fchmodat_shim, link_shim, linkat_shim, removexattr_shim, rename_shim,
+    renameat_shim, setxattr_shim, truncate_shim,
+};
 #[cfg(target_os = "macos")]
 use crate::syscalls::mmap::{mmap_shim, munmap_shim};
 #[cfg(target_os = "macos")]
@@ -81,6 +84,20 @@ extern "C" {
     fn munmap(addr: *mut c_void, len: size_t) -> c_int;
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     fn fstatat(dirfd: c_int, path: *const c_char, buf: *mut libc::stat, flags: c_int) -> c_int;
+    // Mutation perimeter syscalls
+    fn chmod(path: *const c_char, mode: mode_t) -> c_int;
+    fn fchmodat(dirfd: c_int, path: *const c_char, mode: mode_t, flags: c_int) -> c_int;
+    fn truncate(path: *const c_char, length: libc::off_t) -> c_int;
+    fn chflags(path: *const c_char, flags: libc::c_uint) -> c_int;
+    fn setxattr(
+        path: *const c_char,
+        name: *const c_char,
+        value: *const c_void,
+        size: size_t,
+        position: u32,
+        options: c_int,
+    ) -> c_int;
+    fn removexattr(path: *const c_char, name: *const c_char, options: c_int) -> c_int;
 }
 
 #[allow(unused_macros)]
@@ -490,4 +507,48 @@ pub static IT_FACCESSAT: Interpose = Interpose {
 pub static IT_FSTATAT: Interpose = Interpose {
     new_func: fstatat_shim as *const (),
     old_func: libc::fstatat as *const (),
+};
+
+// Mutation Perimeter Interpositions
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_CHMOD: Interpose = Interpose {
+    new_func: chmod_shim as *const (),
+    old_func: chmod as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_FCHMODAT: Interpose = Interpose {
+    new_func: fchmodat_shim as *const (),
+    old_func: fchmodat as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_TRUNCATE: Interpose = Interpose {
+    new_func: truncate_shim as *const (),
+    old_func: truncate as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_CHFLAGS: Interpose = Interpose {
+    new_func: chflags_shim as *const (),
+    old_func: chflags as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_SETXATTR: Interpose = Interpose {
+    new_func: setxattr_shim as *const (),
+    old_func: setxattr as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_REMOVEXATTR: Interpose = Interpose {
+    new_func: removexattr_shim as *const (),
+    old_func: removexattr as *const (),
 };
