@@ -69,6 +69,7 @@ extern "C" {
         fd: c_int,
         offset: libc::off_t,
     ) -> *mut c_void;
+    fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
 }
 
 #[cfg(target_os = "macos")]
@@ -168,6 +169,13 @@ static IT_POSIX_SPAWNP: Interpose = Interpose {
 static IT_MMAP: Interpose = Interpose {
     new_func: mmap_shim as *const (),
     old_func: mmap as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_DLOPEN: Interpose = Interpose {
+    new_func: dlopen_shim as *const (),
+    old_func: dlopen as *const (),
 };
 
 // ============================================================================
@@ -814,6 +822,7 @@ type PosixSpawnFn = unsafe extern "C" fn(
 ) -> c_int;
 type MmapFn =
     unsafe extern "C" fn(*mut c_void, size_t, c_int, c_int, c_int, libc::off_t) -> *mut c_void;
+type DlopenFn = unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void;
 
 unsafe fn execve_impl(
     path: *const c_char,
@@ -1516,6 +1525,69 @@ pub unsafe extern "C" fn mmap_shim(
     // - Lazy content materialization
 
     real(addr, len, prot, flags, fd, offset)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn dlopen_shim(filename: *const c_char, flags: c_int) -> *mut c_void {
+    let real = std::mem::transmute::<*const (), DlopenFn>(IT_DLOPEN.old_func);
+
+    // Early bailout during initialization
+    if INITIALIZING.load(Ordering::SeqCst) {
+        return real(filename, flags);
+    }
+
+    // Guard recursion
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return real(filename, flags),
+    };
+
+    // NULL filename = get main program handle
+    if filename.is_null() {
+        return real(filename, flags);
+    }
+
+    // Check if this is a VFS path
+    let path_str = match CStr::from_ptr(filename).to_str() {
+        Ok(s) => s,
+        Err(_) => return real(filename, flags),
+    };
+
+    let Some(state) = ShimState::get() else {
+        return real(filename, flags);
+    };
+
+    // For VFS paths, we need to extract the library to a temp file first
+    // because dlopen requires a real filesystem path
+    if state.psfs_applicable(path_str) {
+        if let Some(entry) = state.psfs_lookup(path_str) {
+            // Get content from CAS and write to temp file
+            if let Ok(cas_guard) = state.cas.lock() {
+                if let Some(ref cas) = *cas_guard {
+                    if let Ok(content) = cas.get(&entry.content_hash) {
+                        // Create temp file for the library
+                        let temp_dir = std::env::temp_dir();
+                        let lib_name = std::path::Path::new(path_str)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("vrift_lib.dylib");
+                        let temp_path = temp_dir.join(format!("vrift_{}", lib_name));
+
+                        if std::fs::write(&temp_path, &content).is_ok() {
+                            if let Ok(c_path) = CString::new(temp_path.to_string_lossy().as_bytes())
+                            {
+                                return real(c_path.as_ptr(), flags);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Passthrough for non-VFS paths and fallback
+    real(filename, flags)
 }
 
 // Constructor
