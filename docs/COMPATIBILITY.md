@@ -93,12 +93,37 @@ Velo Rift uses platform-specific optimizations for Copy-on-Write (CoW) and metad
 
 ---
 
-## 🚩 Known Passthrough Gaps (Universal)
+---
 
-The following syscalls are currently **completely unintercepted** and hit the Host OS directly.
+## 🕵️ Subtle Architectural Gaps & Risks
+
+These are "invisible" behaviors discovered during deep forensic audit that may cause intermittent failures in complex toolchains.
+
+### 1. File Descriptor Leakage (O_CLOEXEC Gap)
+- **Risk**: Internal shims for daemon IPC (socket handle) do NOT set `SOCK_CLOEXEC`.
+- **Impact**: Every child process spawned via `execve` inherits the open socket to `vrift-daemon`. Large process trees may exhaust file descriptors or maintain ghost connections.
+
+### 2. Naive Path Matching (Normalization Gap)
+- **Risk**: The shim uses string prefix matching (`starts_with`) without normalization.
+- **Exploit**: Paths like `/vrift/../etc/passwd` or `/vrift//file.txt` may bypass VFS redirection and hit the host OS directly.
+- **Remediation Required**: Port the `path_normalize` logic from `vrift-core` into the shim's hot path.
+
+### 3. Path Virtualization Leaks (`getcwd`/`realpath`)
+- **Risk**: `getcwd`, `realpath`, and `chdir` are currently **standard passthrough**.
+- **Impact**:
+    - `getcwd()` returns the physical host path (e.g., `/tmp/vrift-mem-...`) instead of the virtual path (`/vrift/...`).
+    - `realpath()` on a virtual symlink fails or returns the host backing store path.
+    - `chdir()` into a virtual directory fails as the directory does not physically exist.
+
+---
+
+## 🚩 Known Passthrough Gaps (Universal)
 
 | Syscall | Impact | Priority |
 | :--- | :--- | :---: |
+| **`realpath`** | Tools resolving symlinks perceive host paths instead of VFS paths. | **P0** |
+| **`getcwd`** | CWD-dependent tools (make, git) leak host path state. | **P0** |
+| **`chdir`** | Cannot change directory into virtual folders. | **P0** |
 | **`statx`** | Modern Linux tools (systemd) fail to see virtual metadata. | **P2** |
 | **`getdents`** | Directory listing via raw syscalls (some Go binaries). | **P2** |
 | **`rename`** | Moves virtual folders out of the VFS domain. | **P0** |
