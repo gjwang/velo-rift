@@ -6,7 +6,7 @@ set -e
 echo "=== Test: openat/faccessat/fstatat Syscall Coverage ==="
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SHIM_LIB="${PROJECT_ROOT}/target/debug/libvelo_shim.dylib"
+SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 
 echo "[1] Checking shim for *at() syscall symbols..."
 

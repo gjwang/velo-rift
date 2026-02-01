@@ -9,9 +9,9 @@ echo "=== Test: dlopen Interception Requirement ==="
 echo ""
 
 # Check shim status
-SHIM_PATH="${VRIFT_SHIM_PATH:-../../../target/debug/libvelo_shim.dylib}"
+SHIM_PATH="${VRIFT_SHIM_PATH:-../../../target/debug/libvrift_shim.dylib}"
 if [[ ! -f "$SHIM_PATH" ]]; then
-    SHIM_PATH="$(dirname "$0")/../../target/debug/libvelo_shim.dylib"
+    SHIM_PATH="$(dirname "$0")/../../target/debug/libvrift_shim.dylib"
 fi
 
 echo "[1] Checking Shim for dlopen Implementation:"

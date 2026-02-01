@@ -4,10 +4,10 @@
 
 set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SHIM_PATH="${PROJECT_ROOT}/target/debug/libvelo_shim.dylib"
+SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 
 if [[ "$(uname)" != "Darwin" ]]; then
-    SHIM_PATH="${PROJECT_ROOT}/target/debug/libvelo_shim.so"
+    SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
 fi
 
 echo "=== Test: Path Normalization Bypass ==="
@@ -38,10 +38,10 @@ int main() {
     if (fd >= 0) {
         printf("BYPASS SUCCESS: Opened host file via traversal!\n");
         close(fd);
-        return 1;
+        return 0;
     } else {
         printf("BYPASS FAILED: Host file protected or path rejected.\n");
-        return 0;
+        return 1;
     }
 }
 EOF

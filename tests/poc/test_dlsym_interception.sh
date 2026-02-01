@@ -44,13 +44,13 @@ if ! gcc "$TEST_DIR/dlsym_test.c" -o "$TEST_DIR/dlsym_test" 2>/dev/null; then
 fi
 
 echo "[2] Running with shim..."
-if ! nm -gU target/debug/libvelo_shim.dylib | grep -q "dlsym_shim"; then
+if ! nm -gU target/debug/libvrift_shim.dylib | grep -q "dlsym_shim"; then
     echo "❌ FAIL: dlsym_shim symbol not found in dylib"
     exit 1
 fi
 
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvelo_shim.dylib
+export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvrift_shim.dylib
 
 OUTPUT=$("$TEST_DIR/dlsym_test" 2>&1)
 if echo "$OUTPUT" | grep -q "SYM_FOUND"; then

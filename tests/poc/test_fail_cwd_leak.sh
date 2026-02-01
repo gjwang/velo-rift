@@ -42,7 +42,7 @@ EOF
 gcc "$TEST_DIR/cwd_test.c" -o "$TEST_DIR/cwd_test"
 
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvelo_shim.dylib
+export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvrift_shim.dylib
 
 # chdir() might work if shim intercepts it (it does in some versions), 
 # but if getcwd() isn't intercepted, it returns the host path.

@@ -15,7 +15,12 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::cell::RefCell;
 use vrift_cas::CasStore;
+
+thread_local! {
+    static VIRTUAL_CWD: RefCell<Option<String>> = RefCell::new(None);
+}
 
 // ============================================================================
 // Platform Bridges & Interpose Section
@@ -61,6 +66,15 @@ extern "C" {
         argv: *const *const c_char,
         envp: *const *const c_char,
     ) -> c_int;
+    fn realpath(pathname: *const c_char, resolved_path: *mut c_char) -> *mut c_char;
+
+    #[link_name = "realpath$DARWIN_EXTSN"]
+    fn realpath_darwin(pathname: *const c_char, resolved_path: *mut c_char) -> *mut c_char;
+    fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char;
+    fn chdir(path: *const c_char) -> c_int;
+    fn unlink(path: *const c_char) -> c_int;
+    fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int;
+    fn rmdir(path: *const c_char) -> c_int;
     fn mmap(
         addr: *mut c_void,
         len: size_t,
@@ -137,6 +151,55 @@ static IT_READDIR: Interpose = Interpose {
 static IT_CLOSEDIR: Interpose = Interpose {
     new_func: closedir_shim as *const (),
     old_func: closedir as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_REALPATH: Interpose = Interpose {
+    new_func: realpath_shim as *const (),
+    old_func: realpath as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_REALPATH_DARWIN: Interpose = Interpose {
+    new_func: realpath_shim as *const (),
+    old_func: realpath_darwin as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_GETCWD: Interpose = Interpose {
+    new_func: getcwd_shim as *const (),
+    old_func: getcwd as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_CHDIR: Interpose = Interpose {
+    new_func: chdir_shim as *const (),
+    old_func: chdir as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_UNLINK: Interpose = Interpose {
+    new_func: unlink_shim as *const (),
+    old_func: unlink as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_RENAME: Interpose = Interpose {
+    new_func: rename_shim as *const (),
+    old_func: rename as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_RMDIR: Interpose = Interpose {
+    new_func: rmdir_shim as *const (),
+    old_func: rmdir as *const (),
 };
 #[cfg(target_os = "macos")]
 #[link_section = "__DATA,__interpose"]
@@ -354,12 +417,15 @@ struct OpenFile {
 }
 
 /// Synthetic directory for VFS opendir/readdir
-#[allow(dead_code)] // Will be used when readdir/closedir exports are added
+#[allow(dead_code)]
 struct SyntheticDir {
     vpath: String,
-    entries: Vec<vrift_ipc::DirEntry>,
+    entries: Vec<vrift_ipc::DirEntry>, // IPC fallback
+    mmap_children: Option<(*const vrift_ipc::MmapDirChild, usize)>, // mmap path: (start_ptr, count)
     position: usize,
 }
+unsafe impl Send for SyntheticDir {} // Raw pointers in open_dirs HashMap
+unsafe impl Sync for SyntheticDir {}
 
 // ============================================================================
 // RFC-0044 Hot Stat Cache: mmap-based O(1) Stat Lookup
@@ -369,14 +435,50 @@ struct SyntheticDir {
 /// Returns (ptr, size) or (null, 0) if unavailable.
 /// Uses raw libc to avoid recursion through shim.
 fn open_manifest_mmap() -> (*const u8, usize) {
-    // Use raw libc to avoid triggering shim recursion
-    let path = c"/tmp/vrift-manifest.mmap";
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
+    // Check if mmap is explicitly disabled
+    unsafe {
+        let env_key = c"VRIFT_DISABLE_MMAP";
+        let env_val = libc::getenv(env_key.as_ptr());
+        if !env_val.is_null() {
+            let val = CStr::from_ptr(env_val).to_str().unwrap_or("0");
+            if val == "1" || val == "true" {
+                return (ptr::null(), 0);
+            }
+        }
+    }
+
+    // Get VRIFT_MANIFEST to derive project root and hash
+    let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
+    if manifest_ptr.is_null() {
+        return (ptr::null(), 0);
+    }
+    let manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
+    
+    // Project root is the parent of manifest file
+    let path = Path::new(manifest_path.as_ref());
+    let project_root = match path.parent() {
+        Some(p) => p,
+        None => return (ptr::null(), 0),
+    };
+
+    // If it's in .vrift/manifest.lmdb, go up one more
+    let project_root = if project_root.ends_with(".vrift") {
+        project_root.parent().unwrap_or(project_root)
+    } else {
+        project_root
+    };
+
+    let root_str = project_root.to_string_lossy();
+    let root_hash = blake3::hash(root_str.as_bytes());
+    let mmap_path_str = format!("/tmp/vrift-manifest-{}.mmap", &root_hash.to_hex()[..16]);
+    let mmap_path = CString::new(mmap_path_str).unwrap_or_default();
+
+    let fd = unsafe { libc::open(mmap_path.as_ptr(), libc::O_RDONLY) };
     if fd < 0 {
         return (ptr::null(), 0);
     }
 
-    // Get file size via fstat (using raw syscall)
+    // Get file size via fstat
     let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut stat_buf) } != 0 {
         unsafe { libc::close(fd) };
@@ -468,6 +570,50 @@ fn mmap_lookup(
     None // Table full, not found
 }
 
+/// O(1) readdir lookup in mmap'd manifest
+fn mmap_dir_lookup(
+    mmap_ptr: *const u8,
+    mmap_size: usize,
+    path: &str,
+) -> Option<(*const vrift_ipc::MmapDirChild, usize)> {
+    if mmap_ptr.is_null() || mmap_size < vrift_ipc::ManifestMmapHeader::SIZE {
+        return None;
+    }
+
+    let header = unsafe { &*(mmap_ptr as *const vrift_ipc::ManifestMmapHeader) };
+    if !header.is_valid() {
+        return None;
+    }
+
+    // Directory index lookup with linear probing
+    let parent_hash = vrift_ipc::fnv1a_hash(path);
+    let dir_index_offset = header.dir_index_offset as usize;
+    let dir_index_capacity = header.dir_index_capacity as usize;
+    let dir_index_ptr = unsafe { mmap_ptr.add(dir_index_offset) as *const vrift_ipc::MmapDirIndexEntry };
+
+    let start_slot = (parent_hash as usize) % dir_index_capacity;
+    for i in 0..dir_index_capacity {
+        let slot = (start_slot + i) % dir_index_capacity;
+        let entry = unsafe { &*dir_index_ptr.add(slot) };
+
+        if entry.parent_hash == 0 && entry.children_count == 0 {
+            return None; // Empty slot
+        }
+
+        if entry.parent_hash == parent_hash {
+            // Found parent directory!
+            let children_offset = header.children_offset as usize;
+            let children_start_ptr = unsafe {
+                (mmap_ptr.add(children_offset) as *const vrift_ipc::MmapDirChild)
+                    .add(entry.children_start as usize)
+            };
+            return Some((children_start_ptr, entry.children_count as usize));
+        }
+    }
+
+    None
+}
+
 struct ShimState {
     cas: std::sync::Mutex<Option<CasStore>>, // Lazy init to avoid fs calls during dylib load
     cas_root: std::borrow::Cow<'static, str>,
@@ -480,6 +626,8 @@ struct ShimState {
     /// RFC-0044 Hot Stat Cache: mmap'd manifest for O(1) stat lookup
     mmap_ptr: *const u8,
     mmap_size: usize,
+    /// Absolute path to project root
+    project_root: String,
 }
 
 impl ShimState {
@@ -487,7 +635,10 @@ impl ShimState {
         // CRITICAL: Must not allocate during early dyld init (malloc may not be ready)
         // Use Cow::Borrowed for static defaults to avoid heap allocation
 
-        let cas_ptr = unsafe { libc::getenv(c"VR_THE_SOURCE".as_ptr()) };
+        if !unsafe { libc::getenv(c"VRIFT_DEBUG".as_ptr()) }.is_null() {
+            DEBUG_ENABLED.store(true, Ordering::Relaxed);
+        }
+        let cas_ptr = unsafe { libc::getenv(c"VRIFT_CAS_ROOT".as_ptr()) };
         let cas_root: std::borrow::Cow<'static, str> = if cas_ptr.is_null() {
             std::borrow::Cow::Borrowed("/tmp/vrift/the_source")
         } else {
@@ -519,7 +670,25 @@ impl ShimState {
 
         // RFC-0044 Hot Stat Cache: Try to open mmap'd manifest file
         // If not available, we fall back to IPC (no error, just slower)
+        // RFC-0044 Hot Stat Cache: Try to open mmap'd manifest file
+        // If not available, we fall back to IPC (no error, just slower)
         let (mmap_ptr, mmap_size) = open_manifest_mmap();
+
+        // Derive project root from VRIFT_MANIFEST
+        let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
+        let project_root: String = if !manifest_ptr.is_null() {
+            let manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
+            let path = Path::new(manifest_path.as_ref());
+            let parent = path.parent().unwrap_or_else(|| Path::new("/"));
+            let root = if parent.ends_with(".vrift") {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            root.to_string_lossy().into_owned()
+        } else {
+            String::new()
+        };
 
         let state = Box::new(ShimState {
             cas: std::sync::Mutex::new(None),
@@ -531,6 +700,7 @@ impl ShimState {
             bloom_ptr,
             mmap_ptr,
             mmap_size,
+            project_root,
         });
 
         Some(Box::into_raw(state))
@@ -592,18 +762,26 @@ impl ShimState {
     /// Returns true if path should be considered for Hot Stat acceleration
     #[inline(always)]
     fn psfs_applicable(&self, path: &str) -> bool {
-        // RFC-0044: Physical domain membership check
-        // No alloc, no lock, no syscall - pure string comparison
-        path.starts_with(&*self.vfs_prefix)
+        // RFC-0043: Robust normalization and CWD resolution
+        let mut buf = [0u8; 1024];
+        if let Some(len) = unsafe { resolve_path_with_cwd(path, &mut buf) } {
+            let normalized = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+            normalized.starts_with(&*self.vfs_prefix)
+        } else {
+            // Fallback for extremely long paths
+            path.starts_with(&*self.vfs_prefix)
+        }
     }
 
     /// Attempt O(1) stat lookup from manifest cache
-    /// Uses Bloom filter for fast negative checks, then daemon IPC for positive hits
-    /// Returns None if path not found (caller should fall back to real_stat)
     fn psfs_lookup(&self, path: &str) -> Option<vrift_manifest::VnodeEntry> {
-        // Bloom filter provides O(1) rejection for paths not in manifest
-        // Daemon IPC provides O(1) LMDB lookup for paths in manifest
-        self.query_manifest(path)
+        let mut buf = [0u8; 1024];
+        if let Some(len) = unsafe { resolve_path_with_cwd(path, &mut buf) } {
+            let normalized = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+            self.query_manifest(normalized)
+        } else {
+            self.query_manifest(path)
+        }
     }
 
     fn query_manifest(&self, path: &str) -> Option<vrift_manifest::VnodeEntry> {
@@ -623,53 +801,58 @@ impl ShimState {
 
         use vrift_ipc::{VeloRequest, VeloResponse};
 
-        // Use raw libc syscalls to avoid recursion through shim
-        let fd = unsafe { raw_unix_connect(&self.socket_path) };
+        let fd = unsafe { self.raw_connect_and_register() };
         if fd < 0 {
             return None;
         }
 
-        let req = VeloRequest::ManifestGet {
-            path: path.to_string(),
+        let vpath = if path.starts_with(&*self.vfs_prefix) {
+            &path[self.vfs_prefix.len()..]
+        } else {
+            path
         };
-        let buf = bincode::serialize(&req).ok()?;
-        let len = (buf.len() as u32).to_le_bytes();
+        // Normalize: remove leading slash if any
+        let vpath = vpath.trim_start_matches('/');
 
-        if !unsafe { raw_write_all(fd, &len) } || !unsafe { raw_write_all(fd, &buf) } {
-            unsafe { libc::close(fd) };
-            return None;
-        }
+        let ok = (|| -> Option<vrift_manifest::VnodeEntry> {
+            // 3. Manifest Get
+            let req = VeloRequest::ManifestGet {
+                path: vpath.to_string(),
+            };
+            let buf = bincode::serialize(&req).ok()?;
+            let len = (buf.len() as u32).to_le_bytes();
+            if !unsafe { raw_write_all(fd, &len) } || !unsafe { raw_write_all(fd, &buf) } {
+                return None;
+            }
 
-        let mut resp_len_buf = [0u8; 4];
-        if !unsafe { raw_read_exact(fd, &mut resp_len_buf) } {
-            unsafe { libc::close(fd) };
-            return None;
-        }
-        let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
-        // Limit response size to prevent OOM
-        if resp_len > 16 * 1024 * 1024 {
-            unsafe { libc::close(fd) };
-            return None;
-        }
-        let mut resp_buf = vec![0u8; resp_len];
-        if !unsafe { raw_read_exact(fd, &mut resp_buf) } {
-            unsafe { libc::close(fd) };
-            return None;
-        }
+            let mut resp_len_buf = [0u8; 4];
+            if !unsafe { raw_read_exact(fd, &mut resp_len_buf) } {
+                return None;
+            }
+            let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
+            if resp_len > 16 * 1024 * 1024 {
+                return None;
+            }
+            let mut resp_buf = vec![0u8; resp_len];
+            if !unsafe { raw_read_exact(fd, &mut resp_buf) } {
+                return None;
+            }
+
+            match bincode::deserialize::<VeloResponse>(&resp_buf).ok()? {
+                VeloResponse::ManifestAck { entry } => entry,
+                _ => None,
+            }
+        })();
+
         unsafe { libc::close(fd) };
-
-        match bincode::deserialize::<VeloResponse>(&resp_buf).ok()? {
-            VeloResponse::ManifestAck { entry } => entry,
-            _ => None,
-        }
+        ok
     }
 
     #[allow(dead_code)] // Will be called from close_impl when async re-ingest is implemented
     fn upsert_manifest(&self, path: &str, entry: vrift_manifest::VnodeEntry) -> bool {
         use vrift_ipc::VeloRequest;
 
-        // Use raw libc syscalls to avoid recursion through shim
-        let fd = unsafe { raw_unix_connect(&self.socket_path) };
+        let fd = unsafe { self.raw_connect_and_register() };
         if fd < 0 {
             return false;
         }
@@ -695,14 +878,20 @@ impl ShimState {
     fn query_dir_listing(&self, path: &str) -> Option<Vec<vrift_ipc::DirEntry>> {
         use vrift_ipc::{VeloRequest, VeloResponse};
 
-        // Use raw libc syscalls to avoid recursion through shim
-        let fd = unsafe { raw_unix_connect(&self.socket_path) };
+        let fd = unsafe { self.raw_connect_and_register() };
         if fd < 0 {
             return None;
         }
 
+        let vpath = if path.starts_with(&*self.vfs_prefix) {
+            &path[self.vfs_prefix.len()..]
+        } else {
+            path
+        };
+        let vpath = vpath.trim_start_matches('/');
+
         let req = VeloRequest::ManifestListDir {
-            path: path.to_string(),
+            path: vpath.to_string(),
         };
         let buf = bincode::serialize(&req).ok()?;
         let len = (buf.len() as u32).to_le_bytes();
@@ -734,6 +923,75 @@ impl ShimState {
             _ => None,
         }
     }
+
+    /// Internal helper: connect, handshake, and register workspace.
+    /// Returns fd or -1 on error.
+    unsafe fn raw_connect_and_register(&self) -> c_int {
+        use vrift_ipc::VeloRequest;
+
+        let fd = raw_unix_connect(&self.socket_path);
+        if fd < 0 {
+            return -1;
+        }
+
+        // 1. Handshake
+        let handshake = VeloRequest::Handshake {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let buf = if let Ok(b) = bincode::serialize(&handshake) {
+            b
+        } else {
+            libc::close(fd);
+            return -1;
+        };
+        let len = (buf.len() as u32).to_le_bytes();
+        if !raw_write_all(fd, &len) || !raw_write_all(fd, &buf) {
+            libc::close(fd);
+            return -1;
+        }
+        // Read handshake ack
+        let mut h_len_buf = [0u8; 4];
+        if !raw_read_exact(fd, &mut h_len_buf) {
+            libc::close(fd);
+            return -1;
+        }
+        let h_len = u32::from_le_bytes(h_len_buf) as usize;
+        let mut h_buf = vec![0u8; h_len]; // Allocation is okay in fallback path
+        if !raw_read_exact(fd, &mut h_buf) {
+            libc::close(fd);
+            return -1;
+        }
+
+        // 2. Register Workspace
+        let register = VeloRequest::RegisterWorkspace {
+            project_root: self.project_root.clone(),
+        };
+        let buf = if let Ok(b) = bincode::serialize(&register) {
+            b
+        } else {
+            libc::close(fd);
+            return -1;
+        };
+        let len = (buf.len() as u32).to_le_bytes();
+        if !raw_write_all(fd, &len) || !raw_write_all(fd, &buf) {
+            libc::close(fd);
+            return -1;
+        }
+        // Read register ack
+        let mut r_len_buf = [0u8; 4];
+        if !raw_read_exact(fd, &mut r_len_buf) {
+            libc::close(fd);
+            return -1;
+        }
+        let r_len = u32::from_le_bytes(r_len_buf) as usize;
+        let mut r_buf = vec![0u8; r_len];
+        if !raw_read_exact(fd, &mut r_buf) {
+            libc::close(fd);
+            return -1;
+        }
+
+        fd
+    }
 }
 
 /// Raw Unix socket connect using libc syscalls (avoids recursion through shim)
@@ -742,6 +1000,8 @@ unsafe fn raw_unix_connect(path: &str) -> c_int {
     if fd < 0 {
         return -1;
     }
+    // RFC-0043: Prevent FD leakage to child processes
+    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
 
     let mut addr: libc::sockaddr_un = std::mem::zeroed();
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
@@ -803,6 +1063,115 @@ unsafe fn raw_read_exact(fd: c_int, buf: &mut [u8]) -> bool {
 // ============================================================================
 // Utility Functions
 // ============================================================================
+
+/// Robust path normalization without heap allocation.
+/// Handles "..", ".", and duplicate slashes.
+/// Returns the length of the normalized path in `out`.
+unsafe fn raw_path_normalize(path: &str, out: &mut [u8]) -> Option<usize> {
+    if path.is_empty() || out.is_empty() {
+        return None;
+    }
+
+    let bytes = path.as_bytes();
+    let mut out_idx = 0;
+
+    // Always start with / if input is absolute
+    if bytes[0] == b'/' {
+        out[out_idx] = b'/';
+        out_idx += 1;
+    }
+
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip multiple slashes
+        while i < bytes.len() && bytes[i] == b'/' {
+            i += 1;
+        }
+        if i == bytes.len() {
+            break;
+        }
+
+        // Find component end
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'/' {
+            i += 1;
+        }
+        let component = &bytes[start..i];
+
+        if component == b"." {
+            continue;
+        } else if component == b".." {
+            if out_idx > 1 {
+                // Backtrack to previous slash
+                out_idx -= 1;
+                while out_idx > 1 && out[out_idx - 1] != b'/' {
+                    out_idx -= 1;
+                }
+            }
+        } else {
+            // Add slash if not at root and last char isn't slash
+            if out_idx > 0 && out[out_idx - 1] != b'/' {
+                if out_idx < out.len() {
+                    out[out_idx] = b'/';
+                    out_idx += 1;
+                } else {
+                    return None;
+                }
+            }
+            // Add component
+            if out_idx + component.len() <= out.len() {
+                ptr::copy_nonoverlapping(
+                    component.as_ptr(),
+                    out.as_mut_ptr().add(out_idx),
+                    component.len(),
+                );
+                out_idx += component.len();
+            } else {
+                return None;
+            }
+        }
+    }
+
+    if out_idx == 0 {
+        if bytes[0] == b'/' {
+            out[0] = b'/';
+        } else {
+            out[0] = b'.';
+        }
+        out_idx = 1;
+    }
+
+    Some(out_idx)
+}
+
+/// Resolve a path, potentially relative to VIRTUAL_CWD.
+unsafe fn resolve_path_with_cwd(path: &str, out: &mut [u8]) -> Option<usize> {
+    if path.starts_with('/') {
+        return raw_path_normalize(path, out);
+    }
+
+    if let Some(vpath) = VIRTUAL_CWD.with(|cwd| cwd.borrow().clone()) {
+        let mut tmp = [b'/'; 1024];
+        let vbytes = vpath.as_bytes();
+        if vbytes.len() < tmp.len() {
+            ptr::copy_nonoverlapping(vbytes.as_ptr(), tmp.as_mut_ptr(), vbytes.len());
+            let mut idx = vbytes.len();
+            if idx > 0 && tmp[idx - 1] != b'/' && idx < tmp.len() {
+                tmp[idx] = b'/';
+                idx += 1;
+            }
+            let pbytes = path.as_bytes();
+            if idx + pbytes.len() < tmp.len() {
+                ptr::copy_nonoverlapping(pbytes.as_ptr(), tmp.as_mut_ptr().add(idx), pbytes.len());
+                let full = std::str::from_utf8_unchecked(&tmp[..idx + pbytes.len()]);
+                return raw_path_normalize(full, out);
+            }
+        }
+    }
+
+    raw_path_normalize(path, out)
+}
+
 
 unsafe fn shim_log(msg: &str) {
     LOGGER.log(msg);
@@ -1072,11 +1441,18 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t, real_open: 
         }
     };
 
+    let mut path_buf = [0u8; 1024];
+    let resolved_len = match resolve_path_with_cwd(path_str, &mut path_buf) {
+        Some(len) => len,
+        None => return real_open(path, flags, mode),
+    };
+    let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..resolved_len]) };
+
     let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC)) != 0;
 
-    if path_str.starts_with(&*state.vfs_prefix) {
+    if resolved_path.starts_with(&*state.vfs_prefix) {
         // Query with full path since manifest stores full paths (e.g., /vrift/testfile.txt)
-        if let Some(entry) = state.query_manifest(path_str) {
+        if let Some(entry) = state.query_manifest(resolved_path) {
             if entry.is_dir() {
                 set_errno(libc::EISDIR);
                 return -1;
@@ -1197,8 +1573,15 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
         return real_stat(path, buf);
     };
 
+    let mut path_buf = [0u8; 1024];
+    let resolved_len = match resolve_path_with_cwd(path_str, &mut path_buf) {
+        Some(len) => len,
+        None => return real_stat(path, buf),
+    };
+    let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..resolved_len]) };
+
     // RFC-0044 PSFS: VFS prefix root (special case)
-    if path_str == state.vfs_prefix {
+    if resolved_path == state.vfs_prefix {
         ptr::write_bytes(buf, 0, 1);
         (*buf).st_mode = libc::S_IFDIR | 0o755;
         (*buf).st_nlink = 2;
@@ -1208,9 +1591,15 @@ unsafe fn stat_common(path: *const c_char, buf: *mut libc::stat, real_stat: Stat
     }
 
     // RFC-0044 PSFS: Hot Stat path - check VFS domain membership first
-    if state.psfs_applicable(path_str) {
+    if resolved_path.starts_with(&*state.vfs_prefix) {
         // ★ RFC-0044 Hot Stat Cache: O(1) mmap lookup (NO IPC, NO ALLOC)
-        if let Some(mmap_entry) = mmap_lookup(state.mmap_ptr, state.mmap_size, path_str) {
+        let manifest_path = if resolved_path.len() > state.vfs_prefix.len() {
+            &resolved_path[state.vfs_prefix.len()..].trim_start_matches('/')
+        } else {
+            ""
+        };
+
+        if let Some(mmap_entry) = mmap_lookup(state.mmap_ptr, state.mmap_size, manifest_path) {
             ptr::write_bytes(buf, 0, 1);
             (*buf).st_size = mmap_entry.size as libc::off_t;
             (*buf).st_mtime = mmap_entry.mtime as libc::time_t;
@@ -1420,8 +1809,15 @@ unsafe fn access_impl(path: *const c_char, mode: c_int, real_access: AccessFn) -
     real_access(path, mode)
 }
 
+
 type OpendirFn = unsafe extern "C" fn(*const c_char) -> *mut libc::DIR;
 type ReadlinkFn = unsafe extern "C" fn(*const c_char, *mut c_char, size_t) -> ssize_t;
+type RealpathFn = unsafe extern "C" fn(*const c_char, *mut c_char) -> *mut c_char;
+type GetcwdFn = unsafe extern "C" fn(*mut c_char, size_t) -> *mut c_char;
+type ChdirFn = unsafe extern "C" fn(*const c_char) -> c_int;
+type UnlinkFn = unsafe extern "C" fn(*const c_char) -> c_int;
+type RenameFn = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
+type RmdirFn = unsafe extern "C" fn(*const c_char) -> c_int;
 #[allow(dead_code)] // Will be exported when full readdir support is added
 type ReaddirFn = unsafe extern "C" fn(*mut libc::DIR) -> *mut libc::dirent;
 #[allow(dead_code)]
@@ -1458,24 +1854,54 @@ unsafe fn opendir_impl(path: *const c_char, real_opendir: OpendirFn) -> *mut lib
 
     // Check if this is a VFS path
     if path_str.starts_with(&*state.vfs_prefix) {
+        // Normalize path: remove trailing slash except if it's just "/"
+        let lookup_path = if path_str.len() > 1 {
+            path_str.trim_end_matches('/')
+        } else {
+            path_str
+        };
+        
         let vpath = &path_str[state.vfs_prefix.len()..];
 
-        // Query daemon for directory entries
-        if let Some(entries) = state.query_dir_listing(vpath) {
+        // 1. Try mmap lookup first (Zero-Copy)
+        if let Some((children_ptr, count)) = mmap_dir_lookup(state.mmap_ptr, state.mmap_size, lookup_path) {
+            shim_log("[VRift] opendir mmap: ");
+            shim_log(lookup_path);
+            shim_log("\n");
+            
+            let handle = SYNTHETIC_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let synthetic = SyntheticDir {
+                vpath: vpath.to_string(),
+                entries: Vec::new(),
+                mmap_children: Some((children_ptr, count)),
+                position: 0,
+            };
+            let mut dirs = state.open_dirs.lock().unwrap();
+            dirs.insert(handle, synthetic);
+            return handle as *mut libc::DIR;
+        }
+
+        // 2. Fallback: Query daemon for directory entries (IPC)
+        if let Some(entries) = state.query_dir_listing(lookup_path) {
+            shim_log("[VRift] opendir IPC fallback: ");
+            shim_log(lookup_path);
+            shim_log("\n");
+
             // Create synthetic DIR handle
             let handle = SYNTHETIC_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             let synthetic = SyntheticDir {
                 vpath: vpath.to_string(),
                 entries,
+                mmap_children: None,
                 position: 0,
             };
 
             let mut dirs = state.open_dirs.lock().unwrap();
             dirs.insert(handle, synthetic);
 
-            shim_log("[VRift-Shim] opendir VFS: ");
-            shim_log(vpath);
+            shim_log("[VRift-Shim] opendir VFS (IPC): ");
+            shim_log(lookup_path);
             shim_log("\n");
 
             // Return synthetic DIR* (cast handle as pointer)
@@ -1507,6 +1933,39 @@ unsafe fn readdir_impl(dir: *mut libc::DIR, real_readdir: ReaddirFn) -> *mut lib
     // Check if this is a synthetic directory
     let mut dirs = state.open_dirs.lock().unwrap();
     if let Some(synthetic) = dirs.get_mut(&handle) {
+        // Case A: mmap-backed children (Zero-Copy)
+        if let Some((children_ptr, count)) = synthetic.mmap_children {
+            if synthetic.position >= count {
+                return ptr::null_mut();
+            }
+
+            let child = unsafe { &*children_ptr.add(synthetic.position) };
+            synthetic.position += 1;
+
+            // Fill in the static dirent
+            ptr::write_bytes(&mut SYNTHETIC_DIRENT, 0, 1);
+            SYNTHETIC_DIRENT.d_ino = (handle + synthetic.position) as libc::ino_t;
+            SYNTHETIC_DIRENT.d_type = if child.is_dir != 0 {
+                libc::DT_DIR
+            } else {
+                libc::DT_REG
+            };
+
+            // Copy name using name_as_str helper
+            let name = child.name_as_str();
+            let name_bytes = name.as_bytes();
+            let copy_len = std::cmp::min(name_bytes.len(), SYNTHETIC_DIRENT.d_name.len() - 1);
+            ptr::copy_nonoverlapping(
+                name_bytes.as_ptr(),
+                SYNTHETIC_DIRENT.d_name.as_mut_ptr() as *mut u8,
+                copy_len,
+            );
+            SYNTHETIC_DIRENT.d_name[copy_len] = 0;
+
+            return &mut SYNTHETIC_DIRENT;
+        }
+
+        // Case B: IPC-backed entries (Fallback)
         if synthetic.position >= synthetic.entries.len() {
             // No more entries
             return ptr::null_mut();
@@ -1886,8 +2345,15 @@ pub unsafe extern "C" fn dlopen_shim(filename: *const c_char, flags: c_int) -> *
         return real(filename, flags);
     };
 
-    if state.psfs_applicable(path_str) {
-        if let Some(entry) = state.psfs_lookup(path_str) {
+    let mut path_buf = [0u8; 1024];
+    let resolved_len = match resolve_path_with_cwd(path_str, &mut path_buf) {
+        Some(len) => len,
+        None => return real(filename, flags),
+    };
+    let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..resolved_len]) };
+
+    if state.psfs_applicable(resolved_path) {
+        if let Some(entry) = state.psfs_lookup(resolved_path) {
             // Get content from CAS and write to temp file
             if let Ok(cas_guard) = state.cas.lock() {
                 if let Some(ref cas) = *cas_guard {
@@ -2003,20 +2469,216 @@ pub unsafe extern "C" fn fstatat_shim(
     real(dirfd, pathname, buf, flags)
 }
 
-// Constructor
-#[used]
-#[cfg_attr(target_os = "linux", link_section = ".init_array")]
-#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
-static INIT: unsafe extern "C" fn() = {
-    unsafe extern "C" fn init() {
-        if !libc::getenv(c"VRIFT_DEBUG".as_ptr()).is_null() {
-            DEBUG_ENABLED.store(true, Ordering::Relaxed);
+#[no_mangle]
+pub unsafe extern "C" fn realpath_shim(
+    pathname: *const c_char,
+    resolved_path: *mut c_char,
+) -> *mut c_char {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = std::mem::transmute::<*const (), RealpathFn>(IT_REALPATH.old_func);
+            return real(pathname, resolved_path);
         }
-        libc::atexit(dump_logs_atexit);
-        shim_log("[VRift-Shim] Initialized\n");
+    };
+
+    if pathname.is_null() {
+        return ptr::null_mut();
     }
-    init
-};
+
+    let path = CStr::from_ptr(pathname).to_string_lossy();
+    if let Some(state) = ShimState::get() {
+        if state.psfs_applicable(&path) {
+            let mut buf = [0u8; 1024];
+            if let Some(len) = resolve_path_with_cwd(&path, &mut buf) {
+                let result = if resolved_path.is_null() {
+                    libc::malloc(len + 1) as *mut c_char
+                } else {
+                    resolved_path
+                };
+                if !result.is_null() {
+                    ptr::copy_nonoverlapping(buf.as_ptr(), result as *mut u8, len);
+                    *result.add(len) = 0;
+                    return result;
+                }
+            }
+        }
+    }
+
+    let real = std::mem::transmute::<*const (), RealpathFn>(IT_REALPATH.old_func);
+    real(pathname, resolved_path)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn getcwd_shim(buf: *mut c_char, size: size_t) -> *mut c_char {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = std::mem::transmute::<*const (), GetcwdFn>(IT_GETCWD.old_func);
+            return real(buf, size);
+        }
+    };
+
+    if let Some(vpath) = VIRTUAL_CWD.with(|cwd| cwd.borrow().clone()) {
+        let vbytes = vpath.as_bytes();
+        if size != 0 && size < vbytes.len() + 1 {
+            set_errno(libc::ERANGE);
+            return ptr::null_mut();
+        }
+        let result = if buf.is_null() {
+            libc::malloc(vbytes.len() + 1) as *mut c_char
+        } else {
+            buf
+        };
+        if !result.is_null() {
+            ptr::copy_nonoverlapping(vbytes.as_ptr(), result as *mut u8, vbytes.len());
+            *result.add(vbytes.len()) = 0;
+            return result;
+        }
+    }
+
+    let real = std::mem::transmute::<*const (), GetcwdFn>(IT_GETCWD.old_func);
+    real(buf, size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chdir_shim(path: *const c_char) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = std::mem::transmute::<*const (), ChdirFn>(IT_CHDIR.old_func);
+            return real(path);
+        }
+    };
+
+    if path.is_null() {
+        set_errno(libc::EFAULT);
+        return -1;
+    }
+
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    if let Some(state) = ShimState::get() {
+        let mut path_buf = [0u8; 1024];
+        if let Some(len) = resolve_path_with_cwd(&path_str, &mut path_buf) {
+            let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..len]) };
+            
+            // RFC-0043: Robust virtualization support
+            if resolved_path.starts_with(&*state.vfs_prefix) {
+                // Check if it exists and is a directory in manifest
+                if let Some(entry) = state.psfs_lookup(resolved_path) {
+                    if (entry.mode as u32 & libc::S_IFMT as u32) == libc::S_IFDIR as u32 {
+                        VIRTUAL_CWD.with(|cwd| {
+                            *cwd.borrow_mut() = Some(resolved_path.to_string());
+                        });
+                        return 0;
+                    } else {
+                        set_errno(libc::ENOTDIR);
+                        return -1;
+                    }
+                } else {
+                    set_errno(libc::ENOENT);
+                    return -1;
+                }
+            } else {
+                // Moving out of virtual domain - clear virtual CWD
+                VIRTUAL_CWD.with(|cwd| *cwd.borrow_mut() = None);
+            }
+        }
+    }
+
+    let real = std::mem::transmute::<*const (), ChdirFn>(IT_CHDIR.old_func);
+    real(path)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn unlink_shim(path: *const c_char) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = std::mem::transmute::<*const (), UnlinkFn>(IT_UNLINK.old_func);
+            return real(path);
+        }
+    };
+
+    if let Some(state) = ShimState::get() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        let mut path_buf = [0u8; 1024];
+        if let Some(len) = resolve_path_with_cwd(&path_str, &mut path_buf) {
+            let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..len]) };
+            if resolved_path.starts_with(&*state.vfs_prefix) {
+                set_errno(libc::EROFS);
+                return -1;
+            }
+        }
+    }
+
+    let real = std::mem::transmute::<*const (), UnlinkFn>(IT_UNLINK.old_func);
+    real(path)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rename_shim(oldpath: *const c_char, newpath: *const c_char) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = std::mem::transmute::<*const (), RenameFn>(IT_RENAME.old_func);
+            return real(oldpath, newpath);
+        }
+    };
+
+    if let Some(state) = ShimState::get() {
+        let old_str = CStr::from_ptr(oldpath).to_string_lossy();
+        let new_str = CStr::from_ptr(newpath).to_string_lossy();
+        let mut buf_old = [0u8; 1024];
+        let mut buf_new = [0u8; 1024];
+        
+        let old_res = resolve_path_with_cwd(&old_str, &mut buf_old);
+        let new_res = resolve_path_with_cwd(&new_str, &mut buf_new);
+        
+        let old_is_vfs = old_res.map_or(false, |len| {
+            let p = unsafe { std::str::from_utf8_unchecked(&buf_old[..len]) };
+            p.starts_with(&*state.vfs_prefix)
+        });
+        let new_is_vfs = new_res.map_or(false, |len| {
+            let p = unsafe { std::str::from_utf8_unchecked(&buf_new[..len]) };
+            p.starts_with(&*state.vfs_prefix)
+        });
+
+        if old_is_vfs || new_is_vfs {
+            set_errno(libc::EROFS);
+            return -1;
+        }
+    }
+
+    let real = std::mem::transmute::<*const (), RenameFn>(IT_RENAME.old_func);
+    real(oldpath, newpath)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = std::mem::transmute::<*const (), RmdirFn>(IT_RMDIR.old_func);
+            return real(path);
+        }
+    };
+
+    if let Some(state) = ShimState::get() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        let mut path_buf = [0u8; 1024];
+        if let Some(len) = resolve_path_with_cwd(&path_str, &mut path_buf) {
+            let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..len]) };
+            if resolved_path.starts_with(&*state.vfs_prefix) {
+                set_errno(libc::EROFS);
+                return -1;
+            }
+        }
+    }
+
+    let real = std::mem::transmute::<*const (), RmdirFn>(IT_RMDIR.old_func);
+    real(path)
+}
 
 extern "C" fn dump_logs_atexit() {
     LOGGER.dump_to_file();

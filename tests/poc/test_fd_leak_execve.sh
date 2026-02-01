@@ -4,10 +4,10 @@
 
 set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SHIM_PATH="${PROJECT_ROOT}/target/debug/libvelo_shim.dylib"
+SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 
 if [[ "$(uname)" != "Darwin" ]]; then
-    SHIM_PATH="${PROJECT_ROOT}/target/debug/libvelo_shim.so"
+    SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
 fi
 
 echo "=== Test: Internal Socket FD Leakage ==="

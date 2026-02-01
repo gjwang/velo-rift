@@ -28,7 +28,7 @@ export VRIFT_MANIFEST="$MANIFEST"
 export VR_THE_SOURCE="$CAS_ROOT"
 export VRIFT_VFS_PREFIX="/store" # The prefix we used during ingest
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES="$(pwd)/target/debug/libvelo_shim.dylib"
+export DYLD_INSERT_LIBRARIES="$(pwd)/target/debug/libvrift_shim.dylib"
 
 # Attempt to read through the SYMLINK which points to a PROJECTED path
 # Note: Since the shim only intercepts 'open', it should work IF the OS

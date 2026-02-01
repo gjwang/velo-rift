@@ -7,7 +7,7 @@ set -e
 echo "=== Test: read Syscall ==="
 echo ""
 
-SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvelo_shim.dylib}"
+SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvrift_shim.dylib}"
 
 echo "[1] Checking Shim for read Implementation:"
 if [[ -f "$SHIM_PATH" ]]; then

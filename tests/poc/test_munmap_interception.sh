@@ -46,13 +46,13 @@ fi
 
 echo "[2] Running with shim..."
 # We use nm to verify the symbol exists in the shim first
-if ! nm -gU target/debug/libvelo_shim.dylib | grep -q "munmap_shim"; then
+if ! nm -gU target/debug/libvrift_shim.dylib | grep -q "munmap_shim"; then
     echo "❌ FAIL: munmap_shim symbol not found in dylib"
     exit 1
 fi
 
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvelo_shim.dylib
+export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvrift_shim.dylib
 export VRIFT_DEBUG=1
 
 OUTPUT=$("$TEST_DIR/munmap_test" 2>&1)

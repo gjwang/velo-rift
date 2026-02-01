@@ -71,7 +71,7 @@ sleep 2
 
 echo "[STEP 3] Execute Python script via VFS..."
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvelo_shim.dylib"
+export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 export VRIFT_DEBUG=1
 
 # Run Python in background with timeout

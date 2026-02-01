@@ -47,6 +47,7 @@ pub use zero_copy_ingest::{
     ingest_solid_tier2_dedup, IngestResult,
 };
 
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -407,11 +408,99 @@ impl CasStore {
         })
     }
 
-    /// Get the filesystem path to a blob (for external mmap or direct access).
+    /// Perform a Garbage Collection sweep using a Bloom Filter of active hashes.
+    ///
+    /// Returns (deleted_count, reclaimed_bytes).
+    pub fn sweep(&self, bloom_bits: &[u8]) -> Result<(u32, u64)> {
+        let bloom = BloomFilter {
+            bits: bloom_bits.to_vec(),
+        };
+
+        let mut deleted_count = 0;
+        let mut reclaimed_bytes = 0;
+
+        for hash_res in self.iter()? {
+            let hash = hash_res?;
+            
+            // Convert Blake3Hash ([u8; 32]) to hex string for bloom lookup
+            let hex = Self::hash_to_hex(&hash);
+            
+            if !bloom.contains(&hex) {
+                // Potential orphan (not in Bloom Filter)
+                if let Some(path) = self.find_blob_path(&hash) {
+                    if let Ok(meta) = fs::metadata(&path) {
+                        let size = meta.len();
+                        // Delete the blob (handles immutable flags internally)
+                        if self.delete(&hash).is_ok() {
+                            deleted_count += 1;
+                            reclaimed_bytes += size;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((deleted_count, reclaimed_bytes))
+    }
+
     pub fn blob_path_for_hash(&self, hash: &Blake3Hash) -> Option<PathBuf> {
         self.find_blob_path(hash)
     }
+}
 
+// ============================================================================
+// Bloom Filter (RFC-0041 / RFC-0044)
+// ============================================================================
+
+pub const BLOOM_SIZE: usize = 128 * 1024;
+
+/// Simple Bloom Filter for fast existence checks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BloomFilter {
+    pub bits: Vec<u8>,
+}
+
+impl BloomFilter {
+    pub fn new(size: usize) -> Self {
+        Self {
+            bits: vec![0u8; size],
+        }
+    }
+
+    /// Add a string to the bloom filter
+    pub fn add(&mut self, s: &str) {
+        let (h1, h2) = bloom_hashes(s);
+        let b1 = h1 % (self.bits.len() * 8);
+        let b2 = h2 % (self.bits.len() * 8);
+        self.bits[b1 / 8] |= 1 << (b1 % 8);
+        self.bits[b2 / 8] |= 1 << (b2 % 8);
+    }
+
+    /// Check if a string might be in the bloom filter
+    pub fn contains(&self, s: &str) -> bool {
+        let (h1, h2) = bloom_hashes(s);
+        let b1 = h1 % (self.bits.len() * 8);
+        let b2 = h2 % (self.bits.len() * 8);
+        (self.bits[b1 / 8] & (1 << (b1 % 8))) != 0 && (self.bits[b2 / 8] & (1 << (b2 % 8))) != 0
+    }
+}
+
+/// Calculate two hashes for bloom filter using a simple DJB2-like approach
+pub fn bloom_hashes(s: &str) -> (usize, usize) {
+    let mut h1: usize = 5381;
+    let mut h2: usize = 0;
+    for &b in s.as_bytes() {
+        h1 = h1.wrapping_shl(5).wrapping_add(h1).wrapping_add(b as usize);
+        h2 = h2
+            .wrapping_shl(6)
+            .wrapping_add(h2)
+            .wrapping_add(b as usize)
+            .wrapping_sub(h1);
+    }
+    (h1, h2)
+}
+
+impl CasStore {
     // ========================================================================
     // Tiered Ingest Functions (RFC-0039)
     // ========================================================================

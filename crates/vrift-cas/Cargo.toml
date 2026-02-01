@@ -14,6 +14,7 @@ io_uring = ["tokio-uring", "tokio"]
 blake3.workspace = true
 thiserror.workspace = true
 memmap2.workspace = true
+serde = { workspace = true, features = ["derive"] }
 tracing = "0.1.44"
 rayon = "1.11.0"
 

@@ -7,7 +7,7 @@ set -e
 echo "=== Test: stat Virtual Metadata ==="
 echo ""
 
-SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvelo_shim.dylib}"
+SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvrift_shim.dylib}"
 
 # Check if shim is built
 if [[ ! -f "$SHIM_PATH" ]]; then

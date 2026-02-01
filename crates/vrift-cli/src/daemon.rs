@@ -1,46 +1,32 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use vrift_ipc::{VeloRequest, VeloResponse};
 
 const SOCKET_PATH: &str = "/tmp/vrift.sock";
 
-pub async fn check_status() -> Result<()> {
-    let mut stream = connect().await?;
+pub async fn check_status(project_root: &Path) -> Result<()> {
+    let mut stream = connect_to_daemon(project_root).await?;
 
-    // Handshake
-    let req = VeloRequest::Handshake {
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    send_request(&mut stream, req).await?;
-    let resp = read_response(&mut stream).await?;
-
-    match resp {
-        VeloResponse::HandshakeAck { server_version } => {
-            tracing::info!("Daemon Connected. Server v{}", server_version);
-        }
-        _ => anyhow::bail!("Unexpected handshake response: {:?}", resp),
-    }
-
-    // Status
+    // Status request
     let req = VeloRequest::Status;
     send_request(&mut stream, req).await?;
     let resp = read_response(&mut stream).await?;
 
     match resp {
         VeloResponse::StatusAck { status } => {
-            println!("Daemon Status: {}", status); // Keep println for user output
-            tracing::debug!("Daemon Status Details: {}", status);
+            println!("Daemon Status: {}", status);
         }
+        VeloResponse::Error(e) => anyhow::bail!("Status failed: {}", e),
         _ => anyhow::bail!("Unexpected status response: {:?}", resp),
     }
 
     Ok(())
 }
 
-pub async fn spawn_command(command: &[String], cwd: PathBuf) -> Result<()> {
-    let mut stream = connect().await?;
+pub async fn spawn_command(command: &[String], cwd: PathBuf, project_root: &Path) -> Result<()> {
+    let mut stream = connect_to_daemon(project_root).await?;
 
     // Construct environment with explicit Strings
     let env: Vec<(String, String)> = std::env::vars().collect();
@@ -58,7 +44,7 @@ pub async fn spawn_command(command: &[String], cwd: PathBuf) -> Result<()> {
     match resp {
         VeloResponse::SpawnAck { pid } => {
             tracing::info!("Daemon successfully spawned process. PID: {}", pid);
-            println!("Daemon successfully spawned process. PID: {}", pid); // Keep for user
+            println!("Daemon successfully spawned process. PID: {}", pid); 
             println!("(Output will be in daemon logs for now)");
         }
         VeloResponse::Error(msg) => {
@@ -71,30 +57,26 @@ pub async fn spawn_command(command: &[String], cwd: PathBuf) -> Result<()> {
 }
 
 #[allow(dead_code)]
-pub async fn check_blob(hash: [u8; 32]) -> Result<bool> {
-    match connect().await {
+pub async fn check_blob(hash: [u8; 32], project_root: &Path) -> Result<bool> {
+    match connect_to_daemon(project_root).await {
         Ok(mut stream) => {
             let req = VeloRequest::CasGet { hash };
-            if send_request(&mut stream, req).await.is_err() {
-                return Ok(false); // Connection broke during send
-            }
-            match read_response(&mut stream).await {
-                Ok(VeloResponse::CasFound { .. }) => Ok(true),
-                Ok(VeloResponse::CasNotFound) => Ok(false),
-                _ => Ok(false),
+            send_request(&mut stream, req).await?;
+            match read_response(&mut stream).await? {
+                VeloResponse::CasFound { .. } => Ok(true),
+                VeloResponse::CasNotFound => Ok(false),
+                VeloResponse::Error(e) => anyhow::bail!("Check failed: {}", e),
+                _ => anyhow::bail!("Unexpected response"),
             }
         }
-        Err(_) => Ok(false), // Daemon offline, assume not in memory
+        Err(_) => Ok(false),
     }
 }
 
-pub async fn notify_blob(hash: [u8; 32], size: u64) -> Result<()> {
-    // Fire and forget (optional) or wait for ack
-    if let Ok(mut stream) = connect().await {
+pub async fn notify_blob(hash: [u8; 32], size: u64, project_root: &Path) -> Result<()> {
+    if let Ok(mut stream) = connect_to_daemon(project_root).await {
         let req = VeloRequest::CasInsert { hash, size };
         let _ = send_request(&mut stream, req).await;
-        // Ideally wait for Ack, but for speed maybe we don't care if it fails
-        // let _ = read_response(&mut stream).await;
     }
     Ok(())
 }
@@ -103,8 +85,9 @@ pub async fn protect_file(
     path: std::path::PathBuf,
     immutable: bool,
     owner: Option<String>,
+    project_root: &Path,
 ) -> Result<()> {
-    match connect().await {
+    match connect_to_daemon(project_root).await {
         Ok(mut stream) => {
             let req = VeloRequest::Protect {
                 path: path.to_string_lossy().to_string(),
@@ -120,30 +103,47 @@ pub async fn protect_file(
         }
         Err(e) => {
             tracing::warn!("Daemon not available for protection: {}", e);
-            // Non-critical if daemon not running (just less protection)
             Ok(())
         }
     }
 }
 
-async fn connect() -> Result<UnixStream> {
-    match UnixStream::connect(SOCKET_PATH).await {
-        Ok(stream) => Ok(stream),
+pub async fn connect_to_daemon(project_root: &Path) -> Result<UnixStream> {
+    let mut stream = match UnixStream::connect(SOCKET_PATH).await {
+        Ok(s) => s,
         Err(_) => {
-            // Attempt to start daemon
             tracing::info!("Daemon not running. Attempting to start...");
             spawn_daemon()?;
-
-            // Retry connection loop
+            let mut s = None;
             for _ in 0..10 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                if let Ok(stream) = UnixStream::connect(SOCKET_PATH).await {
-                    tracing::info!("Daemon started successfully.");
-                    return Ok(stream);
+                if let Ok(conn) = UnixStream::connect(SOCKET_PATH).await {
+                    s = Some(conn);
+                    break;
                 }
             }
-            anyhow::bail!("Failed to connect to daemon after starting it.");
+            s.context("Failed to connect to daemon after starting it")?
         }
+    };
+
+    // 1. Handshake
+    let handshake = VeloRequest::Handshake {
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    send_request(&mut stream, handshake).await?;
+    let _ = read_response(&mut stream).await?;
+
+    // 2. Register Workspace
+    let register = VeloRequest::RegisterWorkspace {
+        project_root: project_root.to_string_lossy().to_string(),
+    };
+    send_request(&mut stream, register).await?;
+    let resp = read_response(&mut stream).await?;
+
+    match resp {
+        VeloResponse::RegisterAck { .. } => Ok(stream),
+        VeloResponse::Error(e) => anyhow::bail!("Workspace registration failed: {}", e),
+        _ => anyhow::bail!("Unexpected registration response"),
     }
 }
 
@@ -177,7 +177,7 @@ fn spawn_daemon() -> Result<()> {
     Ok(())
 }
 
-async fn send_request(stream: &mut UnixStream, req: VeloRequest) -> Result<()> {
+pub async fn send_request(stream: &mut UnixStream, req: VeloRequest) -> Result<()> {
     tracing::debug!("Sending request: {:?}", req);
     let bytes = bincode::serialize(&req)?;
     let len = (bytes.len() as u32).to_le_bytes();
@@ -186,7 +186,7 @@ async fn send_request(stream: &mut UnixStream, req: VeloRequest) -> Result<()> {
     Ok(())
 }
 
-async fn read_response(stream: &mut UnixStream) -> Result<VeloResponse> {
+pub async fn read_response(stream: &mut UnixStream) -> Result<VeloResponse> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;

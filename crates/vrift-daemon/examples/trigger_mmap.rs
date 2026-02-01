@@ -18,10 +18,28 @@ async fn main() -> anyhow::Result<()> {
         1024, now, 0o644,
     );
 
-    println!("Sending 10,000 ManifestUpserts to daemon...");
+    println!("Sending 1,000 ManifestUpserts to daemon (including /vrift/subdir)...");
+    
+    // 1. Root files
+    for i in 0..10 {
+        let path = format!("/vrift/root_{}.txt", i);
+        let req = VeloRequest::ManifestUpsert {
+            path,
+            entry: entry.clone(),
+        };
+        client.send(req).await?;
+    }
 
-    for i in 0..10000 {
-        let path = format!("/vrift/test_{}.txt", i);
+    // 2. Subdirectory entry
+    let dir_entry = VnodeEntry::new_directory(now, 0o755);
+    client.send(VeloRequest::ManifestUpsert {
+        path: "/vrift/subdir".to_string(),
+        entry: dir_entry,
+    }).await?;
+
+    // 3. Subdirectory files
+    for i in 0..10 {
+        let path = format!("/vrift/subdir/file_{}.txt", i);
         let req = VeloRequest::ManifestUpsert {
             path,
             entry: entry.clone(),

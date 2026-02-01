@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "velo_shim"
+name = "vrift_shim"
 crate-type = ["cdylib"]  # Shared library for LD_PRELOAD
 test = false  # cdylib shim causes hangs when tested (INIT constructor)
 doctest = false  # Also disable doctests to prevent any test harness loading
@@ -21,6 +21,7 @@ thiserror.workspace = true
 anyhow = "1.0"
 bincode = "1.3"
 vrift-ipc = { path = "../vrift-ipc" }
+blake3 = { workspace = true }
 
 [build-dependencies]
 cc = "1.0"

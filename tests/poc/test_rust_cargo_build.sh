@@ -67,7 +67,7 @@ sleep 2
 
 echo "[STEP 3] Attempting cargo build via VFS (with shim)..."
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvelo_shim.dylib"
+export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 export VRIFT_DEBUG=1
 
 # Create temp directory for build output

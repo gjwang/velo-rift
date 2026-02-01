@@ -8,9 +8,9 @@ echo "=== Compiler Syscall 100% Coverage Test ==="
 echo "Date: $(date)"
 echo ""
 
-SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvelo_shim.dylib}"
+SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvrift_shim.dylib}"
 if [[ ! -f "$SHIM_PATH" ]]; then
-    SHIM_PATH="$(dirname "$0")/../../target/release/libvelo_shim.dylib"
+    SHIM_PATH="$(dirname "$0")/../../target/release/libvrift_shim.dylib"
 fi
 
 if [[ ! -f "$SHIM_PATH" ]]; then

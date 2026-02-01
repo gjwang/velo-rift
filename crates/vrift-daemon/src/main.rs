@@ -33,14 +33,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use vrift_ipc::{VeloRequest, VeloResponse};
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 use vrift_ipc::{bloom_hashes, BLOOM_SIZE};
 use vrift_manifest::lmdb::{AssetTier, LmdbManifest};
@@ -148,19 +148,34 @@ impl BloomFilter {
     }
 }
 
-struct DaemonState {
-    // In-memory index of CAS blobs (Hash -> Size)
-    cas_index: Mutex<HashMap<[u8; 32], u64>>,
+struct WorkspaceState {
+    project_root: PathBuf,
     // VFS Manifest (LMDB-backed for ACID persistence)
     manifest: std::sync::Mutex<LmdbManifest>,
     bloom: BloomFilter,
+    // Offset in Bloom Filter shared memory is handled by WorkspaceState
+    shm_name: String,
+}
+
+struct DaemonState {
+    // In-memory index of CAS blobs (Hash -> Size) - Shared across all workspaces for global dedup
+    cas_index: Mutex<HashMap<[u8; 32], u64>>,
+    // Workspaces indexed by project root path
+    workspaces: Mutex<HashMap<PathBuf, Arc<WorkspaceState>>>,
+    // Content-Addressable Storage store
+    cas: vrift_cas::CasStore,
 }
 
 /// RFC-0044 Hot Stat Cache: Export manifest to mmap file for O(1) shim access
-fn export_mmap_cache(manifest: &LmdbManifest) {
-    use vrift_ipc::{ManifestMmapBuilder, MMAP_DEFAULT_PATH};
+fn export_mmap_cache(manifest: &LmdbManifest, project_root: &Path) {
+    use vrift_ipc::ManifestMmapBuilder;
 
     let mut builder = ManifestMmapBuilder::new();
+    
+    // Derived mmap path: /tmp/vrift-manifest-[hash].mmap
+    let root_str = project_root.to_string_lossy();
+    let root_hash = blake3::hash(root_str.as_bytes());
+    let mmap_path = format!("/tmp/vrift-manifest-{}.mmap", &root_hash.to_hex()[..16]);
 
     // Iterate all manifest entries and add to builder
     if let Ok(entries) = manifest.iter() {
@@ -184,42 +199,22 @@ fn export_mmap_cache(manifest: &LmdbManifest) {
     }
 
     // Write mmap file atomically
-    match builder.write_to_file(MMAP_DEFAULT_PATH) {
+    match builder.write_to_file(&mmap_path) {
         Ok(()) => {
             tracing::info!(
                 "RFC-0044 Hot Stat Cache: Exported {} entries to {}",
                 builder.len(),
-                MMAP_DEFAULT_PATH
+                mmap_path
             );
         }
         Err(e) => {
-            tracing::warn!("Failed to export mmap cache: {}", e);
+            tracing::warn!("Failed to export mmap cache to {}: {}", mmap_path, e);
         }
     }
 }
 
 async fn start_daemon() -> Result<()> {
-    tracing::info!("vriftd: Starting daemon...");
-
-    // LMDB manifest path (use .vrift directory or VRIFT_MANIFEST env var for directory path)
-    let manifest_dir = std::env::var("VRIFT_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".vrift/daemon_manifest.lmdb".to_string());
-
-    let manifest = match LmdbManifest::open(&manifest_dir) {
-        Ok(m) => {
-            tracing::info!("Loaded LMDB manifest from {}", manifest_dir);
-            m
-        }
-        Err(e) => {
-            tracing::warn!("Failed to open LMDB manifest at {}: {}", manifest_dir, e);
-            // Create parent directories if needed
-            if let Some(parent) = std::path::Path::new(&manifest_dir).parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            LmdbManifest::open(&manifest_dir)
-                .map_err(|e| anyhow::anyhow!("Failed to create LMDB manifest: {}", e))?
-        }
-    };
+    tracing::info!("vriftd: Starting multi-tenant daemon...");
 
     let socket_path = "/tmp/vrift.sock";
     let path = Path::new(socket_path);
@@ -231,66 +226,25 @@ async fn start_daemon() -> Result<()> {
     let listener = UnixListener::bind(path)?;
     tracing::info!("vriftd: Listening on {}", socket_path);
 
-    // Shared Memory Bloom Filter Setup
-    use nix::fcntl::OFlag;
-    use nix::sys::mman::{mmap, shm_open, shm_unlink, MapFlags, ProtFlags};
-    use nix::sys::stat::Mode;
-
-    let shm_name = "/vrift_bloom";
-    let _ = shm_unlink(shm_name); // Cleanup old
-    let shm_fd = shm_open(
-        shm_name,
-        OFlag::O_CREAT | OFlag::O_RDWR,
-        Mode::from_bits_retain(0o666),
-    )?;
-    nix::unistd::ftruncate(&shm_fd, BLOOM_SIZE as i64)?;
-
-    let shm_ptr = unsafe {
-        mmap(
-            None,
-            std::num::NonZeroUsize::new(BLOOM_SIZE).unwrap(),
-            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-            MapFlags::MAP_SHARED,
-            &shm_fd,
-            0,
-        )?
-    }
-    .as_ptr() as *mut u8;
-
-    let bloom = BloomFilter::new(shm_ptr);
-    bloom.clear();
-    // Populate bloom filter with existing manifest entries
-    if let Ok(entries) = manifest.iter() {
-        for (path, _entry) in entries {
-            bloom.add(&path);
-        }
-        tracing::info!(
-            "vriftd: Loaded {} manifest entries into bloom filter",
-            manifest.len().unwrap_or(0)
-        );
-    }
-
     // Initialize shared state
+    let cas_root = std::env::var("VRIFT_CAS_ROOT")
+        .unwrap_or_else(|_| ".vrift/cas".to_string());
+    let cas = vrift_cas::CasStore::new(&cas_root)?;
+
     let state = Arc::new(DaemonState {
         cas_index: Mutex::new(HashMap::new()),
-        manifest: std::sync::Mutex::new(manifest),
-        bloom,
+        workspaces: Mutex::new(HashMap::new()),
+        cas: cas.clone(),
     });
-
-    // RFC-0044 Hot Stat Cache: Warm up mmap-based shared memory stat cache from existing manifest
-    {
-        let manifest = state.manifest.lock().unwrap();
-        export_mmap_cache(&manifest);
-    }
 
     // Start background scan (Warm-up)
     let scan_state = state.clone();
     tokio::spawn(async move {
-        tracing::info!("vriftd: Starting CAS warm-up scan...");
-        if let Err(e) = scan_cas_root(&scan_state).await {
+        tracing::info!("vriftd: Starting global CAS warm-up scan...");
+        if let Err(e) = scan_cas_root(&scan_state, &cas_root).await {
             tracing::error!("vriftd: CAS scan failed: {}", e);
         } else {
-            let count = scan_state.cas_index.lock().await.len();
+            let count = scan_state.cas_index.lock().unwrap().len();
             tracing::info!("vriftd: CAS warm-up complete. Indexed {} blobs.", count);
         }
     });
@@ -326,6 +280,7 @@ async fn start_daemon() -> Result<()> {
 async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) {
     let peer_creds = PeerCredentials::from_stream(&stream);
     let daemon_uid = unsafe { libc::getuid() };
+    let mut current_workspace: Option<Arc<WorkspaceState>> = None;
 
     loop {
         let mut len_buf = [0u8; 4];
@@ -334,9 +289,8 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) {
         }
         let len = u32::from_le_bytes(len_buf) as usize;
 
-        // DoS protection: cap message size
         if len > MAX_IPC_SIZE {
-            tracing::warn!("IPC message too large: {} bytes, rejecting", len);
+            tracing::warn!("IPC message too large: {} bytes", len);
             return;
         }
 
@@ -346,25 +300,14 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) {
         }
 
         let response = match bincode::deserialize::<VeloRequest>(&buf) {
-            Ok(req) => handle_request(req, &state, peer_creds, daemon_uid).await,
+            Ok(req) => handle_request(req, &state, peer_creds, daemon_uid, &mut current_workspace).await,
             Err(e) => VeloResponse::Error(format!("Invalid request: {}", e)),
         };
 
-        let resp_bytes = match bincode::serialize(&response) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("Failed to serialize response: {}", e);
-                return;
-            }
-        };
-
+        let resp_bytes = bincode::serialize(&response).unwrap();
         let resp_len = (resp_bytes.len() as u32).to_le_bytes();
-        if stream.write_all(&resp_len).await.is_err() {
-            return;
-        }
-        if stream.write_all(&resp_bytes).await.is_err() {
-            return;
-        }
+        if stream.write_all(&resp_len).await.is_err() { return; }
+        if stream.write_all(&resp_bytes).await.is_err() { return; }
     }
 }
 
@@ -373,109 +316,144 @@ async fn handle_request(
     state: &DaemonState,
     peer_creds: Option<PeerCredentials>,
     daemon_uid: u32,
+    current_workspace: &mut Option<Arc<WorkspaceState>>,
 ) -> VeloResponse {
     tracing::debug!("Received request: {:?}", req);
     match req {
         VeloRequest::Handshake { client_version } => {
-            tracing::info!("Handshake from client: {}", client_version);
             VeloResponse::HandshakeAck {
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
             }
         }
         VeloRequest::Status => {
-            let count = state.cas_index.lock().await.len();
+            let count = state.cas_index.lock().unwrap().len();
             VeloResponse::StatusAck {
-                status: format!("Operational (Indexed: {} blobs)", count),
+                status: format!("Multi-tenant Operational (Global Blobs: {})", count),
+            }
+        }
+        VeloRequest::RegisterWorkspace { project_root: root_str } => {
+            tracing::info!("vriftd: Workspace Registration Request for: {}", root_str);
+            let project_root = PathBuf::from(&root_str);
+            if !project_root.exists() {
+                return VeloResponse::Error("Project root does not exist".to_string());
+            }
+            
+            // Security: In a production system, verify that peer_creds has access to this folder
+            // For now, we allow any local user but bind the connection to this root.
+            match get_or_create_workspace(state, project_root).await {
+                Ok(ws) => {
+                    *current_workspace = Some(ws.clone());
+                    VeloResponse::RegisterAck {
+                        workspace_id: ws.shm_name.clone(),
+                    }
+                }
+                Err(e) => VeloResponse::Error(format!("Workspace registration failed: {}", e)),
             }
         }
         VeloRequest::Spawn { command, env, cwd } => {
-            // Security: Only allow same-UID or root to spawn
             if let Some(creds) = peer_creds {
                 if creds.uid != daemon_uid && creds.uid != 0 {
-                    tracing::warn!(
-                        "Spawn denied: peer UID {} != daemon UID {}",
-                        creds.uid,
-                        daemon_uid
-                    );
                     return VeloResponse::Error("Permission denied: UID mismatch".to_string());
                 }
             } else {
-                return VeloResponse::Error(
-                    "Permission denied: unable to verify peer credentials".to_string(),
-                );
+                return VeloResponse::Error("Permission denied: verification failed".to_string());
             }
             handle_spawn(command, env, cwd).await
         }
         VeloRequest::CasInsert { hash, size } => {
-            let mut index = state.cas_index.lock().await;
+            let mut index = state.cas_index.lock().unwrap();
             index.insert(hash, size);
             VeloResponse::CasAck
         }
         VeloRequest::CasGet { hash } => {
-            let index = state.cas_index.lock().await;
+            let index = state.cas_index.lock().unwrap();
             if let Some(&size) = index.get(&hash) {
                 VeloResponse::CasFound { size }
             } else {
                 VeloResponse::CasNotFound
             }
         }
-        VeloRequest::Protect {
-            path,
-            immutable,
-            owner,
-        } => handle_protect(path, immutable, owner).await,
+        VeloRequest::Protect { path, immutable, owner } => {
+            // Sandboxing check
+            if let Some(ref ws) = current_workspace {
+                if !path.starts_with(ws.project_root.to_str().unwrap_or("")) {
+                     return VeloResponse::Error("Access Denied: Path outside project root".to_string());
+                }
+            } else {
+                 return VeloResponse::Error("Access Denied: Workspace not registered".to_string());
+            }
+            handle_protect(path, immutable, owner).await
+        }
         VeloRequest::ManifestGet { path } => {
-            let manifest = state.manifest.lock().unwrap();
-            let entry = match manifest.get(&path) {
-                Ok(Some(manifest_entry)) => Some(manifest_entry.vnode.clone()),
-                _ => None,
-            };
-            VeloResponse::ManifestAck { entry }
+             if let Some(ref ws) = current_workspace {
+                let manifest = ws.manifest.lock().unwrap();
+                let entry = match manifest.get(&path) {
+                    Ok(Some(manifest_entry)) => Some(manifest_entry.vnode.clone()),
+                    _ => None,
+                };
+                tracing::info!("vriftd: ManifestGet lookup for '{}' -> {}", path, if entry.is_some() { "FOUND" } else { "NOT FOUND" });
+                VeloResponse::ManifestAck { entry }
+            } else {
+                VeloResponse::Error("Workspace not registered".to_string())
+            }
         }
         VeloRequest::ManifestUpsert { path, entry } => {
-            let manifest = state.manifest.lock().unwrap();
-            manifest.insert(&path, entry, AssetTier::Tier2Mutable);
-            state.bloom.add(&path);
-            // Commit changes to LMDB (ACID transaction)
-            if let Err(e) = manifest.commit() {
-                tracing::error!("Failed to commit manifest: {}", e);
+             if let Some(ref ws) = current_workspace {
+                let manifest = ws.manifest.lock().unwrap();
+                manifest.insert(&path, entry, AssetTier::Tier2Mutable);
+                ws.bloom.add(&path);
+                let _ = manifest.commit();
+                export_mmap_cache(&manifest, &ws.project_root);
+                VeloResponse::ManifestAck { entry: None }
+            } else {
+                VeloResponse::Error("Workspace not registered".to_string())
             }
-            // RFC-0044 Hot Stat Cache: Update mmap'd manifest for zero-latency shim access
-            export_mmap_cache(&manifest);
-            VeloResponse::ManifestAck { entry: None }
+        }
+        VeloRequest::CasSweep { bloom_filter } => {
+            match state.cas.sweep(&bloom_filter) {
+                Ok((deleted_count, reclaimed_bytes)) => {
+                    // Update global index
+                    let mut index = state.cas_index.lock().unwrap();
+                    index.clear();
+                    if let Ok(iter) = state.cas.iter() {
+                        for hash_res in iter {
+                            if let Ok(hash) = hash_res {
+                                if let Some(path) = state.cas.blob_path_for_hash(&hash) {
+                                    if let Ok(meta) = std::fs::metadata(path) {
+                                        index.insert(hash, meta.len());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    VeloResponse::CasSweepAck { deleted_count, reclaimed_bytes }
+                }
+                Err(e) => VeloResponse::Error(format!("Sweep failed: {}", e)),
+            }
         }
         VeloRequest::ManifestListDir { path } => {
-            // List directory entries for VFS synthesis (opendir/readdir)
-            let manifest = state.manifest.lock().unwrap();
-            let mut entries = Vec::new();
-            let prefix = if path.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", path.trim_end_matches('/'))
-            };
-            let prefix_len = prefix.len();
-
-            // Collect unique direct children (not deep descendants)
-            let mut seen = std::collections::HashSet::new();
-            if let Ok(all_entries) = manifest.iter() {
-                for (entry_path, manifest_entry) in all_entries {
-                    if entry_path.starts_with(&prefix) {
-                        // Get the relative path after prefix
-                        let remainder = &entry_path[prefix_len..];
-                        // Only take the first component (direct child)
-                        let child_name = remainder.split('/').next().unwrap_or(remainder);
-                        if !child_name.is_empty() && seen.insert(child_name.to_string()) {
-                            // Check if this is a directory by seeing if there are children
-                            let is_dir = manifest_entry.vnode.is_dir() || remainder.contains('/');
-                            entries.push(vrift_ipc::DirEntry {
-                                name: child_name.to_string(),
-                                is_dir,
-                            });
+             if let Some(ref ws) = current_workspace {
+                let manifest = ws.manifest.lock().unwrap();
+                let mut entries = Vec::new();
+                let prefix = if path.is_empty() { String::new() } else { format!("{}/", path.trim_end_matches('/')) };
+                let prefix_len = prefix.len();
+                let mut seen = std::collections::HashSet::new();
+                if let Ok(all_entries) = manifest.iter() {
+                    for (entry_path, manifest_entry) in all_entries {
+                        if entry_path.starts_with(&prefix) {
+                            let remainder = &entry_path[prefix_len..];
+                            let child_name = remainder.split('/').next().unwrap_or(remainder);
+                            if !child_name.is_empty() && seen.insert(child_name.to_string()) {
+                                let is_dir = manifest_entry.vnode.is_dir() || remainder.contains('/');
+                                entries.push(vrift_ipc::DirEntry { name: child_name.to_string(), is_dir });
+                            }
                         }
                     }
                 }
+                VeloResponse::ManifestListAck { entries }
+            } else {
+                VeloResponse::Error("Workspace not registered".to_string())
             }
-            VeloResponse::ManifestListAck { entries }
         }
     }
 }
@@ -570,17 +548,11 @@ async fn handle_spawn(
     }
 }
 
-async fn scan_cas_root(state: &DaemonState) -> Result<()> {
-    // Get path from env or default
-    let cas_root_str =
-        std::env::var("VR_THE_SOURCE").unwrap_or_else(|_| "~/.vrift/the_source".to_string());
-    let cas_root = Path::new(&cas_root_str);
+async fn scan_cas_root(state: &DaemonState, cas_root_path: &str) -> Result<()> {
+    let cas_root = Path::new(cas_root_path);
 
     if !cas_root.exists() {
-        println!(
-            "vriftd: CAS root not found at {:?}, skipping scan.",
-            cas_root
-        );
+        tracing::warn!("vriftd: CAS root not found at {:?}, skipping scan.", cas_root);
         return Ok(());
     }
 
@@ -592,7 +564,7 @@ async fn scan_cas_root(state: &DaemonState) -> Result<()> {
     // Iterating millions of files might take time, so blocking the runtime is bad if not careful.
     // But this is a separate task.
 
-    let mut index = state.cas_index.lock().await;
+    let mut index = state.cas_index.lock().unwrap();
 
     // Using blocking iterator
     for hash in (cas.iter()?).flatten() {
@@ -608,4 +580,95 @@ async fn scan_cas_root(state: &DaemonState) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn get_or_create_workspace(
+    state: &DaemonState,
+    project_root: PathBuf,
+) -> Result<Arc<WorkspaceState>> {
+    let mut workspaces = state.workspaces.lock().unwrap();
+    if let Some(ws) = workspaces.get(&project_root) {
+        return Ok(ws.clone());
+    }
+
+    tracing::info!("Initializing new workspace for: {:?}", project_root);
+
+    // 1. Setup LMDB manifest
+    let vrift_dir = project_root.join(".vrift");
+    if !vrift_dir.exists() {
+        std::fs::create_dir_all(&vrift_dir)?;
+    }
+    let manifest_path = vrift_dir.join("daemon_manifest.lmdb");
+    let manifest = LmdbManifest::open(manifest_path.to_str().unwrap())?;
+
+    // RFC-0039: Initial import if this is a new workspace
+    if manifest.is_empty()? {
+        let flat_path = project_root.join("vrift.manifest");
+        if flat_path.exists() {
+            tracing::info!("vriftd: Importing flat manifest from {:?}", flat_path);
+            let flat = vrift_manifest::Manifest::load(&flat_path)?;
+            for (path, vnode) in flat.iter() {
+                // Using Tier2Mutable (Solid Tier-2) as the default for ingested files
+                manifest.insert(path, vnode.clone(), vrift_manifest::AssetTier::Tier2Mutable);
+            }
+            manifest.commit()?;
+            manifest.sync()?;
+        }
+    }
+
+    // 2. Setup Shared Memory Bloom Filter
+    use nix::fcntl::OFlag;
+    use nix::sys::mman::{mmap, shm_open, shm_unlink, MapFlags, ProtFlags};
+    use nix::sys::stat::Mode;
+
+    let root_str = project_root.to_string_lossy();
+    let root_hash = blake3::hash(root_str.as_bytes());
+    let shm_name = format!("/vrift_bloom_{}", &root_hash.to_hex()[..16]);
+    
+    let _ = shm_unlink(shm_name.as_str());
+    let shm_fd = shm_open(
+        shm_name.as_str(),
+        OFlag::O_CREAT | OFlag::O_RDWR,
+        Mode::S_IRUSR | Mode::S_IWUSR,
+    )?;
+    nix::unistd::ftruncate(&shm_fd, BLOOM_SIZE as i64)?;
+
+    let shm_ptr = unsafe {
+        mmap(
+            None,
+            std::num::NonZeroUsize::new(BLOOM_SIZE).unwrap(),
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+            MapFlags::MAP_SHARED,
+            &shm_fd,
+            0,
+        )?
+    }
+    .as_ptr() as *mut u8;
+
+    let bloom = BloomFilter::new(shm_ptr);
+    bloom.clear();
+
+    // Populate bloom
+    if let Ok(entries) = manifest.iter() {
+        for (path, _) in entries {
+            bloom.add(&path);
+        }
+    }
+
+    let ws = Arc::new(WorkspaceState {
+        project_root: project_root.clone(),
+        manifest: std::sync::Mutex::new(manifest),
+        bloom,
+        shm_name,
+    });
+
+    workspaces.insert(project_root, ws.clone());
+    
+    // Export initial mmap cache
+    {
+        let manifest = ws.manifest.lock().unwrap();
+        export_mmap_cache(&manifest, &ws.project_root);
+    }
+
+    Ok(ws)
 }

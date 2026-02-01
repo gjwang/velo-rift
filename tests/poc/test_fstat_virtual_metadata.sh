@@ -21,9 +21,9 @@ VRIFTD="${PROJECT_ROOT}/target/debug/vriftd"
 
 # Platform-specific shim path
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    SHIM="${PROJECT_ROOT}/target/debug/libvelo_shim.dylib"
+    SHIM="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 else
-    SHIM="${PROJECT_ROOT}/target/debug/libvelo_shim.so"
+    SHIM="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
 fi
 
 if [ ! -f "$VRIFT" ] || [ ! -f "$SHIM" ] || [ ! -f "$VRIFTD" ]; then

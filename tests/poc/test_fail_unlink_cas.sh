@@ -33,7 +33,7 @@ EOF
 gcc "$TEST_DIR/unlink_test.c" -o "$TEST_DIR/unlink_test"
 
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvelo_shim.dylib
+export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvrift_shim.dylib
 
 # This will fail with ENOENT because /vrift/test/file doesn't exist on host,
 # OR if the app somehow resolve it to the CAS path, it would fail with EACCES/EPERM.

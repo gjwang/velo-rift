@@ -7,7 +7,7 @@ set -e
 echo "=== Test: fcntl File Flags ==="
 echo ""
 
-SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvelo_shim.dylib}"
+SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvrift_shim.dylib}"
 
 echo "[1] Checking Shim for fcntl Implementation:"
 if [[ -f "$SHIM_PATH" ]]; then

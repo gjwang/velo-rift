@@ -67,3 +67,15 @@ tests/qa/ai_dropin_workspace/
 
 # VRift cache directories (RFC-0042)
 **/.vrift/
+.tmp_home/
+.vrift_test/
+gc_test_dir/
+ingest_dir/
+_old_gc_test_dir/
+_old_ingest_dir/
+ls_no_sip
+test.manifest
+test.txt
+test_stat
+test_stat.c
+valid.manifest

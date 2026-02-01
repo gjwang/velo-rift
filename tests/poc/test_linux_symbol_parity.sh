@@ -4,7 +4,7 @@
 
 set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SHIM_PATH="${PROJECT_ROOT}/target/debug/libvelo_shim.so"
+SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
 
 echo "=== Test: Linux Symbol Parity ==="
 

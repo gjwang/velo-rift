@@ -59,7 +59,7 @@ sleep 2
 
 echo "[STEP 3] Compile via VFS (with shim)..."
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvelo_shim.dylib"
+export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 export VRIFT_DEBUG=1
 
 # Run compilation in background with timeout

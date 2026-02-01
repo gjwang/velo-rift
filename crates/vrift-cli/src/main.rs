@@ -40,7 +40,7 @@ struct Cli {
     /// TheSource™ storage root directory (global CAS)
     #[arg(
         long = "the-source-root",
-        env = "VR_THE_SOURCE",
+        env = "VRIFT_CAS_ROOT",
         default_value = "~/.vrift/the_source"
     )]
     the_source_root: PathBuf,
@@ -188,7 +188,11 @@ enum Commands {
 #[derive(Subcommand)]
 enum DaemonCommands {
     /// Check daemon status (ping)
-    Status,
+    Status {
+        /// Project directory (default: current directory)
+        #[arg(short, long, value_name = "DIR")]
+        directory: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -316,10 +320,13 @@ async fn async_main(cli: Cli) -> Result<()> {
             cmd_status(&cli.the_source_root, manifest.as_deref(), session, &dir)
         }
         Commands::Mount(args) => mount::run(args),
-        Commands::Gc(args) => gc::run(&cli.the_source_root, args),
+        Commands::Gc(args) => gc::run(&cli.the_source_root, args).await,
         Commands::Resolve { lockfile } => cmd_resolve(&cli.the_source_root, &lockfile),
         Commands::Daemon { command } => match command {
-            DaemonCommands::Status => daemon::check_status().await,
+            DaemonCommands::Status { directory } => {
+                let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
+                daemon::check_status(&dir).await
+            }
         },
         Commands::Watch { directory, output } => {
             cmd_watch(&cli.the_source_root, &directory, &output).await
@@ -805,7 +812,7 @@ async fn cmd_ingest(
                         new_bytes += ingest_result.size; // Track actual new storage
 
                         // RFC-0043: Notify daemon of new blob for live index sync
-                        let _ = daemon::notify_blob(ingest_result.hash, ingest_result.size).await;
+                        let _ = daemon::notify_blob(ingest_result.hash, ingest_result.size, directory).await;
 
                         // RFC-0039 §5.1.1: If Tier-1, request daemon to strengthen protection (chown + immutable)
                         if is_tier1 {
@@ -815,6 +822,7 @@ async fn cmd_ingest(
                                     blob_path,
                                     true,
                                     Some("vrift".to_string()),
+                                    directory,
                                 )
                                 .await;
                             }
@@ -1029,7 +1037,8 @@ fn cmd_run(
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(daemon::spawn_command(command, std::env::current_dir()?))
+            let dir = std::env::current_dir().context("Failed to get current directory")?;
+            rt.block_on(daemon::spawn_command(command, dir.clone(), &dir))
         });
     }
 
@@ -1066,7 +1075,7 @@ fn cmd_run(
 
     // Set Velo environment variables
     cmd.env("VRIFT_MANIFEST", &manifest_abs);
-    cmd.env("VR_THE_SOURCE", &cas_abs);
+    cmd.env("VRIFT_CAS_ROOT", &cas_abs);
 
     // Set platform-specific library preload
     #[cfg(target_os = "macos")]
