@@ -1309,6 +1309,104 @@ unsafe fn set_errno(e: c_int) {
 }
 
 // ============================================================================
+// RFC-0047: Sync IPC for Manifest Mutations
+// ============================================================================
+
+/// Sync IPC to daemon for manifest removal (for unlink/rmdir)
+/// Returns true on success, false on failure (caller should fallback)
+unsafe fn sync_ipc_manifest_remove(socket_path: &str, path: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let request = vrift_ipc::VeloRequest::ManifestRemove {
+        path: path.to_string(),
+    };
+
+    let req_bytes = match bincode::serialize(&request) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let mut stream = stream;
+    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
+    if stream.write_all(&len_bytes).is_err() {
+        return false;
+    }
+    if stream.write_all(&req_bytes).is_err() {
+        return false;
+    }
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return false;
+    }
+    let resp_len = u32::from_le_bytes(len_buf) as usize;
+
+    let mut resp_buf = vec![0u8; resp_len];
+    if stream.read_exact(&mut resp_buf).is_err() {
+        return false;
+    }
+
+    matches!(
+        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
+        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+    )
+}
+
+/// Sync IPC to daemon for manifest rename
+unsafe fn sync_ipc_manifest_rename(socket_path: &str, old_path: &str, new_path: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let request = vrift_ipc::VeloRequest::ManifestRename {
+        old_path: old_path.to_string(),
+        new_path: new_path.to_string(),
+    };
+
+    let req_bytes = match bincode::serialize(&request) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let mut stream = stream;
+    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
+    if stream.write_all(&len_bytes).is_err() {
+        return false;
+    }
+    if stream.write_all(&req_bytes).is_err() {
+        return false;
+    }
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return false;
+    }
+    let resp_len = u32::from_le_bytes(len_buf) as usize;
+
+    let mut resp_buf = vec![0u8; resp_len];
+    if stream.read_exact(&mut resp_buf).is_err() {
+        return false;
+    }
+
+    matches!(
+        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
+        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+    )
+}
+
+// ============================================================================
 // Core Logic
 // ============================================================================
 
@@ -1548,6 +1646,15 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, _mode: mode_t) -> Option<
             if entry.is_dir() {
                 set_errno(libc::EISDIR);
                 return Some(-1);
+            }
+            // RFC-0047: Check mode permission before allowing writes
+            // Faithfully reflect original file permissions
+            if is_write {
+                let write_bits = 0o222; // S_IWUSR | S_IWGRP | S_IWOTH
+                if (entry.mode & write_bits) == 0 {
+                    set_errno(libc::EACCES);
+                    return Some(-1);
+                }
             }
             if let Some(cas_guard) = state.get_cas() {
                 if let Some(cas) = cas_guard.as_ref() {
@@ -2849,8 +2956,11 @@ pub unsafe extern "C" fn unlink_shim(path: *const c_char) -> c_int {
         if let Some(len) = resolve_path_with_cwd(&path_str, &mut path_buf) {
             let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..len]) };
             if resolved_path.starts_with(&*state.vfs_prefix) {
-                set_errno(libc::EROFS);
-                return -1;
+                // RFC-0047: Remove from Manifest via IPC instead of EROFS
+                if sync_ipc_manifest_remove(&state.socket_path, resolved_path) {
+                    return 0; // Success - manifest entry removed
+                }
+                // IPC failed - fallback to real unlink
             }
         }
     }
@@ -2888,8 +2998,17 @@ pub unsafe extern "C" fn rename_shim(oldpath: *const c_char, newpath: *const c_c
         });
 
         if old_is_vfs || new_is_vfs {
-            set_errno(libc::EROFS);
-            return -1;
+            // RFC-0047: Update Manifest via IPC instead of EROFS
+            let old_resolved = old_res
+                .map(|len| unsafe { std::str::from_utf8_unchecked(&buf_old[..len]) })
+                .unwrap_or("");
+            let new_resolved = new_res
+                .map(|len| unsafe { std::str::from_utf8_unchecked(&buf_new[..len]) })
+                .unwrap_or("");
+            if sync_ipc_manifest_rename(&state.socket_path, old_resolved, new_resolved) {
+                return 0; // Success - manifest entry renamed
+            }
+            // IPC failed - fallback to real rename
         }
     }
 
@@ -2913,8 +3032,11 @@ pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
         if let Some(len) = resolve_path_with_cwd(&path_str, &mut path_buf) {
             let resolved_path = unsafe { std::str::from_utf8_unchecked(&path_buf[..len]) };
             if resolved_path.starts_with(&*state.vfs_prefix) {
-                set_errno(libc::EROFS);
-                return -1;
+                // RFC-0047: Remove dir from Manifest via IPC instead of EROFS
+                if sync_ipc_manifest_remove(&state.socket_path, resolved_path) {
+                    return 0; // Success - manifest dir entry removed
+                }
+                // IPC failed - fallback to real rmdir
             }
         }
     }

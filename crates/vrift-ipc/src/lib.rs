@@ -30,6 +30,15 @@ pub enum VeloRequest {
         path: String,
         entry: vrift_manifest::VnodeEntry,
     },
+    /// RFC-0047: Remove a manifest entry (for unlink/rmdir)
+    ManifestRemove {
+        path: String,
+    },
+    /// RFC-0047: Rename/move a manifest entry
+    ManifestRename {
+        old_path: String,
+        new_path: String,
+    },
     /// List directory entries for VFS synthesis
     ManifestListDir {
         path: String,
