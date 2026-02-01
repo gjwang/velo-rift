@@ -39,6 +39,11 @@ pub enum VeloRequest {
         old_path: String,
         new_path: String,
     },
+    /// RFC-0047: Update manifest mtime (for utimes/touch)
+    ManifestUpdateMtime {
+        path: String,
+        mtime_ns: u64,
+    },
     /// List directory entries for VFS synthesis
     ManifestListDir {
         path: String,

@@ -18,7 +18,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t};
+use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t, utimensat};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use vrift_cas::CasStore;
@@ -289,6 +289,13 @@ static IT_RENAME: Interpose = Interpose {
 static IT_RMDIR: Interpose = Interpose {
     new_func: rmdir_shim as *const (),
     old_func: rmdir as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_UTIMENSAT: Interpose = Interpose {
+    new_func: utimensat_shim as *const (),
+    old_func: utimensat as *const (),
 };
 #[cfg(target_os = "macos")]
 #[link_section = "__DATA,__interpose"]
@@ -1406,6 +1413,53 @@ unsafe fn sync_ipc_manifest_rename(socket_path: &str, old_path: &str, new_path: 
     )
 }
 
+/// Sync IPC to daemon for manifest mtime update (for utimes/utimensat)
+unsafe fn sync_ipc_manifest_update_mtime(socket_path: &str, path: &str, mtime_ns: u64) -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let request = vrift_ipc::VeloRequest::ManifestUpdateMtime {
+        path: path.to_string(),
+        mtime_ns,
+    };
+
+    let req_bytes = match bincode::serialize(&request) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let mut stream = stream;
+    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
+    if stream.write_all(&len_bytes).is_err() {
+        return false;
+    }
+    if stream.write_all(&req_bytes).is_err() {
+        return false;
+    }
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return false;
+    }
+    let resp_len = u32::from_le_bytes(len_buf) as usize;
+
+    let mut resp_buf = vec![0u8; resp_len];
+    if stream.read_exact(&mut resp_buf).is_err() {
+        return false;
+    }
+
+    matches!(
+        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
+        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+    )
+}
+
 // ============================================================================
 // Core Logic
 // ============================================================================
@@ -1999,6 +2053,8 @@ type ChdirFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type UnlinkFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type RenameFn = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
 type RmdirFn = unsafe extern "C" fn(*const c_char) -> c_int;
+type UtimensatFn =
+    unsafe extern "C" fn(c_int, *const c_char, *const libc::timespec, c_int) -> c_int;
 #[allow(dead_code)] // Will be exported when full readdir support is added
 type ReaddirFn = unsafe extern "C" fn(*mut libc::DIR) -> *mut libc::dirent;
 #[allow(dead_code)]
@@ -2345,6 +2401,8 @@ static REAL_UNLINK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static REAL_RENAME: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 #[cfg(target_os = "linux")]
 static REAL_RMDIR: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_UTIMENSAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
@@ -3043,6 +3101,74 @@ pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
 
     let real = get_real_shim!(REAL_RMDIR, "rmdir", IT_RMDIR, RmdirFn);
     real(path)
+}
+
+/// RFC-0047: utimensat shim - update Manifest mtime for VFS paths
+/// This is critical for incremental builds (touch, make)
+#[no_mangle]
+pub unsafe extern "C" fn utimensat_shim(
+    dirfd: c_int,
+    path: *const c_char,
+    times: *const libc::timespec,
+    flags: c_int,
+) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = get_real_shim!(REAL_UTIMENSAT, "utimensat", IT_UTIMENSAT, UtimensatFn);
+            return real(dirfd, path, times, flags);
+        }
+    };
+
+    if let Some(state) = ShimState::get() {
+        if !path.is_null() {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            let mut path_buf = [0u8; 1024];
+            if let Some(len) = resolve_path_with_cwd(&path_str, &mut path_buf) {
+                let resolved_path = std::str::from_utf8_unchecked(&path_buf[..len]);
+                if resolved_path.starts_with(&*state.vfs_prefix) {
+                    // Extract mtime from times array (times[1] is mtime)
+                    let mtime_ns = if times.is_null() {
+                        // UTIME_NOW: use current time
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0)
+                    } else {
+                        let mtime = &*times.add(1); // times[1] = mtime
+                        if mtime.tv_nsec == libc::UTIME_NOW as i64 {
+                            use std::time::{SystemTime, UNIX_EPOCH};
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_nanos() as u64)
+                                .unwrap_or(0)
+                        } else if mtime.tv_nsec == libc::UTIME_OMIT as i64 {
+                            // UTIME_OMIT: don't update mtime, passthrough
+                            let real = get_real_shim!(
+                                REAL_UTIMENSAT,
+                                "utimensat",
+                                IT_UTIMENSAT,
+                                UtimensatFn
+                            );
+                            return real(dirfd, path, times, flags);
+                        } else {
+                            (mtime.tv_sec as u64) * 1_000_000_000 + (mtime.tv_nsec as u64)
+                        }
+                    };
+
+                    // RFC-0047: Update Manifest mtime via IPC
+                    if sync_ipc_manifest_update_mtime(&state.socket_path, resolved_path, mtime_ns) {
+                        return 0; // Success - manifest mtime updated
+                    }
+                    // IPC failed - fallback to real utimensat
+                }
+            }
+        }
+    }
+
+    let real = get_real_shim!(REAL_UTIMENSAT, "utimensat", IT_UTIMENSAT, UtimensatFn);
+    real(dirfd, path, times, flags)
 }
 
 #[allow(dead_code)]

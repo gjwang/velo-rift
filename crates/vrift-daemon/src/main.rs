@@ -522,6 +522,30 @@ async fn handle_request(
                 VeloResponse::Error("Workspace not registered".to_string())
             }
         }
+        // RFC-0047: ManifestUpdateMtime for utimes/utimensat operations
+        VeloRequest::ManifestUpdateMtime { path, mtime_ns } => {
+            if let Some(ref ws) = current_workspace {
+                let manifest = ws.manifest.lock().unwrap();
+                // Get current entry, update mtime, reinsert
+                if let Ok(Some(mut entry)) = manifest.get(&path) {
+                    entry.vnode.mtime = mtime_ns;
+                    manifest.insert(&path, entry.vnode, AssetTier::Tier2Mutable);
+                    let _ = manifest.commit();
+                    export_mmap_cache(&manifest, &ws.project_root);
+                    tracing::info!(
+                        "vriftd: ManifestUpdateMtime '{}' -> {} ns SUCCESS",
+                        path,
+                        mtime_ns
+                    );
+                    VeloResponse::ManifestAck { entry: None }
+                } else {
+                    tracing::warn!("vriftd: ManifestUpdateMtime '{}' -> NOT FOUND", path);
+                    VeloResponse::Error(format!("Entry not found: {}", path))
+                }
+            } else {
+                VeloResponse::Error("Workspace not registered".to_string())
+            }
+        }
         VeloRequest::CasSweep { bloom_filter } => {
             match state.cas.sweep(&bloom_filter) {
                 Ok((deleted_count, reclaimed_bytes)) => {
