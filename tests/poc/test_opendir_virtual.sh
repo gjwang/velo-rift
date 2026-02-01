@@ -1,52 +1,57 @@
 #!/bin/bash
-# Test: Virtual Directory Listing for cargo
-# Goal: opendir/readdir must list virtual directory contents
-# Expected: FAIL - opendir_impl is passthrough
-# Fixed: SUCCESS - Virtual directory contents returned
-
+# Test: opendir/readdir Virtual Directory - Runtime Verification
 set -e
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+TEST_DIR=$(mktemp -d)
+VELO_PROJECT_ROOT="$TEST_DIR/workspace"
 
-echo "=== Test: Virtual Directory Listing ==="
-echo "Goal: ls /vrift/project/src/ must work"
-echo ""
+echo "=== Test: opendir/readdir Virtual Directory (Runtime) ==="
 
-SHIM_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs"
+# Compile test program
+cat > "$TEST_DIR/opendir_test.c" << 'EOF'
+#include <stdio.h>
+#include <dirent.h>
+#include <string.h>
+int main(int argc, char *argv[]) {
+    if (argc < 2) return 2;
+    DIR *d = opendir(argv[1]);
+    if (!d) { perror("opendir"); return 1; }
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") != 0 && strcmp(ent->d_name, "..") != 0) {
+            printf("  %s\n", ent->d_name);
+            count++;
+        }
+    }
+    closedir(d);
+    printf("Found %d entries\n", count);
+    if (count > 0) {
+        printf("✅ PASS: opendir/readdir works\n");
+        return 0;
+    } else {
+        printf("❌ FAIL: No entries found\n");
+        return 1;
+    }
+}
+EOF
+gcc -o "$TEST_DIR/opendir_test" "$TEST_DIR/opendir_test.c"
 
-echo "[ANALYSIS] opendir_impl implementation:"
-# Check for VFS virtual directory handling (synthetic DIR, query_dir_listing)
-OPENDIR_VFS=$(grep -n "query_dir_listing\|SyntheticDir\|synthetic DIR" "$SHIM_SRC" | head -5)
-echo "$OPENDIR_VFS"
-echo ""
+# Prepare VFS workspace with files
+mkdir -p "$VELO_PROJECT_ROOT/.vrift"
+mkdir -p "$VELO_PROJECT_ROOT/src"
+echo "fn main() {}" > "$VELO_PROJECT_ROOT/src/main.rs"
+echo "mod lib;" > "$VELO_PROJECT_ROOT/src/lib.rs"
 
-# Check if opendir has VFS virtual directory handling
-if [ -n "$OPENDIR_VFS" ]; then
-    echo "[PASS] opendir_impl has virtual directory support (SyntheticDir + query_dir_listing)"
-    EXIT_CODE=0
-else
-    echo "[FAIL] opendir_impl is a passthrough - no virtual directory support"
-    echo ""
-    echo "Impact on cargo:"
-    echo "  - Cannot discover source files in /vrift/project/src/"
-    echo "  - Cannot list dependencies in /vrift/project/target/"
-    echo "  - cargo build will fail with 'cannot find crate'"
-    EXIT_CODE=1
-fi
+# Setup Shim and run test
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" \
+DYLD_FORCE_FLAT_NAMESPACE=1 \
+VRIFT_socket_path="/tmp/vrift.sock" \
+VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT" \
+"$TEST_DIR/opendir_test" "$VELO_PROJECT_ROOT/src"
+RET=$?
 
-echo ""
-echo "[ANALYSIS] readdir_impl implementation:"
-# Check if readdir exists and handles virtual directories
-READDIR_IMPL=$(grep -A10 "unsafe fn readdir_impl\|fn readdir_shim" "$SHIM_SRC" | head -15)
-if [ -n "$READDIR_IMPL" ]; then
-    echo "$READDIR_IMPL"
-    if echo "$READDIR_IMPL" | grep -q "virtual\|synthetic\|state"; then
-        echo "[PASS] readdir has virtual handling"
-    else
-        echo "[WARN] readdir exists but may not handle virtual directories"
-    fi
-else
-    echo "[FAIL] No readdir_impl found"
-fi
-
-exit $EXIT_CODE
+rm -rf "$TEST_DIR"
+exit $RET

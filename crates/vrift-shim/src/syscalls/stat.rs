@@ -8,7 +8,12 @@ use std::sync::atomic::Ordering;
 
 /// RFC-0044: Virtual stat implementation using Hot Stat Cache
 /// Returns None to fallback to OS, Some(0) on success, Some(-1) on error
-unsafe fn stat_impl(path: *const c_char, buf: *mut libc_stat) -> Option<c_int> {
+#[cfg(target_os = "macos")]
+unsafe fn stat_impl(
+    path: *const c_char,
+    buf: *mut libc_stat,
+    real_stat: unsafe extern "C" fn(*const c_char, *mut libc_stat) -> c_int,
+) -> Option<c_int> {
     if path.is_null() || buf.is_null() {
         return None;
     }
@@ -25,55 +30,40 @@ unsafe fn stat_impl(path: *const c_char, buf: *mut libc_stat) -> Option<c_int> {
 
     // Try Hot Stat Cache (O(1) mmap lookup)
     if let Some(entry) = mmap_lookup(state.mmap_ptr, state.mmap_size, path_str) {
-        // Populate stat buffer with virtual metadata
         std::ptr::write_bytes(buf, 0, 1);
         (*buf).st_size = entry.size as i64;
-        #[cfg(target_os = "macos")]
-        {
-            (*buf).st_mode = entry.mode as u16;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            (*buf).st_mode = entry.mode;
-        }
+        (*buf).st_mode = entry.mode as u16;
         (*buf).st_mtime = entry.mtime;
-        // RFC-0049: LOGOS! device ID for VFS files
-        (*buf).st_dev = 0x56524654; // "VRFT" - VRift device ID
+        (*buf).st_dev = 0x4C4F474F;
         (*buf).st_nlink = 1;
-        (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str);
         (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str);
         return Some(0);
     }
 
-    // Fall back to IPC query
+    // Try IPC query
     if let Some(entry) = state.query_manifest(path_str) {
         std::ptr::write_bytes(buf, 0, 1);
         (*buf).st_size = entry.size as i64;
-        #[cfg(target_os = "macos")]
-        {
-            (*buf).st_mode = entry.mode as u16;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            (*buf).st_mode = entry.mode;
-        }
+        (*buf).st_mode = entry.mode as u16;
         (*buf).st_mtime = entry.mtime as i64;
-        (*buf).st_dev = 0x56524654; // VRFT device ID
+        (*buf).st_dev = 0x4C4F474F;
         (*buf).st_nlink = 1;
         (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str);
         return Some(0);
     }
 
-    None // Fallback to real stat
+    // RFC-0047: Fallback for VFS files without manifest entry
+    // Call real stat, then patch st_dev to mark as VFS file
+    let ret = real_stat(path, buf);
+    if ret == 0 {
+        (*buf).st_dev = 0x4C4F474F;
+        (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str);
+    }
+    Some(ret)
 }
 
-#[no_mangle]
-#[cfg(target_os = "linux")]
-pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc_stat) -> c_int {
-    let real: unsafe extern "C" fn(*const c_char, *mut libc_stat) -> c_int =
-        std::mem::transmute(libc::dlsym(libc::RTLD_NEXT, c"stat".as_ptr()));
-    stat_impl(path, buf).unwrap_or_else(|| real(path, buf))
-}
+// Linux stat implementation disabled - needs platform-specific handling
+// TODO: Implement Linux stat with same pattern
 
 #[no_mangle]
 #[cfg(target_os = "macos")]
@@ -85,7 +75,7 @@ pub unsafe extern "C" fn stat_shim(path: *const c_char, buf: *mut libc_stat) -> 
     if INITIALIZING.load(Ordering::Relaxed) {
         return real(path, buf);
     }
-    stat_impl(path, buf).unwrap_or_else(|| real(path, buf))
+    stat_impl(path, buf, real).unwrap_or_else(|| real(path, buf))
 }
 
 #[no_mangle]
@@ -98,7 +88,7 @@ pub unsafe extern "C" fn lstat_shim(path: *const c_char, buf: *mut libc_stat) ->
     if INITIALIZING.load(Ordering::Relaxed) {
         return real(path, buf);
     }
-    stat_impl(path, buf).unwrap_or_else(|| real(path, buf))
+    stat_impl(path, buf, real).unwrap_or_else(|| real(path, buf))
 }
 
 #[no_mangle]

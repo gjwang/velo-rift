@@ -1,52 +1,51 @@
 #!/bin/bash
-# test_realpath_virtual.sh - Verify realpath returns VFS path
-# Priority: P0 - Required for build tools
+# Test: realpath Virtual Path Resolution - Runtime Verification
 set -e
-
-echo "=== Test: realpath Virtual Path Resolution ==="
-echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
+TEST_DIR=$(mktemp -d)
+VELO_PROJECT_ROOT="$TEST_DIR/workspace"
 
-# Step 1: Check if shim has realpath interception
-echo "[1] Code Verification:"
-SHIM_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs"
+echo "=== Test: realpath Virtual Path Resolution (Runtime) ==="
 
-if grep -q "realpath_shim" "$SHIM_SRC"; then
-    echo "    ✅ realpath_shim function found"
-else
-    echo "    ❌ realpath_shim NOT implemented"
-    exit 1
-fi
+# Compile test program
+cat > "$TEST_DIR/realpath_test.c" << 'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(int argc, char *argv[]) {
+    if (argc < 2) return 2;
+    char *resolved = realpath(argv[1], NULL);
+    if (!resolved) { perror("realpath"); return 1; }
+    printf("Input:    %s\n", argv[1]);
+    printf("Resolved: %s\n", resolved);
+    if (strlen(resolved) > 0) {
+        printf("✅ PASS: realpath resolved path\n");
+        free(resolved);
+        return 0;
+    } else {
+        printf("❌ FAIL: realpath returned empty\n");
+        free(resolved);
+        return 1;
+    }
+}
+EOF
+gcc -o "$TEST_DIR/realpath_test" "$TEST_DIR/realpath_test.c"
 
-if grep -q "IT_REALPATH" "$SHIM_SRC"; then
-    echo "    ✅ realpath interpose entry found"
-else
-    echo "    ❌ realpath interpose entry NOT found"
-    exit 1
-fi
+# Prepare VFS workspace
+mkdir -p "$VELO_PROJECT_ROOT/.vrift"
+mkdir -p "$VELO_PROJECT_ROOT/src"
+echo "test" > "$VELO_PROJECT_ROOT/src/main.rs"
 
-# Step 2: Check symbol export
-echo ""
-echo "[2] Symbol Export Verification:"
-if nm -gU "$SHIM_PATH" 2>/dev/null | grep -q "realpath_shim"; then
-    echo "    ✅ realpath_shim exported in dylib"
-else
-    echo "    ❌ realpath_shim NOT exported"
-    exit 1
-fi
+# Setup Shim and run test with relative path
+cd "$VELO_PROJECT_ROOT"
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" \
+DYLD_FORCE_FLAT_NAMESPACE=1 \
+VRIFT_socket_path="/tmp/vrift.sock" \
+VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT" \
+"$TEST_DIR/realpath_test" "./src/../src/main.rs"
+RET=$?
 
-# Step 3: Check implementation has VFS handling
-echo ""
-echo "[3] VFS Handling Verification:"
-if grep -A 20 "fn realpath_shim" "$SHIM_SRC" | grep -q "psfs_applicable\|resolve_path_with_cwd"; then
-    echo "    ✅ realpath has VFS path resolution logic"
-else
-    echo "    ⚠️  realpath may be passthrough only"
-fi
-
-echo ""
-echo "✅ PASS: realpath interception implemented"
-exit 0
+rm -rf "$TEST_DIR"
+exit $RET

@@ -1,51 +1,46 @@
 #!/bin/bash
-# Test: stat Virtual Metadata Verification
-# Goal: Verify stat() returns virtual mtime/size from Manifest, not CAS blob
-# Priority: CRITICAL - Required for incremental builds to work correctly
-
+# Test: stat Virtual Metadata - Runtime Verification
 set -e
-echo "=== Test: stat Virtual Metadata ==="
-echo ""
 
-SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvrift_shim.dylib}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+TEST_DIR=$(mktemp -d)
+VELO_PROJECT_ROOT="$TEST_DIR/workspace"
 
-# Check if shim is built
-if [[ ! -f "$SHIM_PATH" ]]; then
-    echo "⚠️ Shim not built, checking implementation in code..."
-fi
+echo "=== Test: stat Virtual Metadata (Runtime) ==="
 
-echo "[1] Code Verification:"
-SHIM_SRC="$(dirname "$0")/../../crates/vrift-shim/src/lib.rs"
+# Compile test program (can't use system stat due to SIP)
+cat > "$TEST_DIR/stat_test.c" << 'EOF'
+#include <stdio.h>
+#include <sys/stat.h>
+int main(int argc, char *argv[]) {
+    if (argc < 2) return 2;
+    struct stat sb;
+    if (stat(argv[1], &sb) != 0) { perror("stat"); return 1; }
+    printf("dev=0x%llx size=%lld\n", (unsigned long long)sb.st_dev, (long long)sb.st_size);
+    // LOGO device ID = 0x4C4F474F
+    if (sb.st_dev == 0x4C4F474F) {
+        printf("✅ PASS: VFS device ID detected (LOGO)\n");
+        return 0;
+    } else {
+        printf("❌ FAIL: Not VFS device (expected 0x4C4F474F)\n");
+        return 1;
+    }
+}
+EOF
+gcc -o "$TEST_DIR/stat_test" "$TEST_DIR/stat_test.c"
 
-# Verify stat_common returns virtual metadata
-# Code uses mmap_entry.mtime OR mtime_secs variable
-if grep -q "st_mtime = mmap_entry.mtime\|st_mtime = mtime_secs" "$SHIM_SRC" 2>/dev/null; then
-    echo "    ✅ stat returns mtime from Manifest (mmap_entry.mtime/mtime_secs)"
-else
-    echo "    ❌ stat does NOT return virtual mtime"
-    exit 1
-fi
+# Prepare VFS workspace
+mkdir -p "$VELO_PROJECT_ROOT/.vrift"
+echo "test content for stat verification" > "$VELO_PROJECT_ROOT/test_file.txt"
 
-# Code uses mmap_entry.size OR entry.size
-if grep -q "st_size = mmap_entry.size\|st_size = entry.size" "$SHIM_SRC" 2>/dev/null; then
-    echo "    ✅ stat returns size from Manifest (mmap_entry.size/entry.size)"
-else
-    echo "    ❌ stat does NOT return virtual size"
-    exit 1
-fi
+# Setup Shim and run test
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" \
+DYLD_FORCE_FLAT_NAMESPACE=1 \
+VRIFT_socket_path="/tmp/vrift.sock" \
+VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT" \
+"$TEST_DIR/stat_test" "$VELO_PROJECT_ROOT/test_file.txt"
+RET=$?
 
-echo ""
-echo "[2] Compiler Impact:"
-echo "    • GCC/Clang use stat() mtime for dependency checking (-M)"
-echo "    • If stat returns CAS blob mtime, all files would have same mtime"
-echo "    • This would break incremental builds (always rebuild all)"
-echo ""
-
-echo "[3] Verification:"
-echo "    stat_common() calls psfs_lookup() which returns VnodeEntry"
-echo "    VnodeEntry contains: size, mtime, mode from original file"
-echo "    This ensures incremental builds work correctly"
-echo ""
-
-echo "✅ PASS: stat returns virtual metadata from Manifest"
-exit 0
+rm -rf "$TEST_DIR"
+exit $RET
