@@ -18,37 +18,49 @@ This report provides the definitive status of Velo Rift's compatibility with hos
 
 ## 📋 Definitive Syscall Registry (23 Intercepted Interfaces)
 
-This table lists every interface currently handled by the Velo Rift shim.
+This table lists every interface currently handled by the Velo Rift shim and its platform availability.
 
-| Syscall | Category | Implementation Level | Logic Detail |
-| :--- | :--- | :--- | :--- |
-| **`open`** | File Ops | ✅ Full (Redirection) | Virtual path -> CAS temp file extraction. |
-| **`openat`** | File Ops | ⚠️ Passthrough Stub | Hooks entry but passes to `libc::openat`. |
-| **`close`** | File Ops | ✅ Full (Tracking) | Triggers async sync-on-close IPC if modified. |
-| **`read`** | File Ops | ✅ Full (Passthrough) | Redirected by `open`, operates on host temp file. |
-| **`write`** | File Ops | ⚠️ Passthrough (Tracked)| Allowed on CoW files; tracked for re-ingest. |
-| **`stat`** | Metadata | ✅ Full (Virtual) | O(1) Hot Stat via Mmap manifest. |
-| **`lstat`** | Metadata | ✅ Full (Virtual) | Symlink-aware virtual metadata injection. |
-| **`fstat`** | Metadata | ✅ Full (Virtual) | Injects metadata based on FD-to-Vpath tracking. |
-| **`fstatat`** | Metadata | ⚠️ Passthrough Stub | Hooks entry for future dir-relative resolution. |
-| **`access`** | Metadata | ✅ Full (Virtual) | Checks manifest for existence and virtual bits. |
-| **`faccessat`**| Metadata | ⚠️ Passthrough Stub | Hooks entry. |
-| **`opendir`** | Discovery| ✅ Full (Synthetic) | Returns synthetic handle `0x7F...`. |
-| **`readdir`** | Discovery| ✅ Full (Synthetic) | Returns virtual entries from daemon cache. |
-| **`closedir`**| Discovery| ✅ Full (Synthetic) | Releases synthetic handle state. |
-| **`readlink`**| Discovery| ✅ Full (Virtual) | Returns symlink target directly from manifest. |
-| **`execve`** | Execution| ✅ Full (Inheritance) | Persistent DYLD/LD_PRELOAD injection. |
-| **`posix_spawn`**| Execution| ✅ Full (Guard) | Recursion-safe process spawning. |
-| **`posix_spawnp`**| Execution| ✅ Full (Guard) | PATH-resolving process spawning. |
-| **`mmap`** | Memory | ✅ Full (Parity) | Ensures virtual FD maps to CAS backing store. |
-| **`munmap`** | Memory | ⚠️ Passthrough Hook | Tracks memory release for heavy-IO cleanup. |
-| **`dlopen`** | Dynamic | ✅ Full (Extraction) | Extracts virtual libraries to `/tmp` for linker. |
-| **`dlsym`** | Dynamic | ⚠️ Passthrough Hook | Ensures symbols can be found in extracted libs. |
-| **`fcntl`** | Control | ⚠️ Passthrough Hook | Tracks O_APPEND/Flags (Locking partial). |
+| Syscall | Category | macOS | Linux | Implementation Detail |
+| :--- | :--- | :---: | :---: | :--- |
+| **`open`** | File Ops | ✅ | ✅ | Virtual path -> CAS temp file redirection. |
+| **`openat`** | File Ops | ✅ | ❌ | dirfd-relative open. **Linux: Passthrough.** |
+| **`close`** | File Ops | ✅ | ✅ | Triggers Sync-on-Close IPC for CoW files. |
+| **`read`** | File Ops | ✅ | ❌ | Redirected by `open`. **Linux: Passthrough.** |
+| **`write`** | File Ops | ✅ | ✅ | Tracking for re-ingest trigger. |
+| **`stat`** | Metadata | ✅ | ✅ | O(1) Hot Stat via Mmap manifest. |
+| **`lstat`** | Metadata | ✅ | ✅ | Symlink-aware virtual metadata. |
+| **`fstat`** | Metadata | ✅ | ✅ | FD-to-Vpath tracking injection. |
+| **`fstatat`** | Metadata | ✅ | ❌ | dirfd-relative stat. **Linux: Passthrough.** |
+| **`access`** | Metadata | ✅ | ❌ | Virtual bitmask checks. **Linux: Passthrough.** |
+| **`faccessat`**| Metadata | ✅ | ❌ | dirfd-relative access. **Linux: Passthrough.** |
+| **`opendir`** | Discovery| ✅ | ❌ | Synthetic DIR handle `0x7F...`. **Linux: Passthrough.** |
+| **`readdir`** | Discovery| ✅ | ❌ | Virtual entries from cache. **Linux: Passthrough.** |
+| **`closedir`**| Discovery| ✅ | ❌ | Synthetic state cleanup. **Linux: Passthrough.** |
+| **`readlink`**| Discovery| ✅ | ❌ | Returns target from manifest. **Linux: Passthrough.** |
+| **`execve`** | Execution| ✅ | ✅ | Persistent Env Inheritance. |
+| **`posix_spawn`**| Execution| ✅ | ❌ | Recursion-safe spawning. **Linux: Passthrough.** |
+| **`posix_spawnp`**| Execution| ✅ | ❌ | PATH-resolving spawning. **Linux: Passthrough.** |
+| **`mmap`** | Memory | ✅ | ❌ | VFS FD to CAS store parity. **Linux: Passthrough.** |
+| **`munmap`** | Memory | ✅ | ❌ | Memory release tracking. **Linux: Passthrough.** |
+| **`dlopen`** | Dynamic | ✅ | ❌ | Virtual library extraction. **Linux: Passthrough.** |
+| **`dlsym`** | Dynamic | ✅ | ❌ | Extracted symbol binding. **Linux: Passthrough.** |
+| **`fcntl`** | Control | ✅ | ❌ | O_APPEND/Flags tracking. **Linux: Passthrough.** |
 
 ---
 
-## 🚩 Known Passthrough Gaps (Unintercepted)
+## ⚠️ Platform Disparity Warning: macOS vs Linux
+
+Velo Rift is currently **macOS-Optimized**.
+
+- **macOS**: Full 23-interface interception enabling directory discovery, dynamic loading, and AT-family operations.
+- **Linux**: Minimal 7-interface "MVP" shim. Linux builds currently **cannot see virtual directories** (missing `readdir`) or load virtual libraries (missing `dlopen`).
+
+> [!IMPORTANT]
+> Linux support for high-performance toolchains (Ninja, Clang) requires porting the remaining 16 shims to the Linux `no_mangle` strategy.
+
+---
+
+## 🚩 Known Passthrough Gaps (Universal)
 
 The following syscalls are currently **completely unintercepted** by the rift and will hit the Host OS directly. Using these on virtual paths will likely result in `ENOENT` or host leakage.
 
