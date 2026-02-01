@@ -212,7 +212,7 @@ stat(vfs_path) → st_ino = hash(path) % 2^32
 |--------|-------|----------|
 | ✅ PASS | 4 | flock_semantic, symlink, mmap, utimes |
 | ⚠️ WARNING | 5 | ctime, readdir_order, st_dev, st_nlink, xattr |
-| ❌ FAIL | 8 | copy_file_range, dup, fchdir, fcntl, ftruncate, inode, lseek, sendfile |
+| ❌ FAIL | 11 | copy_file_range, dup, fchdir, fcntl, ftruncate, inode, lseek, sendfile, rename_boundary, hardlink, renameat |
 
 ### Component Status
 
