@@ -7,7 +7,7 @@ use crate::syscalls::dir::{closedir_shim, opendir_shim, readdir_shim};
 #[cfg(target_os = "macos")]
 use crate::syscalls::misc::{
     chflags_shim, chmod_shim, fchmodat_shim, link_shim, linkat_shim, removexattr_shim, rename_shim,
-    renameat_shim, setxattr_shim, truncate_shim,
+    renameat_shim, setxattr_shim, truncate_shim, utimensat_shim, utimes_shim,
 };
 #[cfg(target_os = "macos")]
 use crate::syscalls::mmap::{mmap_shim, munmap_shim};
@@ -18,7 +18,7 @@ use crate::syscalls::path::{readlink_shim, realpath_shim};
 #[cfg(target_os = "macos")]
 use crate::syscalls::stat::{access_shim, fstat_shim, lstat_shim, stat_shim};
 #[cfg(target_os = "macos")]
-use libc::{c_char, c_int, c_void, dirent, mode_t, pid_t, size_t, ssize_t, timespec, DIR};
+use libc::{c_char, c_int, c_void, dirent, mode_t, pid_t, size_t, ssize_t, timespec, timeval, DIR};
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -98,6 +98,7 @@ extern "C" {
         options: c_int,
     ) -> c_int;
     fn removexattr(path: *const c_char, name: *const c_char, options: c_int) -> c_int;
+    fn utimes(path: *const c_char, times: *const timeval) -> c_int;
 }
 
 #[allow(unused_macros)]
@@ -184,16 +185,7 @@ pub unsafe extern "C" fn symlink_shim(p1: *const c_char, p2: *const c_char) -> c
 pub unsafe extern "C" fn flock_shim(fd: c_int, o: c_int) -> c_int {
     flock(fd, o)
 }
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn utimensat_shim(
-    d: c_int,
-    p: *const c_char,
-    t: *const timespec,
-    f: c_int,
-) -> c_int {
-    utimensat(d, p, t, f)
-}
+// utimensat_shim moved to syscalls/misc.rs with VFS blocking logic
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn mkdir_shim(p: *const c_char, m: mode_t) -> c_int {
@@ -551,4 +543,11 @@ pub static IT_SETXATTR: Interpose = Interpose {
 pub static IT_REMOVEXATTR: Interpose = Interpose {
     new_func: removexattr_shim as *const (),
     old_func: removexattr as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_UTIMES: Interpose = Interpose {
+    new_func: utimes_shim as *const (),
+    old_func: utimes as *const (),
 };

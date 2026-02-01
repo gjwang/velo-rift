@@ -74,8 +74,57 @@ pub unsafe extern "C" fn renameat_shim(
     if INITIALIZING.load(Ordering::Relaxed) {
         return real(oldfd, old, newfd, new);
     }
-    // For now, use simple EXDEV check for at-variants too
-    rename_impl(old, new).unwrap_or_else(|| real(oldfd, old, newfd, new))
+
+    // Resolve relative paths using getcwd for AT_FDCWD case
+    if oldfd == libc::AT_FDCWD && newfd == libc::AT_FDCWD {
+        if let Some(result) = renameat_impl(old, new) {
+            return result;
+        }
+    }
+    real(oldfd, old, newfd, new)
+}
+
+/// renameat path resolution helper - resolves relative paths to absolute
+unsafe fn renameat_impl(old: *const c_char, new: *const c_char) -> Option<c_int> {
+    if old.is_null() || new.is_null() {
+        return None;
+    }
+
+    let _guard = ShimGuard::enter()?;
+    let state = ShimState::get()?;
+
+    let old_str = CStr::from_ptr(old).to_str().ok()?;
+    let new_str = CStr::from_ptr(new).to_str().ok()?;
+
+    // Resolve relative paths via getcwd
+    let resolve_path = |path: &str| -> Option<String> {
+        if path.starts_with('/') {
+            Some(path.to_string())
+        } else {
+            let mut buf = [0u8; 1024];
+            let cwd = libc::getcwd(buf.as_mut_ptr() as *mut i8, buf.len());
+            if cwd.is_null() {
+                None
+            } else {
+                let cwd_str = CStr::from_ptr(cwd).to_str().ok()?;
+                Some(format!("{}/{}", cwd_str, path))
+            }
+        }
+    };
+
+    let old_abs = resolve_path(old_str)?;
+    let new_abs = resolve_path(new_str)?;
+
+    let old_in_vfs = state.psfs_applicable(&old_abs);
+    let new_in_vfs = state.psfs_applicable(&new_abs);
+
+    // RFC-0047: Cross-boundary rename is forbidden
+    if old_in_vfs != new_in_vfs {
+        set_errno(libc::EXDEV);
+        return Some(-1);
+    }
+
+    None // Let real syscall handle
 }
 
 /// RFC-0047: Link (hardlink) implementation with VFS boundary enforcement
@@ -264,4 +313,41 @@ pub unsafe extern "C" fn removexattr_shim(
         return real(path, name, options);
     }
     block_vfs_mutation(path).unwrap_or_else(|| real(path, name, options))
+}
+
+// ============================================================================
+// RFC-0047: Timestamp Modification Protection
+// ============================================================================
+
+/// utimes_shim: Block timestamp modifications on VFS files
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn utimes_shim(path: *const c_char, times: *const libc::timeval) -> c_int {
+    let real = std::mem::transmute::<
+        *const (),
+        unsafe extern "C" fn(*const c_char, *const libc::timeval) -> c_int,
+    >(IT_UTIMES.old_func);
+    if INITIALIZING.load(Ordering::Relaxed) {
+        return real(path, times);
+    }
+    block_vfs_mutation(path).unwrap_or_else(|| real(path, times))
+}
+
+/// utimensat_shim: Block timestamp modifications on VFS files (at variant)
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn utimensat_shim(
+    dirfd: c_int,
+    path: *const c_char,
+    times: *const libc::timespec,
+    flags: c_int,
+) -> c_int {
+    let real = std::mem::transmute::<
+        *const (),
+        unsafe extern "C" fn(c_int, *const c_char, *const libc::timespec, c_int) -> c_int,
+    >(IT_UTIMENSAT.old_func);
+    if INITIALIZING.load(Ordering::Relaxed) {
+        return real(dirfd, path, times, flags);
+    }
+    block_vfs_mutation(path).unwrap_or_else(|| real(dirfd, path, times, flags))
 }

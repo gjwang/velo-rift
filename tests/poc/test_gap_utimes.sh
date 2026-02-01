@@ -17,12 +17,14 @@ echo "=== Compiler Gap: utimes/futimes ==="
 echo ""
 
 SHIM_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/lib.rs"
+SHIM_MISC="${PROJECT_ROOT}/crates/vrift-shim/src/syscalls/misc.rs"
+SHIM_INTERPOSE="${PROJECT_ROOT}/crates/vrift-shim/src/interpose.rs"
 
 echo "[1] Checking for utimes interception..."
 HAS_UTIMES=false
 HAS_FUTIMES=false
 
-if grep -q "utimes_shim\|utimes.*interpose\|utimensat_shim" "$SHIM_SRC" 2>/dev/null; then
+if grep -q "utimes_shim\\|IT_UTIMES" "$SHIM_MISC" "$SHIM_INTERPOSE" 2>/dev/null; then
     echo "    ✅ utimes intercepted"
     HAS_UTIMES=true
 else

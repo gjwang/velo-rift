@@ -3,7 +3,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
-VELO_PROJECT_ROOT="$TEST_DIR/workspace"
+# Use realpath to resolve /var -> /private/var symlink on macOS
+VELO_PROJECT_ROOT="$(cd "$TEST_DIR" && pwd -P)/workspace"
 DAEMON_BIN="${PROJECT_ROOT}/target/debug/vriftd"
 
 echo "=== P0 Gap Test: renameat() Bypass ==="
@@ -71,6 +72,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
     export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 export VRIFT_socket_path="/tmp/vrift.sock"
+export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 
 echo "Running renameat test..."
 set +e
