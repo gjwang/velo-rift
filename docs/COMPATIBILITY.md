@@ -114,8 +114,12 @@ Velo Rift uses platform-specific optimizations for Copy-on-Write (CoW) and metad
 These are "invisible" behaviors discovered during deep forensic audit that may cause intermittent failures in complex toolchains.
 
 ### 1. File Descriptor Leakage (O_CLOEXEC Gap)
-- **Risk**: Internal shims for daemon IPC (socket handle) do NOT set `SOCK_CLOEXEC`.
-- **Impact**: Every child process spawned via `execve` inherits the open socket to `vrift-daemon`. Large process trees may exhaust file descriptors or maintain ghost connections.
+- **Forensic Evidence**: Audit of `crates/vrift-shim/src/lib.rs:741` (`libc::socket`) and `L1033` (`libc::open`) confirms FDs are opened WITHOUT `O_CLOEXEC` or `FD_CLOEXEC`.
+- **Why tests PASSED initially**: The current shim uses an **ephemeral connection model** (connect -> call -> close). The socket is closed before `execve` starts, masking the vulnerability.
+- **Critical Risk**:
+    - **Race Condition**: A concurrent thread performing VFS operations during `execve` WILL leak the socket to the child.
+    - **Performance Evolution**: If the shim moves to persistent connections (RFC-0043 recommendation), 100% of children will inherit the daemon IPC handle.
+- **Remediation**: Mandatory `fcntl(fd, F_SETFD, FD_CLOEXEC)` after every `socket()` and `open()` call in the shim.
 
 ### 2. Naive Path Matching (Normalization Gap)
 - **Risk**: The shim uses string prefix matching (`starts_with`) without normalization.
