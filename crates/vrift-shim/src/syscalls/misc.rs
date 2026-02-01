@@ -102,7 +102,7 @@ unsafe fn renameat_impl(old: *const c_char, new: *const c_char) -> Option<c_int>
             Some(path.to_string())
         } else {
             let mut buf = [0u8; 1024];
-            let cwd = libc::getcwd(buf.as_mut_ptr() as *mut i8, buf.len());
+            let cwd = libc::getcwd(buf.as_mut_ptr().cast(), buf.len());
             if cwd.is_null() {
                 None
             } else {

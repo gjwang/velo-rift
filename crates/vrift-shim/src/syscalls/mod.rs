@@ -19,4 +19,5 @@ pub use misc::*;
 pub use open::*;
 #[cfg(target_os = "macos")]
 pub use path::*;
+#[cfg(target_os = "macos")]
 pub use stat::*;
