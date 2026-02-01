@@ -78,6 +78,11 @@ check_syscall "access" "permission check"
 # File control
 check_syscall "fcntl" "file flags"
 
+# AT syscall family (directory-relative operations)
+check_syscall "openat" "dir-relative open"
+check_syscall "faccessat" "dir-relative access"
+check_syscall "fstatat" "dir-relative stat"
+
 echo ""
 echo "[3] Summary:"
 echo "    Passed: $PASS"

@@ -199,6 +199,27 @@ static IT_FCNTL: Interpose = Interpose {
     new_func: fcntl_shim as *const (),
     old_func: libc::fcntl as *const (),
 };
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_OPENAT: Interpose = Interpose {
+    new_func: openat_shim as *const (),
+    old_func: libc::openat as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_FACCESSAT: Interpose = Interpose {
+    new_func: faccessat_shim as *const (),
+    old_func: libc::faccessat as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_FSTATAT: Interpose = Interpose {
+    new_func: fstatat_shim as *const (),
+    old_func: libc::fstatat as *const (),
+};
 
 // ============================================================================
 // Global State & Recursion Guards
@@ -847,6 +868,9 @@ type MmapFn =
 type DlopenFn = unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void;
 type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 type ReadFn = unsafe extern "C" fn(c_int, *mut c_void, size_t) -> ssize_t;
+type OpenatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, mode_t) -> c_int;
+type FaccessatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_int) -> c_int;
+type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
 
 unsafe fn execve_impl(
     path: *const c_char,
@@ -1735,6 +1759,46 @@ pub unsafe extern "C" fn fcntl_shim(fd: c_int, cmd: c_int, arg: c_int) -> c_int 
         IT_FCNTL.old_func,
     );
     real(fd, cmd, arg)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn openat_shim(
+    dirfd: c_int,
+    pathname: *const c_char,
+    flags: c_int,
+    mode: mode_t,
+) -> c_int {
+    // Passthrough to real openat - VFS path resolution happens at open time
+    // AT_FDCWD (-2) means use current working directory
+    let real = std::mem::transmute::<*const (), OpenatFn>(IT_OPENAT.old_func);
+    real(dirfd, pathname, flags, mode)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn faccessat_shim(
+    dirfd: c_int,
+    pathname: *const c_char,
+    mode: c_int,
+    flags: c_int,
+) -> c_int {
+    // Passthrough to real faccessat - permission checks work on underlying files
+    let real = std::mem::transmute::<*const (), FaccessatFn>(IT_FACCESSAT.old_func);
+    real(dirfd, pathname, mode, flags)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn fstatat_shim(
+    dirfd: c_int,
+    pathname: *const c_char,
+    buf: *mut libc::stat,
+    flags: c_int,
+) -> c_int {
+    // Passthrough to real fstatat - stat operations handled via stat/lstat shims
+    let real = std::mem::transmute::<*const (), FstatatFn>(IT_FSTATAT.old_func);
+    real(dirfd, pathname, buf, flags)
 }
 
 // Constructor
