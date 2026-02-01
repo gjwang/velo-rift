@@ -1,17 +1,14 @@
 #[cfg(target_os = "macos")]
 use crate::interpose::*;
-use crate::path::*;
 use crate::state::*;
-use crate::syscalls::path_ops::break_link;
 use libc::{c_char, c_int, c_void, mode_t};
 use std::ffi::CStr;
-use std::ptr;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering;
 
 /// Open implementation with VFS detection and CoW semantics.
-/// 
+///
 /// For paths in the VFS domain:
 /// - Read-only opens: Resolve CAS blob path and open directly
 /// - Write opens: Copy CAS blob to temp file, track for reingest on close
@@ -19,38 +16,38 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
     if path.is_null() {
         return None;
     }
-    
+
     let path_cstr = CStr::from_ptr(path);
     let path_str = match path_cstr.to_str() {
         Ok(s) => s,
         Err(_) => return None,
     };
-    
+
     // Get shim state
     let state = ShimState::get()?;
-    
+
     // Check if path is in VFS domain
     if !state.psfs_applicable(path_str) {
         return None; // Not our path, passthrough
     }
-    
+
     // Query manifest for this path
     let entry = state.query_manifest(path_str)?;
-    
+
     // Build CAS blob path: {cas_root}/blobs/{hash_hex}
     let hash_hex = hex_encode(&entry.content_hash);
     let blob_path = format!("{}/blobs/{}", state.cas_root, hash_hex);
-    
+
     let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
-    
+
     if is_write {
         // CoW: Copy blob to temp file for writes
         let temp_path = format!("/tmp/vrift_cow_{}.tmp", libc::getpid());
-        
+
         // Check if blob exists, if so copy it
         let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
         let temp_cpath = std::ffi::CString::new(temp_path.as_str()).ok()?;
-        
+
         // Try to copy from CAS blob if it exists (existing file being modified)
         let src_fd = libc::open(blob_cpath.as_ptr(), libc::O_RDONLY);
         if src_fd >= 0 {
@@ -84,9 +81,9 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
                 libc::close(dst_fd);
             }
         }
-        
+
         // Open temp file with original flags
-        let fd = libc::open(temp_cpath.as_ptr(), flags, mode);
+        let fd = libc::open(temp_cpath.as_ptr(), flags, mode as libc::c_uint);
         if fd >= 0 {
             // Track this FD for reingest on close
             if let Ok(mut fds) = state.open_fds.lock() {
@@ -100,17 +97,17 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
                 );
             }
         }
-        return Some(fd);
+        Some(fd)
     } else {
         // Read-only: Open CAS blob directly
         let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
-        let fd = libc::open(blob_cpath.as_ptr(), flags, mode);
+        let fd = libc::open(blob_cpath.as_ptr(), flags, mode as libc::c_uint);
         if fd >= 0 {
             return Some(fd);
         }
         // Blob not found - set ENOENT
         set_errno(libc::ENOENT);
-        return Some(-1);
+        Some(-1)
     }
 }
 

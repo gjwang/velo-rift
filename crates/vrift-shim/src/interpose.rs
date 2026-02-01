@@ -2,9 +2,13 @@
 //! Safety: All extern "C" functions here are dangerous FFI and must be used correctly.
 #![allow(clippy::missing_safety_doc)]
 
-use crate::state::*;
-use libc::{c_char, c_int, c_void, dirent, mode_t, off_t, pid_t, size_t, ssize_t, timespec, DIR};
-use std::sync::atomic::Ordering;
+use crate::syscalls::dir::{closedir_shim, opendir_shim, readdir_shim};
+use crate::syscalls::misc::{rename_shim, renameat_shim};
+use crate::syscalls::mmap::{mmap_shim, munmap_shim};
+use crate::syscalls::open::{open_shim, openat_shim};
+use crate::syscalls::path::{readlink_shim, realpath_shim};
+use crate::syscalls::stat::{fstat_shim, lstat_shim, stat_shim};
+use libc::{c_char, c_int, c_void, dirent, mode_t, pid_t, size_t, ssize_t, timespec, DIR};
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -83,14 +87,13 @@ macro_rules! shim {
     };
 }
 
-// Minimal stubs that don't depend on other modules
-#[no_mangle]
-pub unsafe extern "C" fn open_shim(p: *const c_char, f: c_int, m: mode_t) -> c_int {
-    if INITIALIZING.load(Ordering::Relaxed) {
-        return open(p, f, m);
-    }
-    open(p, f, m)
-}
+// Note: VFS logic shims are imported from syscalls/ modules:
+// - dir: opendir_shim, readdir_shim, closedir_shim
+// - stat: stat_shim, lstat_shim, fstat_shim
+// - open: open_shim (with CoW logic)
+// - misc: rename_shim (with EXDEV logic)
+
+// Simple I/O passthroughs (no VFS logic needed)
 #[no_mangle]
 pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     close(fd)
@@ -103,38 +106,7 @@ pub unsafe extern "C" fn write_shim(fd: c_int, b: *const c_void, c: size_t) -> s
 pub unsafe extern "C" fn read_shim(fd: c_int, b: *mut c_void, c: size_t) -> ssize_t {
     read(fd, b, c)
 }
-#[no_mangle]
-pub unsafe extern "C" fn stat_shim(p: *const c_char, b: *mut libc::stat) -> c_int {
-    stat(p, b)
-}
-#[no_mangle]
-pub unsafe extern "C" fn lstat_shim(p: *const c_char, b: *mut libc::stat) -> c_int {
-    lstat(p, b)
-}
-#[no_mangle]
-pub unsafe extern "C" fn fstat_shim(fd: c_int, b: *mut libc::stat) -> c_int {
-    fstat(fd, b)
-}
-#[no_mangle]
-pub unsafe extern "C" fn opendir_shim(p: *const c_char) -> *mut DIR {
-    opendir(p)
-}
-#[no_mangle]
-pub unsafe extern "C" fn readdir_shim(d: *mut DIR) -> *mut dirent {
-    readdir(d)
-}
-#[no_mangle]
-pub unsafe extern "C" fn closedir_shim(d: *mut DIR) -> c_int {
-    closedir(d)
-}
-#[no_mangle]
-pub unsafe extern "C" fn readlink_shim(p: *const c_char, b: *mut c_char, s: size_t) -> ssize_t {
-    readlink(p, b, s)
-}
-#[no_mangle]
-pub unsafe extern "C" fn realpath_shim(p: *const c_char, r: *mut c_char) -> *mut c_char {
-    realpath(p, r)
-}
+// Note: readlink_shim, realpath_shim imported from syscalls/path.rs
 #[no_mangle]
 pub unsafe extern "C" fn getcwd_shim(b: *mut c_char, s: size_t) -> *mut c_char {
     getcwd(b, s)
@@ -147,10 +119,7 @@ pub unsafe extern "C" fn chdir_shim(p: *const c_char) -> c_int {
 pub unsafe extern "C" fn unlink_shim(p: *const c_char) -> c_int {
     unlink(p)
 }
-#[no_mangle]
-pub unsafe extern "C" fn rename_shim(o: *const c_char, n: *const c_char) -> c_int {
-    rename(o, n)
-}
+// Note: rename_shim, renameat_shim imported from syscalls/misc.rs with EXDEV logic
 #[no_mangle]
 pub unsafe extern "C" fn rmdir_shim(p: *const c_char) -> c_int {
     rmdir(p)
@@ -171,10 +140,7 @@ pub unsafe extern "C" fn access_shim(p: *const c_char, m: c_int) -> c_int {
 pub unsafe extern "C" fn faccessat_shim(d: c_int, p: *const c_char, m: c_int, f: c_int) -> c_int {
     faccessat(d, p, m, f)
 }
-#[no_mangle]
-pub unsafe extern "C" fn openat_shim(d: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int {
-    openat(d, p, f, m)
-}
+// Note: openat_shim imported from syscalls/open.rs
 #[no_mangle]
 pub unsafe extern "C" fn link_shim(o: *const c_char, n: *const c_char) -> c_int {
     link(o, n)
@@ -189,15 +155,7 @@ pub unsafe extern "C" fn linkat_shim(
 ) -> c_int {
     linkat(f1, p1, f2, p2, f)
 }
-#[no_mangle]
-pub unsafe extern "C" fn renameat_shim(
-    f1: c_int,
-    p1: *const c_char,
-    f2: c_int,
-    p2: *const c_char,
-) -> c_int {
-    renameat(f1, p1, f2, p2)
-}
+// Note: renameat_shim imported from syscalls/misc.rs with EXDEV logic
 #[no_mangle]
 pub unsafe extern "C" fn symlink_shim(p1: *const c_char, p2: *const c_char) -> c_int {
     symlink(p1, p2)
@@ -219,21 +177,7 @@ pub unsafe extern "C" fn utimensat_shim(
 pub unsafe extern "C" fn mkdir_shim(p: *const c_char, m: mode_t) -> c_int {
     mkdir(p, m)
 }
-#[no_mangle]
-pub unsafe extern "C" fn mmap_shim(
-    a: *mut c_void,
-    l: size_t,
-    p: c_int,
-    f: c_int,
-    d: c_int,
-    o: off_t,
-) -> *mut c_void {
-    unsafe { libc::mmap(a, l, p, f, d, o) }
-}
-#[no_mangle]
-pub unsafe extern "C" fn munmap_shim(a: *mut c_void, l: size_t) -> c_int {
-    munmap(a, l)
-}
+// Note: mmap_shim, munmap_shim imported from syscalls/mmap.rs
 #[no_mangle]
 pub unsafe extern "C" fn fcntl_shim(f: c_int, c: c_int, a: c_int) -> c_int {
     fcntl(f, c, a)
