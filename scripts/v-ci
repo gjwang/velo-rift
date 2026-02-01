@@ -49,7 +49,7 @@ print_usage() {
     echo "  --docker          Run in Docker container"
     echo ""
     echo "Tasks:"
-    echo "  --tier [0-3]      Run specific test tier"
+    echo "  --tier [0-4]      Run specific test tier"
     echo "  --quick           Quick check (L1 build + Tier 0)"
     echo "  --setup           Full setup (hooks, deps, venv)"
     echo "  --build           Rebuild Docker images"

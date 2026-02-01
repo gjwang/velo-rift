@@ -255,6 +255,7 @@ parse_tier_to_paths() {
         1) echo "${TIER1_TESTS[*]}" ;;
         2) echo "${TIER2_TESTS[*]}" ;;
         3) echo "${TIER3_TESTS[*]}" ;;
+        4) echo "${TIER4_TESTS[*]}" ;;
         quick) echo "$TEST_PATHS_QUICK" ;;
         full) echo "$TEST_PATHS_FULL" ;;
         docker) echo "$TEST_PATHS_DOCKER" ;;
@@ -541,6 +542,7 @@ run_full_ci() {
         1) tier_tests=("${TIER1_TESTS[@]}") ;;
         2) tier_tests=("${TIER2_TESTS[@]}") ;;
         3) tier_tests=("${TIER3_TESTS[@]}") ;;
+        4) tier_tests=("${TIER4_TESTS[@]}") ;;
         *) 
             log_info "Running custom test path: $tier"
             run_python_tests "$venv_path" "$tier"
@@ -549,6 +551,42 @@ run_full_ci() {
     esac
     
     log_step "Running Tier $tier (${#tier_tests[@]} tasks)..."
+    
+    # Special handling for Tier 4 report mode (gap analysis)
+    if [[ "$tier" == "4" ]] && [[ "${TIER4_MODE:-strict}" == "report" ]]; then
+        local passed=0
+        local failed=0
+        local gap_report=""
+        
+        for task in "${tier_tests[@]}"; do
+            echo ""
+            log_step "TASK: $task"
+            # Run in subshell to isolate exit behavior
+            local rc=0
+            (eval "$task") 2>&1 || rc=$?
+            
+            if [[ $rc -eq 0 ]]; then
+                ((passed++))
+                log_success "PASS: $task"
+            else
+                ((failed++))
+                log_warn "GAP: $task (expected - not implemented)"
+                gap_report+="  - $(basename "$task")\n"
+            fi
+        done
+        
+        echo ""
+        echo "=========================================="
+        log_info "Tier 4 Gap Report: $passed passed, $failed gaps detected"
+        if [[ -n "$gap_report" ]]; then
+            echo -e "Gaps detected (future work):\n$gap_report"
+        fi
+        log_success "Tier 4 gap analysis complete (report mode)"
+        echo "=========================================="
+        return
+    fi
+    
+    # Standard strict execution for other tiers
     for task in "${tier_tests[@]}"; do
         echo ""
         log_step "TASK: $task"
