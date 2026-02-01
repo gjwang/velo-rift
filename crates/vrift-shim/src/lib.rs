@@ -18,7 +18,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-use libc::{c_char, c_int, c_void, mode_t, size_t, ssize_t, utimensat};
+use libc::{c_char, c_int, c_void, mkdir, mode_t, size_t, ssize_t, symlink, utimensat};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use vrift_cas::CasStore;
@@ -296,6 +296,20 @@ static IT_RMDIR: Interpose = Interpose {
 static IT_UTIMENSAT: Interpose = Interpose {
     new_func: utimensat_shim as *const (),
     old_func: utimensat as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_MKDIR: Interpose = Interpose {
+    new_func: mkdir_shim as *const (),
+    old_func: mkdir as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+static IT_SYMLINK: Interpose = Interpose {
+    new_func: symlink_shim as *const (),
+    old_func: symlink as *const (),
 };
 #[cfg(target_os = "macos")]
 #[link_section = "__DATA,__interpose"]
@@ -1460,6 +1474,117 @@ unsafe fn sync_ipc_manifest_update_mtime(socket_path: &str, path: &str, mtime_ns
     )
 }
 
+/// Sync IPC to daemon for mkdir (creates dir entry in Manifest)
+unsafe fn sync_ipc_manifest_mkdir(socket_path: &str, path: &str, mode: u32) -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    // Create a directory VnodeEntry using constructor
+    let entry = vrift_manifest::VnodeEntry::new_directory(now, mode);
+
+    let request = vrift_ipc::VeloRequest::ManifestUpsert {
+        path: path.to_string(),
+        entry,
+    };
+
+    let req_bytes = match bincode::serialize(&request) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let mut stream = stream;
+    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
+    if stream.write_all(&len_bytes).is_err() {
+        return false;
+    }
+    if stream.write_all(&req_bytes).is_err() {
+        return false;
+    }
+
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return false;
+    }
+    let resp_len = u32::from_le_bytes(len_buf) as usize;
+
+    let mut resp_buf = vec![0u8; resp_len];
+    if stream.read_exact(&mut resp_buf).is_err() {
+        return false;
+    }
+
+    matches!(
+        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
+        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+    )
+}
+
+/// Sync IPC to daemon for symlink (creates symlink entry in Manifest)
+unsafe fn sync_ipc_manifest_symlink(socket_path: &str, link_path: &str, _target: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    // Create a symlink VnodeEntry using constructor
+    // Note: target_hash should store hash of target string, using zeros for now
+    let entry = vrift_manifest::VnodeEntry::new_symlink([0u8; 32], 0, now);
+
+    let request = vrift_ipc::VeloRequest::ManifestUpsert {
+        path: link_path.to_string(),
+        entry,
+    };
+
+    let req_bytes = match bincode::serialize(&request) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let mut stream = stream;
+    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
+    if stream.write_all(&len_bytes).is_err() {
+        return false;
+    }
+    if stream.write_all(&req_bytes).is_err() {
+        return false;
+    }
+
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return false;
+    }
+    let resp_len = u32::from_le_bytes(len_buf) as usize;
+
+    let mut resp_buf = vec![0u8; resp_len];
+    if stream.read_exact(&mut resp_buf).is_err() {
+        return false;
+    }
+
+    matches!(
+        bincode::deserialize::<vrift_ipc::VeloResponse>(&resp_buf),
+        Ok(vrift_ipc::VeloResponse::ManifestAck { .. })
+    )
+}
+
 // ============================================================================
 // Core Logic
 // ============================================================================
@@ -2055,6 +2180,8 @@ type RenameFn = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
 type RmdirFn = unsafe extern "C" fn(*const c_char) -> c_int;
 type UtimensatFn =
     unsafe extern "C" fn(c_int, *const c_char, *const libc::timespec, c_int) -> c_int;
+type MkdirFn = unsafe extern "C" fn(*const c_char, mode_t) -> c_int;
+type SymlinkFn = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
 #[allow(dead_code)] // Will be exported when full readdir support is added
 type ReaddirFn = unsafe extern "C" fn(*mut libc::DIR) -> *mut libc::dirent;
 #[allow(dead_code)]
@@ -2403,6 +2530,10 @@ static REAL_RENAME: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static REAL_RMDIR: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 #[cfg(target_os = "linux")]
 static REAL_UTIMENSAT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_MKDIR: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(target_os = "linux")]
+static REAL_SYMLINK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
@@ -3169,6 +3300,75 @@ pub unsafe extern "C" fn utimensat_shim(
 
     let real = get_real_shim!(REAL_UTIMENSAT, "utimensat", IT_UTIMENSAT, UtimensatFn);
     real(dirfd, path, times, flags)
+}
+
+/// RFC-0047 P1: mkdir shim - create directory entry in Manifest for VFS paths
+#[no_mangle]
+pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: mode_t) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = get_real_shim!(REAL_MKDIR, "mkdir", IT_MKDIR, MkdirFn);
+            return real(path, mode);
+        }
+    };
+
+    if let Some(state) = ShimState::get() {
+        if !path.is_null() {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            let mut path_buf = [0u8; 1024];
+            if let Some(len) = resolve_path_with_cwd(&path_str, &mut path_buf) {
+                let resolved_path = std::str::from_utf8_unchecked(&path_buf[..len]);
+                if resolved_path.starts_with(&*state.vfs_prefix) {
+                    // RFC-0047 P1: Create directory entry in Manifest via IPC
+                    if sync_ipc_manifest_mkdir(&state.socket_path, resolved_path, mode as u32) {
+                        return 0; // Success - manifest dir entry created
+                    }
+                    // IPC failed - fallback to real mkdir
+                }
+            }
+        }
+    }
+
+    let real = get_real_shim!(REAL_MKDIR, "mkdir", IT_MKDIR, MkdirFn);
+    real(path, mode)
+}
+
+/// RFC-0047 P1: symlink shim - create symlink entry in Manifest for VFS paths
+#[no_mangle]
+pub unsafe extern "C" fn symlink_shim(target: *const c_char, linkpath: *const c_char) -> c_int {
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => {
+            let real = get_real_shim!(REAL_SYMLINK, "symlink", IT_SYMLINK, SymlinkFn);
+            return real(target, linkpath);
+        }
+    };
+
+    if let Some(state) = ShimState::get() {
+        if !linkpath.is_null() {
+            let link_str = CStr::from_ptr(linkpath).to_string_lossy();
+            let mut path_buf = [0u8; 1024];
+            if let Some(len) = resolve_path_with_cwd(&link_str, &mut path_buf) {
+                let resolved_path = std::str::from_utf8_unchecked(&path_buf[..len]);
+                if resolved_path.starts_with(&*state.vfs_prefix) {
+                    // RFC-0047 P1: Create symlink entry in Manifest via IPC
+                    let target_str = if target.is_null() {
+                        ""
+                    } else {
+                        CStr::from_ptr(target).to_str().unwrap_or("")
+                    };
+                    if sync_ipc_manifest_symlink(&state.socket_path, resolved_path, target_str) {
+                        return 0; // Success - manifest symlink entry created
+                    }
+                    // IPC failed - fallback to real symlink
+                }
+            }
+        }
+    }
+
+    let real = get_real_shim!(REAL_SYMLINK, "symlink", IT_SYMLINK, SymlinkFn);
+    real(target, linkpath)
 }
 
 #[allow(dead_code)]
