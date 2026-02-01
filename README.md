@@ -55,7 +55,14 @@ First-time setup after cloning:
 ./setup-dev.sh
 ```
 
-This configures Git hooks, Rust toolchain, and (if applicable) Python environment.
+This one-stop script sets up everything you need:
+1. **Rust Toolchain**: Installs specific nightly version and components (clippy, rustfmt).
+2. **Python Environment**: Uses `uv` to create a virtual environment and install dependencies.
+3. **Pre-commit Hooks**: Configures git hooks for automatic linting.
+4. **Build Configuration**: Auto-configures `PYO3_PYTHON` for correct linking.
+
+**Note**: We strictly use [uv](https://github.com/astral-sh/uv) for Python package management.
+`setup-dev.sh` will check for `uv` and guide you if it's missing.
 
 ---
 

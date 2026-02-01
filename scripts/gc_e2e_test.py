@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.absolute()
@@ -60,27 +59,27 @@ def get_blob_hashes(cas_dir: Path) -> set[str]:
     return hashes
 
 
-def print_step(step: int, desc: str):
+def print_step(step: int, desc: str) -> None:
     print(f"\n  [{step}] {desc}")
 
 
-def print_ok(msg: str):
+def print_ok(msg: str) -> None:
     print(f"      ✅ {msg}")
 
 
-def print_fail(msg: str):
+def print_fail(msg: str) -> None:
     print(f"      ❌ {msg}")
 
 
-def print_warn(msg: str):
+def print_warn(msg: str) -> None:
     print(f"      ⚠️  {msg}")
 
 
-def robust_rmtree(path: Path):
+def robust_rmtree(path: Path) -> None:
     """Robustly remove a directory tree, handling read-only or immutable files."""
     if not path.exists():
         return
-        
+
     for root, dirs, files in os.walk(path, topdown=False):
         for name in files:
             p = Path(root) / name
@@ -105,97 +104,95 @@ def robust_rmtree(path: Path):
         pass
 
 
-def main():
+def main() -> None:
     global VRIFT_BINARY
     print("=" * 60)
     print("VRift GC E2E Test (RFC-0041)")
     print("STRICT SAFETY VERIFICATION")
     print("=" * 60)
-    
+
     # Check binary
     if not VRIFT_BINARY.exists():
         # Try debug if release not found
         debug_bin = PROJECT_ROOT / "target" / "debug" / "vrift"
         if debug_bin.exists():
-             VRIFT_BINARY = debug_bin
+            VRIFT_BINARY = debug_bin
         else:
             print(f"\n❌ Binary not found: {VRIFT_BINARY}")
             print("   Run: cargo build --release -p vrift-cli")
             sys.exit(1)
-    
+
     # Backup existing registry
     registry_backup = None
     if REGISTRY_PATH.exists():
         registry_backup = REGISTRY_PATH.read_text()
-        print(f"\n📦 Backed up existing registry")
-    
+        print("\n📦 Backed up existing registry")
+
     passed = True
     tmp_dir = None
-    
+
     try:
         # Clear registry for clean test
         if REGISTRY_PATH.exists():
             REGISTRY_PATH.unlink()
-        
+
         tmp_dir = Path(tempfile.mkdtemp(prefix="vrift-gc-e2e-"))
         if True:
             work_dir = tmp_dir
             cas_dir = work_dir / "cas"
             cas_dir.mkdir()
-            
+
             # ================================================================
             # PART 1: BASIC LIFECYCLE TEST
             # ================================================================
             print("\n" + "-" * 40)
             print("PART 1: Basic GC Lifecycle")
             print("-" * 40)
-            
+
             # === Step 1: Create and ingest two projects ===
             print_step(1, "Create and ingest two projects")
-            
+
             proj1 = work_dir / "project1"
             proj2 = work_dir / "project2"
             proj1.mkdir()
             proj2.mkdir()
-            
+
             # Create test files with known content
             (proj1 / "unique1.txt").write_text("content unique to project1 only")
             (proj1 / "shared.txt").write_text("SHARED CONTENT BETWEEN PROJECTS")
             (proj2 / "unique2.txt").write_text("content unique to project2 only")
             (proj2 / "shared.txt").write_text("SHARED CONTENT BETWEEN PROJECTS")
-            
+
             manifest1 = work_dir / "proj1.manifest"
             manifest2 = work_dir / "proj2.manifest"
-            
+
             # Ingest project 1
-            code, stdout, stderr = run_cmd([
-                str(VRIFT_BINARY), "--the-source-root", str(cas_dir),
-                "ingest", str(proj1), "-o", str(manifest1)
-            ])
+            code, stdout, stderr = run_cmd(
+                [str(VRIFT_BINARY), "--the-source-root", str(cas_dir), "ingest", str(proj1), "-o", str(manifest1)]
+            )
             if code != 0:
                 print_fail(f"Ingest proj1 failed: {stderr[:100]}")
                 passed = False
             else:
                 print_ok("Project 1 ingested")
-            
-            blobs_after_proj1 = get_blob_hashes(cas_dir)
-            
+
+            # blobs_after_proj1 = get_blob_hashes(cas_dir) - unused
+
             # Ingest project 2
-            code, stdout, stderr = run_cmd([
-                str(VRIFT_BINARY), "--the-source-root", str(cas_dir),
-                "ingest", str(proj2), "-o", str(manifest2)
-            ])
+            code, stdout, stderr = run_cmd(
+                [str(VRIFT_BINARY), "--the-source-root", str(cas_dir), "ingest", str(proj2), "-o", str(manifest2)]
+            )
             if code != 0:
                 print_fail(f"Ingest proj2 failed: {stderr[:100]}")
                 passed = False
             else:
                 print_ok("Project 2 ingested")
-            
-            blobs_after_proj2 = get_blob_hashes(cas_dir)
-            
+
+            # blobs_after_proj2 = get_blob_hashes(cas_dir) - unused
+
             # === Step 2: Verify registry ===
             print_step(2, "Verify registry auto-registration")
-            
+
             if not REGISTRY_PATH.exists():
                 print_fail("Registry not created")
                 passed = False
@@ -207,22 +204,22 @@ def main():
                 else:
                     print_fail(f"Expected >= 2 manifests, got {count}")
                     passed = False
-            
+
             # ================================================================
             # PART 2: CRITICAL SAFETY TEST - No False Positives
             # ================================================================
             print("\n" + "-" * 40)
             print("PART 2: CRITICAL SAFETY - No False Deletions")
             print("-" * 40)
-            
+
             # === Step 3: Record all blobs BEFORE GC ===
             print_step(3, "Record all blobs before GC")
             blobs_before_gc = get_blob_hashes(cas_dir)
             print_ok(f"CAS has {len(blobs_before_gc)} blobs")
-            
+
             # === Step 4: Run GC --delete while BOTH manifests active ===
             print_step(4, "🔴 SAFETY TEST: GC --delete with both manifests active")
-            
+
             code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete", "--yes"])
             if code != 0:
                 print_fail(f"GC failed: {stderr[:100]}")
@@ -230,66 +227,65 @@ def main():
             else:
                 blobs_after_gc = get_blob_hashes(cas_dir)
                 deleted = blobs_before_gc - blobs_after_gc
-                
+
                 if len(deleted) == 0:
                     print_ok("✅ PASS: No blobs deleted (all referenced)")
                 else:
                     print_fail(f"🔴 DANGER: {len(deleted)} blobs deleted while manifests active!")
                     print_fail(f"   Deleted: {list(deleted)[:3]}...")
                     passed = False
-            
+
             # === Step 5: Verify ALL original blobs still exist ===
             print_step(5, "Verify ALL original blobs still exist")
-            
+
             blobs_now = get_blob_hashes(cas_dir)
             missing = blobs_before_gc - blobs_now
-            
+
             if len(missing) == 0:
                 print_ok("All blobs preserved")
             else:
                 print_fail(f"MISSING {len(missing)} blobs!")
                 passed = False
-            
+
             # ================================================================
             # PART 3: SHARED BLOB PROTECTION
             # ================================================================
             print("\n" + "-" * 40)
             print("PART 3: Shared Blob Protection")
             print("-" * 40)
-            
+
             # === Step 6: Delete ONE project, verify shared blob stays ===
             print_step(6, "Delete Project 1, verify shared blob protected")
-            
+
             # Delete manifest1 and prune
             manifest1.unlink()
             code, _, _ = run_cmd([str(VRIFT_BINARY), "gc", "--prune-stale"])
-            
+
             # Run GC --delete
             code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete", "--yes"])
-            
+
             blobs_after_delete1 = get_blob_hashes(cas_dir)
-            
+
             # The shared blob should STILL exist (project2 references it)
             # Only project1's unique blob should be deleted
             shared_still_exists = len(blobs_after_delete1) >= 2  # shared + unique2
-            
+
             if shared_still_exists:
                 print_ok(f"Shared blob protected ({len(blobs_after_delete1)} blobs remain)")
             else:
                 print_fail("Shared blob may have been deleted!")
                 passed = False
-            
+
             # === Step 7: Verify project2 data is intact ===
             print_step(7, "🔴 SAFETY TEST: Verify project2 data integrity")
-            
+
             # Re-ingest project2 (should be instant - all blobs exist)
             proj2_reingest = work_dir / "proj2_reingest.manifest"
-            
-            code, stdout, stderr = run_cmd([
-                str(VRIFT_BINARY), "--the-source-root", str(cas_dir),
-                "ingest", str(proj2), "-o", str(proj2_reingest)
-            ])
-            
+
+            code, stdout, stderr = run_cmd(
+                [str(VRIFT_BINARY), "--the-source-root", str(cas_dir), "ingest", str(proj2), "-o", str(proj2_reingest)]
+            )
+
             if code != 0:
                 print_fail(f"Re-ingest failed: {stderr[:100]}")
                 passed = False
@@ -301,43 +297,43 @@ def main():
                     print_ok("Project 2 fully intact (0 new blobs = all preserved)")
                 else:
                     print_ok("Project 2 re-ingested successfully")
-            
+
             # ================================================================
             # PART 4: FULL CLEANUP
             # ================================================================
             print("\n" + "-" * 40)
             print("PART 4: Full Cleanup Verification")
             print("-" * 40)
-            
+
             # === Step 8: Delete remaining project, GC should clean all ===
             print_step(8, "Delete all projects, verify complete cleanup")
-            
+
             manifest2.unlink()
             proj2_reingest.unlink()
-            
+
             code, _, _ = run_cmd([str(VRIFT_BINARY), "gc", "--prune-stale"])
             code, stdout, stderr = run_cmd([str(VRIFT_BINARY), "gc", "--delete", "--yes"])
-            
+
             blobs_final = get_blob_hashes(cas_dir)
-            
+
             if len(blobs_final) == 0:
                 print_ok("All orphan blobs cleaned")
             else:
                 print_warn(f"{len(blobs_final)} blobs remain (may be from other sources)")
-    
+
     finally:
         # Clean up temporary directory
         if tmp_dir and tmp_dir.exists():
             robust_rmtree(tmp_dir)
-            
+
         # Restore original registry
         if registry_backup is not None:
             REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
             REGISTRY_PATH.write_text(registry_backup)
-            print(f"\n📦 Restored original registry")
+            print("\n📦 Restored original registry")
         elif REGISTRY_PATH.exists():
             REGISTRY_PATH.unlink()
-    
+
     # Summary
     print("\n" + "=" * 60)
     if passed:

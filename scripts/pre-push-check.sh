@@ -21,16 +21,28 @@ echo "✅ Rust formatting OK"
 # 2. Clippy check
 echo ""
 echo "→ Running clippy..."
-if ! cargo clippy --all-targets --all-features -- -D warnings; then
-    echo "❌ Clippy check failed. Please fix the warnings above."
-    exit 1
+if [[ "$(uname)" == "Darwin" ]]; then
+    # Skip io_uring on macOS
+    if ! cargo clippy --workspace --all-targets -- -D warnings; then
+        echo "❌ Clippy check failed."
+        exit 1
+    fi
+else
+    # Linux: check all features (including io_uring)
+    if ! cargo clippy --workspace --all-targets --all-features -- -D warnings; then
+        echo "❌ Clippy check failed."
+        exit 1
+    fi
 fi
 echo "✅ Clippy OK"
 
 # 3. Python formatting (if needed)
-echo ""
-echo "→ Checking Python files..."
-echo "✅ Python checks skipped (add ruff/black if needed)"
+echo "→ Running pre-commit (includes ruff & mypy)..."
+if ! uv run pre-commit run --all-files; then
+    echo "❌ Pre-commit failed. Please fix the errors above."
+    exit 1
+fi
+echo "✅ Python checks OK"
 
 echo ""
 echo "============================================"

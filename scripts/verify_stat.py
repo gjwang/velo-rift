@@ -8,7 +8,7 @@ if len(sys.argv) > 1:
 print(f"Statting {path}...")
 try:
     st = os.stat(path)
-    print(f"Success!")
+    print("Success!")
     print(f"  Mode: {oct(st.st_mode)}")
     print(f"  Size: {st.st_size}")
     print(f"  Nlink: {st.st_nlink}")

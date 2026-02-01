@@ -1,5 +1,4 @@
 import os
-import sys
 import time
 
 vpath = "/vrift/reingest_test.txt"
