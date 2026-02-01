@@ -544,8 +544,10 @@ def main() -> None:
     if full_test:
         datasets_to_test = ["small", "medium", "large", "xlarge"]
 
-    # Create temp directories
-    with tempfile.TemporaryDirectory(prefix="vrift-e2e-") as tmp:
+    # Create temp directory
+    tmp_dir_obj = tempfile.TemporaryDirectory(prefix="vrift-e2e-")
+    try:
+        tmp = tmp_dir_obj.name
         work_dir = Path(tmp) / "work"
         work_dir.mkdir()
 
@@ -637,6 +639,12 @@ def main() -> None:
             result = test_monorepo_dedup(work_dir, monorepo_cas)
             print_result(result)
             results.append(result)
+    finally:
+        try:
+            tmp_dir_obj.cleanup()
+        except PermissionError:
+            print("\n⚠️  Cleanup warning: some temporary files could not be removed (Permission Denied).")
+            print("   These will be cleaned up by the system or next CI run.")
 
     # Summary
     print("\n" + "=" * 60)
