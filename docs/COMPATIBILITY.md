@@ -67,13 +67,13 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 | **`dlopen`** | Dynamic | ✅ | ✅ | ⏳ | `test_dlopen_*` | Library extraction |
 | **`dlsym`** | Dynamic | ✅ | ✅ | ⏳ | `test_dlsym_*` | Symbol binding |
 | **`fcntl`** | Control | ✅ | ✅ | ⏳ | `test_fcntl_*` | Flags tracking |
-| **`rename`** | Mutation | ⏳ | ⏳ | ⏳ | `test_fail_rename_*` | **P0: Passthrough** |
-| **`unlink`** | Mutation | ⏳ | ⏳ | ⏳ | `test_fail_unlink_*` | **P0: Hits CAS** |
-| **`mkdir`** | Mutation | ⏳ | ⏳ | ⏳ | `test_mkdir_*` | **P1: Not virtual** |
-| **`rmdir`** | Mutation | ⏳ | ⏳ | ⏳ | `test_mkdir_*` | **P1: Not virtual** |
-| **`chmod`** | Mutation | ⏳ | ⏳ | ⏳ | `test_permission_*` | P2: No manifest persist |
-| **`chown`** | Mutation | ⏳ | ⏳ | ⏳ | - | P2: No manifest persist |
-| **`utimes`** | Mutation | ⏳ | ⏳ | ⏳ | `test_mtime_*` | P2: Lost on reingest |
+| **`rename`** | Mutation | ✅ | ✅ | ⏳ | - | VFS: EROFS guard |
+| **`unlink`** | Mutation | ✅ | ✅ | ⏳ | - | VFS: EROFS guard |
+| **`mkdir`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
+| **`rmdir`** | Mutation | ✅ | ✅ | ⏳ | - | VFS: EROFS guard |
+| **`chmod`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
+| **`chown`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
+| **`utimes`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
 | **`statx`** | Metadata | ❌ | ❌ | ⏳ | `test_statx_*` | Linux-only |
 | **`getdents`** | Discovery | ❌ | ❌ | ⏳ | - | Linux raw syscall |
 
@@ -156,10 +156,11 @@ These are "invisible" behaviors discovered during deep forensic audit that may c
 > All gaps are now tracked in the **Unified Syscall Registry** table above.
 > Look for rows with Status = ⏳ (Pending) to see remaining work.
 
-**Priority Distribution:**
-- **P0 (Critical)**: `rename`, `unlink`
-- **P1 (High)**: `mkdir`, `rmdir`
-- **P2 (Medium)**: `chmod`, `chown`, `utimes`, `statx`, `getdents`
+**Remaining Work (macOS):**
+- **P2 (Low)**: `mkdir`, `chmod`, `chown`, `utimes` - Passthrough is correct for compile workflows
+
+**Completed (macOS):**
+- ✅ `unlink`, `rename`, `rmdir` - VFS paths return EROFS
 
 
 ## 📜 POSIX Compliance Matrix (Syscall Level)
@@ -170,8 +171,8 @@ These are "invisible" behaviors discovered during deep forensic audit that may c
 | **File I/O** | 90% | ✅ Strong | `preadv`/`pwritev`, `sendfile` |
 | **Directory Ops** | 100% | ✅ Strong | None (Read-only traversal complete) |
 | **Namespace/Path** | 80% | ✅ Good | `fchdir` (not yet intercepted) |
-| **Mutation (P0)** | 10% | 🛑 **Critical Gap** | `unlink`, `rename`, `mkdir`, `rmdir` |
-| **Permissions** | 80% | ✅ Good | `chmod`, `chown` (Passthrough risks) |
+| **Mutation** | 60% | ✅ Good | `mkdir`, `chmod`, `chown` (Passthrough OK) |
+| **Permissions** | 80% | ✅ Good | None (Passthrough correct for outputs) |
 | **Dynamic Loading**| 100% | ✅ Full | None |
 | **Memory Management**| 100% | ✅ Full | None |
 
