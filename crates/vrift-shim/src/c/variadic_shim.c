@@ -42,7 +42,9 @@ extern int velo_openat_impl(int dirfd, const char *path, int flags,
  */
 volatile char INITIALIZING = 2;
 
-__attribute__((constructor)) void vfs_init_constructor() { INITIALIZING = 1; }
+__attribute__((constructor(101))) void vfs_init_constructor() {
+  INITIALIZING = 1;
+}
 
 /* --- Raw Syscall Implementation --- */
 

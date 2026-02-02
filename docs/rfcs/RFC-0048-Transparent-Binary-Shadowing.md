@@ -2,8 +2,8 @@
 
 ## Status: ACTIVE (Phase 1 Complete)
 
-> **Original Approach (Binary Shadowing)**: ❌ NOT VIABLE  
-> **Current Approach (PATH Shim / Inception Mode)**: ✅ IMPLEMENTED
+> **Original Approach (Binary Shadowing)**: ❌ NOT VIABLE (Killed: 9 on ARM64)
+> **Current Approach (PATH Shim / Inception Mode)**: ✅ PROVEN & IMPLEMENTED
 
 ---
 
@@ -28,10 +28,10 @@ On macOS, **System Integrity Protection (SIP)** prevents `DYLD_INSERT_LIBRARIES`
 
 | ❌ Rejected Approach | Why |
 |---------------------|-----|
-| Global LD_PRELOAD hijack | Too dangerous, breaks system |
+| Binary Shadowing    | `Killed: 9` on ARM64 due to signature mismatch on system binary copies |
+| Global LD_PRELOAD   | Too dangerous, breaks system |
 | ptrace / syscall hook | Security nightmare |
-| Replace /bin/bash | Instant user revolt |
-| Kernel LSM / fanotify | Too invasive |
+| Replace /bin/bash   | Instant user revolt |
 
 ### 2.2 What We ARE Doing
 
@@ -161,16 +161,13 @@ export PS1="(vrift 🌀) $PS1"
 .vrift/
 ├── bin/
 │   ├── chmod      ← wrapper script
-│   ├── chown      ← wrapper script
 │   ├── rm         ← wrapper script
 │   ├── cp         ← wrapper script
-│   ├── mv         ← wrapper script
-│   ├── touch      ← wrapper script
-│   ├── mkdir      ← wrapper script
-│   ├── npm        ← wrapper script (optional)
-│   └── cargo      ← wrapper script (optional)
+│   ├── cat        ← wrapper script
+│   └── ...
 ├── helpers/
-│   ├── vrift-chmod  ← shim-loadable binary
+│   ├── tiny_chmod  ← minimalist C helper (Interception-ready)
+│   ├── tiny_cat    ← minimalist C helper (Interception-ready)
 │   └── ...
 └── manifest.lmdb
 ```
@@ -281,10 +278,10 @@ $
 - [ ] Target commands: `chmod`, `chown`, `rm`, `cp`, `mv`, `touch`, `mkdir`, `rmdir`
 - [ ] Make wrappers executable and self-contained
 
-### Phase 3: Helper Binaries
-- [ ] Compile shim-loadable helper binaries (vrift-chmod, etc.)
-- [ ] Bundle with vrift distribution or compile on demand
-- [ ] These are NOT SIP-protected so shim injection works
+### Phase 3: Helper Binaries ✅ VERIFIED
+- [x] Compile shim-loadable helper binaries (`tiny_chmod`, `tiny_cat`) ✅
+- [x] Verified bypass of `Killed: 9` via ad-hoc signed local helper ✅
+- [ ] Bundle common helpers with Velo Rift distribution
 
 ### Phase 4: Build System Integration
 - [ ] Test with Makefile-based projects

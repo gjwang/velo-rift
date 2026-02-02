@@ -796,7 +796,6 @@ impl ShimState {
                     .is_ok()
         };
         if !transitioned {
-            // Someone else is initializing or we are already Done (0) but raced with SHIM_STATE load
             return None;
         }
 

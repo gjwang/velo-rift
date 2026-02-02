@@ -17,9 +17,23 @@ chmod 444 "$VELO_PROJECT_ROOT/test.txt"
 ORIGINAL_MODE=$(stat -f "%Lp" "$VELO_PROJECT_ROOT/test.txt")
 echo "Original mode: $ORIGINAL_MODE"
 
-# Copy chmod to bypass SIP
+# Avoid SIP and Signature issues by compiling a tiny chmod
+cat <<EOF > "$TEST_DIR/tiny_chmod.c"
+#include <sys/stat.h>
+#include <stdio.h>
+#include <stdlib.h>
+int main(int argc, char** argv) {
+    if (argc < 3) return 1;
+    int mode = (int)strtol(argv[1], NULL, 8);
+    if (chmod(argv[2], mode) < 0) {
+        perror("chmod");
+        return 1;
+    }
+    return 0;
+}
+EOF
 mkdir -p "$TEST_DIR/bin"
-cp /bin/chmod "$TEST_DIR/bin/chmod"
+gcc "$TEST_DIR/tiny_chmod.c" -o "$TEST_DIR/bin/chmod"
 CHMOD_CMD="$TEST_DIR/bin/chmod"
 
 # Setup Shim

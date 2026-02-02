@@ -14,6 +14,7 @@ pub unsafe extern "C" fn readlink_shim(
         *const (),
         unsafe extern "C" fn(*const c_char, *mut c_char, size_t) -> ssize_t,
     >(IT_READLINK.old_func);
+    passthrough_if_init!(real, path, buf, bufsiz);
     real(path, buf, bufsiz)
 }
 
@@ -27,5 +28,6 @@ pub unsafe extern "C" fn realpath_shim(
         *const (),
         unsafe extern "C" fn(*const c_char, *mut c_char) -> *mut c_char,
     >(IT_REALPATH.old_func);
+    passthrough_if_init!(real, path, resolved_path);
     real(path, resolved_path)
 }

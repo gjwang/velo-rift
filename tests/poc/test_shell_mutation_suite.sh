@@ -17,12 +17,11 @@ mkdir -p "$VELO_PROJECT_ROOT/.vrift"
 echo "PROTECTED" > "$VELO_PROJECT_ROOT/test.txt"
 chmod 444 "$VELO_PROJECT_ROOT/test.txt"
 
-# Copy binaries to bypass SIP
+# Copy and sign all utilities to bypass SIP/Security restrictions
 mkdir -p "$TEST_DIR/bin"
-for cmd in chmod rm mv ln touch cp cat; do
-    if which $cmd >/dev/null 2>&1; then
-        cp "$(which $cmd)" "$TEST_DIR/bin/$cmd"
-    fi
+for cmd in cp mv mkdir rm cat; do
+    cp "/bin/$cmd" "$TEST_DIR/bin/$cmd"
+    codesign -s - -f "$TEST_DIR/bin/$cmd" 2>/dev/null || true
 done
 
 # Setup shim environment with local PATH

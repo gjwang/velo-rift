@@ -315,7 +315,7 @@ pub unsafe extern "C" fn velo_open_impl(p: *const c_char, f: c_int, m: mode_t) -
                     lateout("x0") ret,
                 );
                 if ret < 0 {
-                    crate::set_errno(-ret as c_int);
+                    crate::set_errno(-ret as i64 as c_int);
                     -1
                 } else {
                     ret as c_int
@@ -323,6 +323,8 @@ pub unsafe extern "C" fn velo_open_impl(p: *const c_char, f: c_int, m: mode_t) -
             }
         }
     }
+
+    passthrough_if_init!(raw_open, p, f, m);
 
     // Force initialization if needed. ShimState::get() sets VFS_READY on success.
     if CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
@@ -402,6 +404,8 @@ pub unsafe extern "C" fn velo_openat_impl(
             }
         }
     }
+
+    passthrough_if_init!(raw_openat, dirfd, p, f, m);
 
     // Force initialization if needed. ShimState::get() sets VFS_READY on success.
     if CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
