@@ -33,6 +33,41 @@ pub(crate) static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 #[no_mangle]
 pub static VFS_READY: AtomicU8 = AtomicU8::new(0);
 
+// ============================================================================
+// Granular Logging & Circuit Breaker (RFC-0050)
+// ============================================================================
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
+    Off = 5,
+}
+
+impl LogLevel {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => LogLevel::Trace,
+            1 => LogLevel::Debug,
+            2 => LogLevel::Info,
+            3 => LogLevel::Warn,
+            4 => LogLevel::Error,
+            _ => LogLevel::Off,
+        }
+    }
+}
+
+pub static LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
+
+/// Circuit breaker state: trips after consecutive failures
+pub static CIRCUIT_BREAKER_FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub static CIRCUIT_BREAKER_THRESHOLD: AtomicUsize = AtomicUsize::new(5);
+pub static CIRCUIT_TRIPPED: AtomicBool = AtomicBool::new(false);
+
 /// Activate VFS - called when daemon handshake succeeds
 #[inline]
 pub fn activate_vfs() {
@@ -465,6 +500,34 @@ impl ShimState {
 
         if !unsafe { libc::getenv(c"VRIFT_DEBUG".as_ptr()) }.is_null() {
             DEBUG_ENABLED.store(true, Ordering::Relaxed);
+        }
+
+        // RFC-0050: Read log level
+        let level_ptr = unsafe { libc::getenv(c"VRIFT_LOG_LEVEL".as_ptr()) };
+        if !level_ptr.is_null() {
+            let level_str = unsafe { CStr::from_ptr(level_ptr).to_string_lossy() };
+            let level = match level_str.to_lowercase().as_str() {
+                "trace" => LogLevel::Trace,
+                "debug" => LogLevel::Debug,
+                "info" => LogLevel::Info,
+                "warn" => LogLevel::Warn,
+                "error" => LogLevel::Error,
+                "off" => LogLevel::Off,
+                _ => LogLevel::Info,
+            };
+            LOG_LEVEL.store(level as u8, Ordering::Relaxed);
+        }
+
+        // RFC-0050: Read circuit breaker threshold
+        let threshold_ptr = unsafe { libc::getenv(c"VRIFT_CIRCUIT_BREAKER_THRESHOLD".as_ptr()) };
+        if !threshold_ptr.is_null() {
+            if let Ok(threshold) = unsafe {
+                CStr::from_ptr(threshold_ptr)
+                    .to_string_lossy()
+                    .parse::<usize>()
+            } {
+                CIRCUIT_BREAKER_THRESHOLD.store(threshold, Ordering::Relaxed);
+            }
         }
         let cas_ptr = unsafe { libc::getenv(c"VRIFT_CAS_ROOT".as_ptr()) };
         let cas_root: std::borrow::Cow<'static, str> = if cas_ptr.is_null() {

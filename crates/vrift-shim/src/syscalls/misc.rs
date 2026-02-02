@@ -189,6 +189,43 @@ pub unsafe extern "C" fn linkat_shim(
 // RFC-0047: Mutation Perimeter - Block modifications to VFS-managed files
 // ============================================================================
 
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn unlink_shim(path: *const c_char) -> c_int {
+    let real = std::mem::transmute::<*const (), unsafe extern "C" fn(*const c_char) -> c_int>(
+        IT_UNLINK.old_func,
+    );
+    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        return real(path);
+    }
+    block_vfs_mutation(path).unwrap_or_else(|| real(path))
+}
+
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
+    let real = std::mem::transmute::<*const (), unsafe extern "C" fn(*const c_char) -> c_int>(
+        IT_RMDIR.old_func,
+    );
+    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        return real(path);
+    }
+    block_vfs_mutation(path).unwrap_or_else(|| real(path))
+}
+
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> c_int {
+    let real = std::mem::transmute::<
+        *const (),
+        unsafe extern "C" fn(*const c_char, libc::mode_t) -> c_int,
+    >(IT_MKDIR.old_func);
+    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        return real(path, mode);
+    }
+    block_vfs_mutation(path).unwrap_or_else(|| real(path, mode))
+}
+
 /// Helper: Check if path is in VFS and return EPERM if so
 /// RFC-0048: Must check is_vfs_ready() FIRST to avoid deadlock during init (Pattern 2543)
 #[cfg(target_os = "macos")]

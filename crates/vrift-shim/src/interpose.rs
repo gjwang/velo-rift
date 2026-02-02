@@ -3,13 +3,16 @@
 #![allow(clippy::missing_safety_doc)]
 
 #[cfg(target_os = "macos")]
-use crate::syscalls::dir::{closedir_shim, opendir_shim, readdir_shim};
+use crate::syscalls::dir::{chdir_shim, closedir_shim, getcwd_shim, opendir_shim, readdir_shim};
 #[cfg(target_os = "macos")]
-use crate::syscalls::io::{dup2_shim, dup_shim, fchdir_shim, ftruncate_shim, lseek_shim};
+use crate::syscalls::io::{
+    close_shim, dup2_shim, dup_shim, fchdir_shim, ftruncate_shim, lseek_shim, read_shim, write_shim,
+};
 #[cfg(target_os = "macos")]
 use crate::syscalls::misc::{
-    chflags_shim, chmod_shim, fchmodat_shim, link_shim, linkat_shim, removexattr_shim, rename_shim,
-    renameat_shim, setxattr_shim, truncate_shim, utimensat_shim, utimes_shim,
+    chflags_shim, chmod_shim, fchmodat_shim, link_shim, linkat_shim, mkdir_shim, removexattr_shim,
+    rename_shim, renameat_shim, rmdir_shim, setxattr_shim, truncate_shim, unlink_shim,
+    utimensat_shim, utimes_shim,
 };
 #[cfg(target_os = "macos")]
 use crate::syscalls::mmap::{mmap_shim, munmap_shim};
@@ -25,8 +28,6 @@ use libc::{c_char, c_int, c_long, mode_t};
 
 #[cfg(target_os = "macos")]
 use libc::{c_void, dirent, pid_t, size_t, ssize_t, timespec, timeval, DIR};
-#[cfg(target_os = "macos")]
-use std::ffi::CStr;
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -188,106 +189,11 @@ macro_rules! shim {
 // - misc: rename_shim (with EXDEV logic)
 // RFC-0047: close() with CoW reingest for dirty FDs
 // NOTE: Reingest logic temporarily disabled pending investigation
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
-    close(fd)
-}
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn write_shim(fd: c_int, b: *const c_void, c: size_t) -> ssize_t {
-    write(fd, b, c)
-}
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn read_shim(fd: c_int, b: *mut c_void, c: size_t) -> ssize_t {
-    read(fd, b, c)
-}
 // Note: readlink_shim, realpath_shim imported from syscalls/path.rs
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn getcwd_shim(b: *mut c_char, s: size_t) -> *mut c_char {
-    getcwd(b, s)
-}
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn chdir_shim(p: *const c_char) -> c_int {
-    chdir(p)
-}
-// RFC-0047: VFS-aware unlink - removes from Manifest for VFS paths
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn unlink_shim(p: *const c_char) -> c_int {
-    use crate::state::{ShimGuard, SHIM_STATE};
-    use std::sync::atomic::Ordering;
-
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => return unlink(p),
-    };
-
-    if p.is_null() {
-        return unlink(p);
-    }
-
-    let path_str = match CStr::from_ptr(p).to_str() {
-        Ok(s) => s,
-        Err(_) => return unlink(p),
-    };
-
-    let state_ptr = SHIM_STATE.load(Ordering::Acquire);
-    if state_ptr.is_null() {
-        return unlink(p);
-    }
-    let state = &*state_ptr;
-
-    // VFS path: remove from manifest
-    if state.psfs_applicable(path_str) {
-        if let Ok(()) = state.manifest_remove(path_str) {
-            return 0;
-        }
-        // Fallthrough to real unlink if IPC fails
-    }
-
-    unlink(p)
-}
-// Note: rename_shim, renameat_shim imported from syscalls/misc.rs with EXDEV logic
-// RFC-0047: VFS-aware rmdir - removes directory from Manifest for VFS paths
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn rmdir_shim(p: *const c_char) -> c_int {
-    use crate::state::{ShimGuard, SHIM_STATE};
-    use std::sync::atomic::Ordering;
-
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => return rmdir(p),
-    };
-
-    if p.is_null() {
-        return rmdir(p);
-    }
-
-    let path_str = match CStr::from_ptr(p).to_str() {
-        Ok(s) => s,
-        Err(_) => return rmdir(p),
-    };
-
-    let state_ptr = SHIM_STATE.load(Ordering::Acquire);
-    if state_ptr.is_null() {
-        return rmdir(p);
-    }
-    let state = &*state_ptr;
-
-    // VFS path: remove from manifest
-    if state.psfs_applicable(path_str) {
-        if let Ok(()) = state.manifest_remove(path_str) {
-            return 0;
-        }
-    }
-
-    rmdir(p)
-}
+// Note: getcwd_shim, chdir_shim imported from syscalls/dir.rs
+// RFC-0047: rename_shim, renameat_shim imported from syscalls/misc.rs with EXDEV logic
+// Note: unlink_shim, rmdir_shim, mkdir_shim imported from syscalls/misc.rs
+// Note: close_shim imported from syscalls/io.rs
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn dlopen_shim(p: *const c_char, f: c_int) -> *mut c_void {
@@ -370,41 +276,6 @@ pub unsafe extern "C" fn flock_shim(fd: c_int, op: c_int) -> c_int {
 }
 // utimensat_shim moved to syscalls/misc.rs with VFS blocking logic
 // RFC-0047: VFS-aware mkdir - adds directory entry to Manifest for VFS paths
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub unsafe extern "C" fn mkdir_shim(p: *const c_char, m: mode_t) -> c_int {
-    use crate::state::{ShimGuard, SHIM_STATE};
-    use std::sync::atomic::Ordering;
-
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => return mkdir(p, m),
-    };
-
-    if p.is_null() {
-        return mkdir(p, m);
-    }
-
-    let path_str = match CStr::from_ptr(p).to_str() {
-        Ok(s) => s,
-        Err(_) => return mkdir(p, m),
-    };
-
-    let state_ptr = SHIM_STATE.load(Ordering::Acquire);
-    if state_ptr.is_null() {
-        return mkdir(p, m);
-    }
-    let state = &*state_ptr;
-
-    // VFS path: add directory entry to manifest
-    if state.psfs_applicable(path_str) {
-        if let Ok(()) = state.manifest_mkdir(path_str, m) {
-            return 0;
-        }
-    }
-
-    mkdir(p, m)
-}
 // Called by C variadic wrapper (fcntl_c_wrapper) with clean args
 #[no_mangle]
 pub unsafe extern "C" fn velo_fcntl_impl(fd: c_int, cmd: c_int, arg: c_long) -> c_int {

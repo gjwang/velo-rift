@@ -8,8 +8,8 @@ set -e
 # Setup paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-VELO_BIN="${PROJECT_ROOT}/target/release/vrift"
-VRIFTD_BIN="${PROJECT_ROOT}/target/release/vriftd"
+VELO_BIN="${PROJECT_ROOT}/target/debug/vrift"
+VRIFTD_BIN="${PROJECT_ROOT}/target/debug/vriftd"
 
 # Determine OS and preload variable
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -31,12 +31,12 @@ mkdir -p "$PHYSICAL_ROOT" "$CAS_ROOT"
 echo "Testing CoW/Iron Law in $TEST_DIR"
 
 # 2. Preparation
-echo "Original Content" > "$PHYSICAL_ROOT/original.txt"
+echo "Original Content" > "$PHYSICAL_ROOT/original.txt" || true
 
 # 3. Ingest into VRift
 echo ""
 export VRIFT_CAS_ROOT="$(realpath "$CAS_ROOT")"
-"$VELO_BIN" ingest "$PHYSICAL_ROOT" --output "$TEST_DIR/manifest.lmdb"
+"$VELO_BIN" ingest "$PHYSICAL_ROOT" --output "$TEST_DIR/.vrift/manifest.lmdb"
 
 CAS_FILE=$(find "$CAS_ROOT" -type f | grep -v "\.lock" | head -n 1)
 echo "CAS File: $CAS_FILE"
@@ -44,14 +44,15 @@ echo "CAS File: $CAS_FILE"
 # 4. Start vriftd
 pkill vriftd 2>/dev/null || true
 sleep 1
-export VRIFT_MANIFEST="$TEST_DIR"
+export VRIFT_MANIFEST="$TEST_DIR/.vrift/manifest.lmdb"
+export RUST_LOG=info
 "$VRIFTD_BIN" > "$TEST_DIR/daemon.log" 2>&1 &
 DAEMON_PID=$!
 
 cleanup() {
     echo "Cleaning up..."
     kill $DAEMON_PID 2>/dev/null || true
-    rm -rf "$TEST_DIR" 2>/dev/null || true
+    # rm -rf "$TEST_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -94,9 +95,9 @@ echo "Step 2: Testing WITH shim (Simulating CoW)..."
 
 # Find the shim
 if [[ "$OS_TYPE" == "Darwin" ]]; then
-    SHIM_BIN=$(find "$PROJECT_ROOT/target/release" -name "libvrift_shim.dylib" | head -n 1)
+    SHIM_BIN=$(find "$PROJECT_ROOT/target/debug" -name "libvrift_shim.dylib" | head -n 1)
 else
-    SHIM_BIN=$(find "$PROJECT_ROOT/target/release" -name "libvrift_shim.so" | head -n 1)
+    SHIM_BIN=$(find "$PROJECT_ROOT/target/debug" -name "libvrift_shim.so" | head -n 1)
 fi
 
 if [[ -z "$SHIM_BIN" ]]; then
@@ -108,6 +109,7 @@ echo "Using shim: $SHIM_BIN"
 
 export VRIFT_VFS_PREFIX="$PHYSICAL_ROOT"
 export VRIFT_DEBUG=1
+export VRIFT_MANIFEST="$TEST_DIR/.vrift/manifest.lmdb"
 export "$PRELOAD_VAR"="$(realpath "$SHIM_BIN")"
 if [[ "$OS_TYPE" == "Darwin" ]]; then
     export DYLD_FORCE_FLAT_NAMESPACE=1
@@ -117,9 +119,9 @@ TEST_PATH="$PHYSICAL_ROOT/original.txt"
 
 # This SHOULD trigger CoW, breaking link, and allowing write without corrupting CAS
 echo "Running writer with shim on $TEST_PATH..."
-# We MUST use a separate process because the shell redirection is not shimmed in the current shell
-# Note: This may fail with permission denied if CoW isn't working, which is expected
-sh -c "echo 'new content' > '$TEST_PATH'" || true
+# The cow_writer is a custom binary, so it will load the shim even on macOS (bypass SIP)
+# Export everything so the child process sees it
+./scripts/cow_writer "$TEST_PATH" "new content" > "$TEST_DIR/shim.log" 2>&1 || true
 
 # Clear preload for verification
 unset "$PRELOAD_VAR"

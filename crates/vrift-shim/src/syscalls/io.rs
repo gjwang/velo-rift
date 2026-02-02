@@ -3,16 +3,16 @@
 //! Provides file descriptor tracking for VFS files, enabling proper
 //! handling of dup/dup2, fchdir, lseek, ftruncate, etc.
 
-use libc::c_int;
 #[cfg(target_os = "macos")]
 use libc::off_t;
+use libc::{c_int, c_void};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
 #[cfg(target_os = "macos")]
 use crate::interpose::{IT_DUP, IT_DUP2, IT_FCHDIR, IT_FTRUNCATE, IT_LSEEK};
 #[cfg(target_os = "macos")]
-use crate::state::INITIALIZING;
+use crate::state::{CIRCUIT_TRIPPED, INITIALIZING};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::Ordering;
 
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
     let real =
         std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_DUP.old_func);
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(oldfd);
     }
 
@@ -119,7 +119,7 @@ pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
         IT_DUP2.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(oldfd, newfd);
     }
 
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn fchdir_shim(fd: c_int) -> c_int {
     let real =
         std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_FCHDIR.old_func);
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(fd);
     }
 
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn lseek_shim(fd: c_int, offset: off_t, whence: c_int) -> 
         IT_LSEEK.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(fd, offset, whence);
     }
 
@@ -189,11 +189,102 @@ pub unsafe extern "C" fn ftruncate_shim(fd: c_int, length: off_t) -> c_int {
         IT_FTRUNCATE.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(fd, length);
     }
 
     // ftruncate works on the underlying file (CoW copy)
     // The Manifest update happens on close
     real(fd, length)
+}
+
+// ============================================================================
+// close shim - untrack and trigger COW reingest
+// ============================================================================
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn write_shim(
+    fd: c_int,
+    buf: *const c_void,
+    count: libc::size_t,
+) -> libc::ssize_t {
+    use crate::interpose::IT_WRITE;
+    let real = std::mem::transmute::<
+        *const (),
+        unsafe extern "C" fn(c_int, *const c_void, libc::size_t) -> libc::ssize_t,
+    >(IT_WRITE.old_func);
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+        return real(fd, buf, count);
+    }
+    real(fd, buf, count)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn read_shim(
+    fd: c_int,
+    buf: *mut c_void,
+    count: libc::size_t,
+) -> libc::ssize_t {
+    use crate::interpose::IT_READ;
+    let real = std::mem::transmute::<
+        *const (),
+        unsafe extern "C" fn(c_int, *mut c_void, libc::size_t) -> libc::ssize_t,
+    >(IT_READ.old_func);
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+        return real(fd, buf, count);
+    }
+    real(fd, buf, count)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
+    use crate::ipc::sync_ipc_manifest_reingest;
+    use crate::state::{ShimGuard, ShimState};
+
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return libc::close(fd),
+    };
+
+    let state = match ShimState::get() {
+        Some(s) => s,
+        None => return libc::close(fd),
+    };
+
+    // Check if this FD is a COW session
+    let cow_info = if let Ok(mut fds) = state.open_fds.lock() {
+        fds.remove(&fd) // Remove from tracking on close
+    } else {
+        None
+    };
+
+    if let Some(info) = cow_info {
+        vfs_log!(
+            "COW CLOSE: fd={} vpath='{}' temp='{}'",
+            fd,
+            info.vpath,
+            info.temp_path
+        );
+
+        // Final close of the temp file before reingest
+        let res = libc::close(fd);
+
+        // Trigger reingest IPC
+        // RFC-0047: ManifestReingest updates the CAS and Manifest
+        if !sync_ipc_manifest_reingest(&state.socket_path, &info.vpath, &info.temp_path) {
+            vfs_log!("REINGEST FAILED: IPC error for '{}'", info.vpath);
+        }
+
+        // Note: info.temp_path is cleaned up by the daemon (zero-copy move)
+        // or discarded if IPC failed (though that leaves an orphan temp file)
+
+        res
+    } else {
+        // Not a COW file, but might be a VFS read-only file or non-VFS file
+        untrack_fd(fd);
+        libc::close(fd)
+    }
 }

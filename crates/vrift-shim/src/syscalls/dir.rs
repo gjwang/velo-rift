@@ -18,7 +18,7 @@ pub unsafe extern "C" fn opendir_shim(path: *const libc::c_char) -> *mut c_void 
     >(IT_OPENDIR.old_func);
 
     // Early-boot passthrough
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(path);
     }
 
@@ -167,4 +167,31 @@ pub unsafe extern "C" fn closedir_shim(dir: *mut c_void) -> c_int {
     }
 
     real(dir)
+}
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn getcwd_shim(
+    buf: *mut libc::c_char,
+    size: libc::size_t,
+) -> *mut libc::c_char {
+    let real = std::mem::transmute::<
+        *const (),
+        unsafe extern "C" fn(*mut libc::c_char, libc::size_t) -> *mut libc::c_char,
+    >(IT_GETCWD.old_func);
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+        return real(buf, size);
+    }
+    real(buf, size)
+}
+
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn chdir_shim(path: *const libc::c_char) -> c_int {
+    let real = std::mem::transmute::<*const (), unsafe extern "C" fn(*const libc::c_char) -> c_int>(
+        IT_CHDIR.old_func,
+    );
+    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+        return real(path);
+    }
+    real(path)
 }

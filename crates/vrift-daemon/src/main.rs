@@ -665,75 +665,64 @@ async fn handle_request(
         // RFC-0047: ManifestReingest for CoW close path
         VeloRequest::ManifestReingest { vpath, temp_path } => {
             if let Some(ref ws) = current_workspace {
-                // Read the temp file and compute hash
-                match std::fs::read(&temp_path) {
-                    Ok(data) => {
-                        // Store to CAS (computes hash and stores)
-                        let hash_bytes = match state.cas.store(&data) {
-                            Ok(h) => h,
-                            Err(e) => {
-                                tracing::warn!("vriftd: ManifestReingest CAS store failed: {}", e);
-                                return VeloResponse::Error(format!("CAS insert failed: {}", e));
-                            }
-                        };
+                // Get metadata before moving
+                let meta = std::fs::metadata(&temp_path).ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
 
-                        // Update CAS index
-                        {
-                            let mut index = state.cas_index.lock().unwrap();
-                            index.insert(hash_bytes, data.len() as u64);
-                        }
-
-                        // Get current mtime and mode, or use defaults
-                        let meta = std::fs::metadata(&temp_path).ok();
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0);
-                        let mtime = meta
-                            .as_ref()
-                            .map(|m| {
-                                m.modified()
-                                    .ok()
-                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                    .map(|d| d.as_nanos() as u64)
-                                    .unwrap_or(now)
-                            })
-                            .unwrap_or(now);
-                        let mode = meta
-                            .as_ref()
-                            .map(|m| m.permissions().mode())
-                            .unwrap_or(0o644);
-
-                        // Create new VnodeEntry and update Manifest
-                        let entry = vrift_manifest::VnodeEntry::new_file(
-                            hash_bytes,
-                            data.len() as u64,
-                            mtime,
-                            mode,
-                        );
-                        let manifest = ws.manifest.lock().unwrap();
-                        manifest.insert(&vpath, entry, AssetTier::Tier2Mutable);
-                        ws.bloom.add(&vpath);
-                        let _ = manifest.commit();
-                        export_mmap_cache(&manifest, &ws.project_root);
-
-                        tracing::info!(
-                            "vriftd: ManifestReingest '{}' -> {} bytes, hash {:?}",
-                            vpath,
-                            data.len(),
-                            &hash_bytes[..4]
-                        );
-                        VeloResponse::ManifestAck { entry: None }
-                    }
+                // Store to CAS via MOVE (Zero-Copy)
+                let hash_bytes = match state.cas.store_by_move(&temp_path) {
+                    Ok(h) => h,
                     Err(e) => {
                         tracing::warn!(
-                            "vriftd: ManifestReingest read failed: {} - {}",
-                            temp_path,
-                            e
+                            "vriftd: ManifestReingest CAS move failed: {} (path={})",
+                            e,
+                            temp_path
                         );
-                        VeloResponse::Error(format!("Failed to read temp file: {}", e))
+                        return VeloResponse::Error(format!("CAS move failed: {}", e));
                     }
+                };
+
+                // Update CAS index
+                {
+                    let mut index = state.cas_index.lock().unwrap();
+                    index.insert(hash_bytes, size);
                 }
+
+                // Get current mtime and mode, or use defaults
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let mtime = meta
+                    .as_ref()
+                    .map(|m| {
+                        m.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(now)
+                    })
+                    .unwrap_or(now);
+                let mode = meta
+                    .as_ref()
+                    .map(|m| m.permissions().mode())
+                    .unwrap_or(0o644);
+
+                // Create new VnodeEntry and update Manifest
+                let entry = vrift_manifest::VnodeEntry::new_file(hash_bytes, size, mtime, mode);
+                let manifest = ws.manifest.lock().unwrap();
+                manifest.insert(&vpath, entry, AssetTier::Tier2Mutable);
+                ws.bloom.add(&vpath);
+                let _ = manifest.commit();
+                export_mmap_cache(&manifest, &ws.project_root);
+
+                tracing::info!(
+                    "vriftd: ManifestReingest '{}' -> {} bytes, hash {:?}",
+                    vpath,
+                    size,
+                    &hash_bytes[..4]
+                );
+                VeloResponse::ManifestAck { entry: None }
             } else {
                 VeloResponse::Error("Workspace not registered".to_string())
             }

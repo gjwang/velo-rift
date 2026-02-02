@@ -1,13 +1,14 @@
 use crate::state::*;
 use libc::{c_char, c_int, c_void, mode_t};
 use std::ffi::CStr;
+use std::sync::atomic::Ordering;
 
 /// Open implementation with VFS detection and CoW semantics.
 ///
 /// For paths in the VFS domain:
 /// - Read-only opens: Resolve CAS blob path and open directly
 /// - Write opens: Copy CAS blob to temp file, track for reingest on close
-unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c_int> {
+pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c_int> {
     if path.is_null() {
         return None;
     }
@@ -73,53 +74,80 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
         vfs_log!("open write request for '{}'", vpath.absolute);
 
         // BBW (Break-Before-Write): Always create a CoW temp copy for writes.
-        let temp_path = format!("/tmp/vrift_cow_{}.tmp", libc::getpid());
+        // RFC-0052: Use mkstemp for atomic thread-safe temp file creation
+        let mut template =
+            format!("/tmp/vrift_cow_{}_XXXXXX\0", unsafe { libc::getpid() }).into_bytes();
+        let temp_fd = unsafe { libc::mkstemp(template.as_mut_ptr() as *mut libc::c_char) };
+        if temp_fd < 0 {
+            vfs_log!("COW FAILED: mkstemp failed (errno={})", unsafe {
+                *libc::__error()
+            });
+            return None;
+        }
+
+        // Safety: mkstemp modifies the template in place, and we ensured \0 terminator
+        let temp_path =
+            match unsafe { CStr::from_ptr(template.as_ptr() as *const libc::c_char).to_str() } {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    unsafe { libc::close(temp_fd) };
+                    return None;
+                }
+            };
+        // Close mkstemp fd; subsequent logic opens it with original requested flags
+        unsafe { libc::close(temp_fd) };
+        let temp_cpath = std::ffi::CString::new(temp_path.as_str()).ok()?;
+
         vfs_log!("COW TRIGGERED: '{}' -> '{}'", vpath.absolute, temp_path);
 
         let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
-        let temp_cpath = std::ffi::CString::new(temp_path.as_str()).ok()?;
 
-        let src_fd = libc::open(blob_cpath.as_ptr(), libc::O_RDONLY);
+        let src_fd = unsafe { libc::open(blob_cpath.as_ptr(), libc::O_RDONLY) };
         if src_fd >= 0 {
-            let dst_fd = libc::open(
-                temp_cpath.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            );
+            let dst_fd = unsafe {
+                libc::open(
+                    temp_cpath.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o644,
+                )
+            };
             if dst_fd >= 0 {
                 let mut buf = [0u8; 8192];
                 loop {
-                    let n = libc::read(src_fd, buf.as_mut_ptr() as *mut c_void, buf.len());
+                    let n =
+                        unsafe { libc::read(src_fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
                     if n <= 0 {
                         break;
                     }
-                    libc::write(dst_fd, buf.as_ptr() as *const c_void, n as usize);
+                    unsafe { libc::write(dst_fd, buf.as_ptr() as *const c_void, n as usize) };
                 }
-                libc::close(dst_fd);
+                unsafe { libc::close(dst_fd) };
                 vfs_log!("COW copy successful");
             } else {
                 vfs_log!(
                     "COW FAILED: could not create temp file (errno={})",
-                    *libc::__error()
+                    unsafe { *libc::__error() }
                 );
             }
-            libc::close(src_fd);
+            unsafe { libc::close(src_fd) };
         } else {
             vfs_log!(
                 "COW: CAS blob not found (errno={}), creating empty temp",
-                *libc::__error()
+                unsafe { *libc::__error() }
             );
-            let dst_fd = libc::open(
-                temp_cpath.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            );
+            let dst_fd = unsafe {
+                libc::open(
+                    temp_cpath.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o644,
+                )
+            };
             if dst_fd >= 0 {
-                libc::close(dst_fd);
+                unsafe { libc::close(dst_fd) };
             }
         }
 
-        let fd = libc::open(temp_cpath.as_ptr(), flags, mode as libc::c_uint);
+        let fd = unsafe { libc::open(temp_cpath.as_ptr(), flags, mode as libc::c_uint) };
         if fd >= 0 {
             vfs_log!("COW session started: fd={} vpath='{}'", fd, vpath.absolute);
             if let Ok(mut fds) = state.open_fds.lock() {
@@ -127,7 +155,7 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
                     fd,
                     OpenFile {
                         vpath: vpath.absolute.clone(),
-                        temp_path: temp_path.clone(),
+                        temp_path,
                         mmap_count: 0,
                     },
                 );
@@ -135,7 +163,7 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
         } else {
             vfs_log!(
                 "COW FAILED: final open of temp file failed (errno={})",
-                *libc::__error()
+                unsafe { *libc::__error() }
             );
         }
         Some(fd)
@@ -172,19 +200,13 @@ fn hex_encode(hash: &[u8; 32]) -> String {
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn open_shim(p: *const c_char, f: c_int, m: mode_t) -> c_int {
-    extern "C" {
-        fn open_shim_c_impl(p: *const c_char, f: c_int, m: mode_t) -> c_int;
-    }
-    open_shim_c_impl(p, f, m)
+    velo_open_impl(p, f, m)
 }
 
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn openat_shim(dfd: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int {
-    extern "C" {
-        fn openat_shim_c_impl(dfd: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int;
-    }
-    openat_shim_c_impl(dfd, p, f, m)
+    velo_openat_impl(dfd, p, f, m)
 }
 
 // --- Unified Implementation Entry Points ---
@@ -243,10 +265,14 @@ pub unsafe extern "C" fn velo_open_impl(p: *const c_char, f: c_int, m: mode_t) -
         }
     }
 
-    // VFS readiness check - passthrough if VFS not ready
-    if !is_vfs_ready() {
+    // Force initialization if needed. ShimState::get() sets VFS_READY on success.
+    if CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return raw_open(p, f, m);
     }
+    if !is_vfs_ready() && ShimState::get().is_none() {
+        return raw_open(p, f, m);
+    }
+
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
         None => return raw_open(p, f, m),
@@ -313,10 +339,14 @@ pub unsafe extern "C" fn velo_openat_impl(
         }
     }
 
-    // VFS readiness check - passthrough if VFS not ready
-    if !is_vfs_ready() {
+    // Force initialization if needed. ShimState::get() sets VFS_READY on success.
+    if CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return raw_openat(dirfd, p, f, m);
     }
+    if !is_vfs_ready() && ShimState::get().is_none() {
+        return raw_openat(dirfd, p, f, m);
+    }
+
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
         None => return raw_openat(dirfd, p, f, m),

@@ -71,50 +71,79 @@ pub(crate) unsafe fn raw_read_exact(fd: c_int, buf: &mut [u8]) -> bool {
     true
 }
 
-/// Send request and receive response using raw libc I/O
+/// Send request and receive response using raw libc I/O.
+/// RFC-0043: Ensuring workspace registration for every connection.
 unsafe fn sync_rpc(
     socket_path: &str,
     request: &vrift_ipc::VeloRequest,
 ) -> Option<vrift_ipc::VeloResponse> {
-    let fd = raw_unix_connect(socket_path);
-    if fd < 0 {
+    use crate::state::{CIRCUIT_BREAKER_FAILED_COUNT, CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_TRIPPED};
+    use std::sync::atomic::Ordering;
+
+    // Check circuit breaker first
+    if CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return None;
     }
 
-    // Serialize request with bincode
-    let req_bytes = match bincode::serialize(request) {
-        Ok(b) => b,
-        Err(_) => {
-            libc::close(fd);
-            return None;
+    let fd = raw_unix_connect(socket_path);
+    if fd < 0 {
+        let count = CIRCUIT_BREAKER_FAILED_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+        let threshold = CIRCUIT_BREAKER_THRESHOLD.load(Ordering::Relaxed);
+        if count >= threshold && !CIRCUIT_TRIPPED.swap(true, Ordering::SeqCst) {
+            vfs_error!("DAEMON CONNECTION FAILED {} TIMES. CIRCUIT BREAKER TRIPPED. FALLING BACK TO PASSTHROUGH.", count);
+        }
+        return None;
+    }
+
+    // Success - reset failure count
+    CIRCUIT_BREAKER_FAILED_COUNT.store(0, Ordering::Relaxed);
+
+    // Get project root (cached if possible, but raw IPC functions are stateless)
+    let project_root = {
+        let env_ptr = libc::getenv(c"VRIFT_PROJECT_ROOT".as_ptr());
+        if !env_ptr.is_null() {
+            std::ffi::CStr::from_ptr(env_ptr)
+                .to_string_lossy()
+                .to_string()
+        } else {
+            let manifest_ptr = libc::getenv(c"VRIFT_MANIFEST".as_ptr());
+            if !manifest_ptr.is_null() {
+                let manifest = std::ffi::CStr::from_ptr(manifest_ptr).to_string_lossy();
+                let p = std::path::Path::new(manifest.as_ref());
+                let parent = p.parent().unwrap_or(p);
+                if parent.ends_with(".vrift") {
+                    parent
+                        .parent()
+                        .unwrap_or(parent)
+                        .to_string_lossy()
+                        .to_string()
+                } else {
+                    parent.to_string_lossy().to_string()
+                }
+            } else {
+                String::new()
+            }
         }
     };
 
-    // Send length prefix (4 bytes LE) + payload
-    let len_bytes = (req_bytes.len() as u32).to_le_bytes();
-    if !raw_write_all(fd, &len_bytes) || !raw_write_all(fd, &req_bytes) {
+    if !project_root.is_empty() {
+        // Send RegisterWorkspace first
+        let register_req = vrift_ipc::VeloRequest::RegisterWorkspace { project_root };
+        if send_request_on_fd(fd, &register_req) {
+            // Read and discard RegisterAck
+            let _ = recv_response_on_fd(fd);
+        }
+    }
+
+    // Send original request
+    if !send_request_on_fd(fd, request) {
         libc::close(fd);
         return None;
     }
 
-    // Read response length
-    let mut resp_len_buf = [0u8; 4];
-    if !raw_read_exact(fd, &mut resp_len_buf) {
-        libc::close(fd);
-        return None;
-    }
-    let resp_len = u32::from_le_bytes(resp_len_buf) as usize;
-
-    // Read response payload (use heap allocation for variable size)
-    let mut resp_buf = vec![0u8; resp_len];
-    if !raw_read_exact(fd, &mut resp_buf) {
-        libc::close(fd);
-        return None;
-    }
+    let response = recv_response_on_fd(fd);
     libc::close(fd);
-
-    // Deserialize response
-    bincode::deserialize(&resp_buf).ok()
+    response
 }
 
 pub(crate) unsafe fn sync_ipc_manifest_remove(socket_path: &str, path: &str) -> bool {
@@ -249,68 +278,10 @@ pub(crate) unsafe fn sync_ipc_manifest_get(
     socket_path: &str,
     path: &str,
 ) -> Option<vrift_ipc::VnodeEntry> {
-    let fd = raw_unix_connect(socket_path);
-    if fd < 0 {
-        return None;
-    }
-
-    // Get project root from environment using raw libc for shim safety
-    let project_root = unsafe {
-        let env_ptr = libc::getenv(c"VRIFT_PROJECT_ROOT".as_ptr());
-        if !env_ptr.is_null() {
-            std::ffi::CStr::from_ptr(env_ptr)
-                .to_string_lossy()
-                .to_string()
-        } else {
-            // Derive from VRIFT_MANIFEST: /path/to/project/.vrift/manifest.lmdb -> /path/to/project
-            let manifest_ptr = libc::getenv(c"VRIFT_MANIFEST".as_ptr());
-            if !manifest_ptr.is_null() {
-                let manifest = std::ffi::CStr::from_ptr(manifest_ptr).to_string_lossy();
-                let p = std::path::Path::new(manifest.as_ref());
-                p.parent()
-                    .and_then(|p| p.parent())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        }
-    };
-
-    if project_root.is_empty() {
-        libc::close(fd);
-        return None;
-    }
-
-    // Send RegisterWorkspace first
-    let register_req = vrift_ipc::VeloRequest::RegisterWorkspace {
-        project_root: project_root.clone(),
-    };
-    if !send_request_on_fd(fd, &register_req) {
-        libc::close(fd);
-        return None;
-    }
-
-    // Read RegisterWorkspace response (we ignore the actual response)
-    if recv_response_on_fd(fd).is_none() {
-        libc::close(fd);
-        return None;
-    }
-
-    // Now send ManifestGet
-    let manifest_req = vrift_ipc::VeloRequest::ManifestGet {
+    let request = vrift_ipc::VeloRequest::ManifestGet {
         path: path.to_string(),
     };
-    if !send_request_on_fd(fd, &manifest_req) {
-        libc::close(fd);
-        return None;
-    }
-
-    // Read ManifestGet response
-    let response = recv_response_on_fd(fd);
-    libc::close(fd);
-
-    match response {
+    match sync_rpc(socket_path, &request) {
         Some(vrift_ipc::VeloResponse::ManifestAck { entry }) => entry,
         _ => None,
     }

@@ -231,7 +231,68 @@ impl CasStore {
         }
 
         // RFC-0039: Ensure CAS blobs are executable by default (0o555)
-        // This ensures binaries hard-linked from CAS are executable in Read-Only jails.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o555));
+        }
+
+        Ok(hash)
+    }
+
+    /// Compute the BLAKE3 hash of the given reader.
+    pub fn compute_hash_reader<R: io::Read>(mut reader: R) -> io::Result<Blake3Hash> {
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    /// Store a file in the CAS by moving it from the given source path.
+    ///
+    /// This is a zero-copy operation if the source and CAS are on the same filesystem.
+    /// If the content already exists, the source file is deleted (deduplication).
+    /// This is the preferred method for reingesting CoW temp files.
+    #[instrument(skip(self, src_path), level = "info")]
+    pub fn store_by_move<P: AsRef<Path>>(&self, src_path: P) -> Result<Blake3Hash> {
+        let src = src_path.as_ref();
+        let file = File::open(src)?;
+        let _size = file.metadata()?.len();
+        let hash = Self::compute_hash_reader(file)?;
+        let path = self.blob_path(&hash);
+
+        // Deduplication: if already exists, just remove the temp file
+        if path.exists() {
+            let _ = fs::remove_file(src);
+            return Ok(hash);
+        }
+
+        // Create prefix directory
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Try atomic rename (move)
+        if let Err(e) = fs::rename(src, &path) {
+            // Check for cross-device link error (EXDEV)
+            if e.raw_os_error() == Some(libc::EXDEV) {
+                tracing::debug!("CAS: Cross-device move detected, falling back to copy");
+                let mut src_file = File::open(src)?;
+                let mut dst_file = File::create(&path)?;
+                io::copy(&mut src_file, &mut dst_file)?;
+                let _ = fs::remove_file(src);
+            } else {
+                return Err(CasError::Io(e));
+            }
+        }
+
+        // RFC-0039: Ensure CAS blobs are executable by default (0o555)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -243,6 +304,8 @@ impl CasStore {
 
     /// Store a file in the CAS by reading from the filesystem.
     pub fn store_file<P: AsRef<Path>>(&self, path: P) -> Result<Blake3Hash> {
+        let file = File::open(path.as_ref())?;
+        let _hash = Self::compute_hash_reader(file)?;
         let data = fs::read(path)?;
         self.store(&data)
     }

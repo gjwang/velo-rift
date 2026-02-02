@@ -661,11 +661,17 @@ async fn cmd_ingest(
     let cas = CasStore::new(&cas_root)
         .with_context(|| format!("Failed to initialize CAS at {}", cas_root.display()))?;
 
-    // Initialize LMDB manifest in project's .vrift directory
-    let vrift_dir = directory.join(".vrift");
-    std::fs::create_dir_all(&vrift_dir)?;
-    let lmdb_manifest = LmdbManifest::open(vrift_dir.join("manifest.lmdb"))
-        .with_context(|| "Failed to open LMDB manifest")?;
+    // Initialize LMDB manifest (Standard location or custom output)
+    let lmdb_path = if output.to_string_lossy().ends_with(".lmdb") {
+        output.to_path_buf()
+    } else {
+        let vrift_dir = directory.join(".vrift");
+        std::fs::create_dir_all(&vrift_dir)?;
+        vrift_dir.join("manifest.lmdb")
+    };
+
+    let lmdb_manifest = LmdbManifest::open(&lmdb_path)
+        .with_context(|| format!("Failed to open LMDB manifest at {}", lmdb_path.display()))?;
 
     // Mode banner
     let mode_str = if is_phantom {
@@ -969,21 +975,23 @@ async fn cmd_ingest(
         .with_context(|| "Failed to commit LMDB manifest")?;
 
     // Create and save legacy binary manifest for backward compatibility (FUSE, etc.)
-    // RFC-0039 transitional support
-    let mut legacy_manifest = vrift_manifest::Manifest::new();
-    for (path, entry) in lmdb_manifest.iter()? {
-        legacy_manifest.insert(&path, entry.vnode);
-    }
-    // Ensure parent directory exists for legacy manifest
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+    // RFC-0039 transitional support: skip if output is LMDB directory
+    if !output.to_string_lossy().ends_with(".lmdb") {
+        let mut legacy_manifest = vrift_manifest::Manifest::new();
+        for (path, entry) in lmdb_manifest.iter()? {
+            legacy_manifest.insert(&path, entry.vnode);
         }
-    }
+        // Ensure parent directory exists for legacy manifest
+        if let Some(parent) = output.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
 
-    legacy_manifest
-        .save(output)
-        .with_context(|| format!("Failed to save binary manifest to {}", output.display()))?;
+        legacy_manifest
+            .save(output)
+            .with_context(|| format!("Failed to save binary manifest to {}", output.display()))?;
+    }
 
     // Auto-register in global manifest registry (RFC-0041)
     let output_abs = output
@@ -1324,24 +1332,32 @@ fn cmd_status(
     if let Some(manifest_path) = manifest {
         println!();
         if manifest_path.exists() {
-            let manifest = Manifest::load(manifest_path)?;
-            let mstats = manifest.stats();
+            let (file_count, dir_count, total_size) =
+                if manifest_path.to_string_lossy().ends_with(".lmdb") {
+                    let m = LmdbManifest::open(manifest_path)?;
+                    let s = m.stats()?;
+                    (s.file_count, s.dir_count, s.total_size)
+                } else {
+                    let m = Manifest::load(manifest_path)?;
+                    let s = m.stats();
+                    (s.file_count, s.dir_count, s.total_size)
+                };
 
             println!("Manifest: {}", manifest_path.display());
-            println!("  Files:       {}", mstats.file_count);
-            println!("  Directories: {}", mstats.dir_count);
-            println!("  Total size:  {}", format_bytes(mstats.total_size));
+            println!("  Files:       {}", file_count);
+            println!("  Directories: {}", dir_count);
+            println!("  Total size:  {}", format_bytes(total_size));
 
             // Calculate dedup ratio if CAS is available
             if cas_root.exists() {
                 let cas = CasStore::new(cas_root)?;
                 let cas_stats = cas.stats()?;
-                if mstats.total_size > 0 && cas_stats.total_bytes > 0 {
-                    let savings = mstats.total_size.saturating_sub(cas_stats.total_bytes);
-                    let ratio = (savings as f64 / mstats.total_size as f64) * 100.0;
+                if total_size > 0 && cas_stats.total_bytes > 0 {
+                    let savings = total_size.saturating_sub(cas_stats.total_bytes);
+                    let ratio = (savings as f64 / total_size as f64) * 100.0;
                     println!();
                     println!("  Deduplication:");
-                    println!("    Original:     {}", format_bytes(mstats.total_size));
+                    println!("    Original:     {}", format_bytes(total_size));
                     println!("    Deduplicated: {}", format_bytes(cas_stats.total_bytes));
                     println!(
                         "    Savings:      {} ({:.1}%)",

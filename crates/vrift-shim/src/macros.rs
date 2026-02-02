@@ -6,20 +6,37 @@ macro_rules! shim_log {
 }
 
 #[macro_export]
-macro_rules! vfs_log {
-    ($($arg:tt)*) => {
+macro_rules! vfs_log_at_level {
+    ($level:expr, $tag:expr, $($arg:tt)*) => {
         {
-            let pid = unsafe { libc::getpid() };
-            let msg = format!("[VFS][{}] {}\n", pid, format_args!($($arg)*));
-            unsafe {
-                $crate::LOGGER.log(&msg);
-                if $crate::state::DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                    libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+            if $crate::state::LOG_LEVEL.load(std::sync::atomic::Ordering::Relaxed) <= ($level as u8) {
+                let pid = unsafe { libc::getpid() };
+                let msg = format!("[VFS][{}][{}] {}\n", pid, $tag, format_args!($($arg)*));
+                unsafe {
+                    $crate::LOGGER.log(&msg);
+                    if $crate::state::DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                        libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+                    }
                 }
             }
         }
     };
 }
+
+#[macro_export]
+macro_rules! vfs_trace { ($($arg:tt)*) => { $crate::vfs_log_at_level!($crate::state::LogLevel::Trace, "TRACE", $($arg)*) }; }
+#[macro_export]
+macro_rules! vfs_debug { ($($arg:tt)*) => { $crate::vfs_log_at_level!($crate::state::LogLevel::Debug, "DEBUG", $($arg)*) }; }
+#[macro_export]
+macro_rules! vfs_info { ($($arg:tt)*) => { $crate::vfs_log_at_level!($crate::state::LogLevel::Info, "INFO", $($arg)*) }; }
+#[macro_export]
+macro_rules! vfs_warn { ($($arg:tt)*) => { $crate::vfs_log_at_level!($crate::state::LogLevel::Warn, "WARN", $($arg)*) }; }
+#[macro_export]
+macro_rules! vfs_error { ($($arg:tt)*) => { $crate::vfs_log_at_level!($crate::state::LogLevel::Error, "ERROR", $($arg)*) }; }
+
+// Compatibility shim for existing code
+#[macro_export]
+macro_rules! vfs_log { ($($arg:tt)*) => { $crate::vfs_info!($($arg)*) }; }
 
 #[macro_export]
 macro_rules! get_real {
