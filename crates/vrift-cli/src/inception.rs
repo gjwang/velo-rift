@@ -71,6 +71,13 @@ pub fn cmd_inception(project_dir: &Path) -> Result<()> {
     // Theatrical progress (to stderr so it doesn't interfere with eval)
     show_inception_animation();
 
+    // Get the path to the vrift binary itself
+    let vrift_bin_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .map(|d| d.to_string_lossy().to_string())
+        .unwrap_or_default();
+
     // Output shell script to stdout (for eval)
     println!("# Velo Rift Inception Mode - Enter the Dream");
     println!("export VRIFT_PROJECT_ROOT=\"{}\"", project_root_str);
@@ -79,7 +86,15 @@ pub fn cmd_inception(project_dir: &Path) -> Result<()> {
         "export VRIFT_MANIFEST=\"{}/.vrift/manifest.lmdb\"",
         project_root_str
     );
-    println!("export PATH=\"{}/.vrift/bin:$PATH\"", project_root_str);
+    // Add both .vrift/bin (wrappers) and vrift binary dir to PATH
+    if !vrift_bin_dir.is_empty() {
+        println!(
+            "export PATH=\"{}/.vrift/bin:{}:$PATH\"",
+            project_root_str, vrift_bin_dir
+        );
+    } else {
+        println!("export PATH=\"{}/.vrift/bin:$PATH\"", project_root_str);
+    }
     println!(
         "export DYLD_INSERT_LIBRARIES=\"{}\"",
         shim_path.to_string_lossy()
@@ -211,6 +226,7 @@ fn ensure_wrappers(vrift_dir: &Path) -> Result<()> {
         fs::create_dir_all(&bin_dir)?;
     }
 
+    // Generate wrappers for system commands
     for cmd in WRAPPER_COMMANDS {
         let wrapper_path = bin_dir.join(cmd);
 
@@ -227,6 +243,28 @@ fn ensure_wrappers(vrift_dir: &Path) -> Result<()> {
         let mut perms = fs::metadata(&wrapper_path)?.permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&wrapper_path, perms)?;
+    }
+
+    // Generate vrift wrapper (strips DYLD vars before calling real vrift)
+    let vrift_wrapper_path = bin_dir.join("vrift");
+    if !vrift_wrapper_path.exists() {
+        if let Ok(real_vrift) = std::env::current_exe() {
+            let vrift_wrapper = format!(
+                r#"#!/bin/bash
+# Velo Rift CLI wrapper - runs vrift without DYLD interference
+# Auto-generated
+
+unset DYLD_INSERT_LIBRARIES
+unset DYLD_FORCE_FLAT_NAMESPACE
+exec "{}" "$@"
+"#,
+                real_vrift.to_string_lossy()
+            );
+            fs::write(&vrift_wrapper_path, vrift_wrapper)?;
+            let mut perms = fs::metadata(&vrift_wrapper_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&vrift_wrapper_path, perms)?;
+        }
     }
 
     Ok(())
