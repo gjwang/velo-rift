@@ -133,7 +133,7 @@ mod linux_shims {
         // RFC-0050: Only bypass when actually busy (state 3), allow state 2 to trigger initialization
         let init_state =
             unsafe { crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed) };
-        if init_state == 3 {
+        if init_state == 2 || init_state == 3 {
             #[cfg(target_arch = "x86_64")]
             {
                 let ret: i64;
@@ -443,6 +443,41 @@ mod linux_shims {
     #[no_mangle]
     pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
         crate::syscalls::misc::rmdir_shim(path)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn chmod(path: *const c_char, mode: mode_t) -> c_int {
+        // Double-guard: check INITIALIZING first
+        let init_state =
+            unsafe { crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed) };
+        if init_state >= 2 {
+            return libc::chmod(path, mode);
+        }
+
+        // Pass through if VFS mutation is NOT blocked
+        if let Some(res) = crate::syscalls::misc::block_vfs_mutation(path) {
+            return res;
+        }
+        libc::chmod(path, mode)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fchmodat(
+        dirfd: c_int,
+        path: *const c_char,
+        mode: mode_t,
+        flags: c_int,
+    ) -> c_int {
+        let init_state =
+            unsafe { crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed) };
+        if init_state >= 2 {
+            return libc::fchmodat(dirfd, path, mode, flags);
+        }
+
+        if let Some(res) = crate::syscalls::misc::block_vfs_mutation(path) {
+            return res;
+        }
+        libc::fchmodat(dirfd, path, mode, flags)
     }
 
     #[no_mangle]
