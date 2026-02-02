@@ -151,8 +151,12 @@ export VRIFT_DEBUG=1
 
 # Capture output
 STRACE_CMD=""
-if command -v strace >/dev/null 2>&1; then
-    STRACE_CMD="strace -f -e trace=file,open,openat,openat2,stat,lstat,fstat,newfstatat,fstatat64"
+# Disabled automatic strace to prevent hangs in CI/non-interactive modes
+# if command -v strace >/dev/null 2>&1; then
+#     STRACE_CMD="strace -f -e trace=file,open,openat,openat2,stat,lstat,fstat,newfstatat,fstatat64"
+# fi
+if [ -n "$VRIFT_STRACE" ]; then
+    STRACE_CMD="dtruss" 
 fi
 
 echo "Running with strace: $STRACE_CMD"
