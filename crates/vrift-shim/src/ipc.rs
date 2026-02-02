@@ -254,19 +254,28 @@ pub(crate) unsafe fn sync_ipc_manifest_get(
         return None;
     }
 
-    // Get project root from environment for workspace registration
-    let project_root = std::env::var("VRIFT_PROJECT_ROOT")
-        .or_else(|_| {
+    // Get project root from environment using raw libc for shim safety
+    let project_root = unsafe {
+        let env_ptr = libc::getenv(c"VRIFT_PROJECT_ROOT".as_ptr());
+        if !env_ptr.is_null() {
+            std::ffi::CStr::from_ptr(env_ptr)
+                .to_string_lossy()
+                .to_string()
+        } else {
             // Derive from VRIFT_MANIFEST: /path/to/project/.vrift/manifest.lmdb -> /path/to/project
-            std::env::var("VRIFT_MANIFEST").map(|m| {
-                let p = std::path::Path::new(&m);
+            let manifest_ptr = libc::getenv(c"VRIFT_MANIFEST".as_ptr());
+            if !manifest_ptr.is_null() {
+                let manifest = std::ffi::CStr::from_ptr(manifest_ptr).to_string_lossy();
+                let p = std::path::Path::new(manifest.as_ref());
                 p.parent()
                     .and_then(|p| p.parent())
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default()
-            })
-        })
-        .unwrap_or_default();
+            } else {
+                String::new()
+            }
+        }
+    };
 
     if project_root.is_empty() {
         libc::close(fd);

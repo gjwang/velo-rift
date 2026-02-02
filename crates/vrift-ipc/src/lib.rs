@@ -94,7 +94,7 @@ pub struct VnodeEntry {
     pub mtime: u64,
     pub mode: u32,
     pub flags: u16,
-    #[serde(default)]
+    #[serde(skip)]
     pub _pad: u16,
 }
 

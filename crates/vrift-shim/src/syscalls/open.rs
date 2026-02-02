@@ -62,9 +62,16 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
 
     shim_log!("[Shim] open_impl: found entry in manifest\n");
 
-    // Build CAS blob path: {cas_root}/blobs/{hash_hex}
+    // Build CAS blob path: {cas_root}/blake3/{hash[0:2]}/{hash[2:4]}/{hash}_{size}.bin
     let hash_hex = hex_encode(&entry.content_hash);
-    let blob_path = format!("{}/blobs/{}", state.cas_root, hash_hex);
+    let blob_path = format!(
+        "{}/blake3/{}/{}/{}_{}.bin",
+        state.cas_root,
+        &hash_hex[0..2],
+        &hash_hex[2..4],
+        hash_hex,
+        entry.size
+    );
 
     let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
 
@@ -225,6 +232,7 @@ pub unsafe extern "C" fn __openat64_2(dirfd: c_int, p: *const c_char, f: c_int) 
 #[no_mangle]
 pub unsafe extern "C" fn open_shim(p: *const c_char, f: c_int, m: mode_t) -> c_int {
     let real = std::mem::transmute::<*const (), OpenFn>(IT_OPEN.old_func);
+
     // Early-boot passthrough to avoid deadlock during dyld initialization
     if INITIALIZING.load(Ordering::Relaxed) {
         return real(p, f, m);

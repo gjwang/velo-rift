@@ -17,7 +17,7 @@ use crate::ipc::*;
 pub(crate) static SHIM_STATE: AtomicPtr<ShimState> = AtomicPtr::new(ptr::null_mut());
 /// Flag to indicate shim is still initializing. All syscalls passthrough during this phase.
 /// RFC-0049: Defaults to TRUE to ensure passthrough during extremely early dyld phases.
-pub(crate) static INITIALIZING: AtomicBool = AtomicBool::new(true);
+pub(crate) static INITIALIZING: AtomicBool = AtomicBool::new(false);
 /// Flag to prevent recursion during TLS key creation (bootstrap phase)
 pub(crate) static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 pub(crate) static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -514,8 +514,14 @@ impl ShimState {
             return None;
         }
 
-        // Initialize state
-        let ptr = Self::init()?;
+        // Initialize state - MUST reset INITIALIZING even on failure
+        let ptr = match Self::init() {
+            Some(p) => p,
+            None => {
+                INITIALIZING.store(false, Ordering::SeqCst);
+                return None;
+            }
+        };
         SHIM_STATE.store(ptr, Ordering::Release);
         INITIALIZING.store(false, Ordering::SeqCst);
 
@@ -550,17 +556,8 @@ impl ShimState {
     /// Query manifest directly via IPC (bypasses mmap cache)
     /// Required for open() which needs content_hash to locate CAS blob
     pub(crate) fn query_manifest_ipc(&self, path: &str) -> Option<vrift_ipc::VnodeEntry> {
-        // Strip VFS prefix to get relative path for manifest lookup
-        let rel_path = if path.starts_with(&*self.vfs_prefix) {
-            path.strip_prefix(&*self.vfs_prefix)
-                .unwrap_or(path)
-                .trim_start_matches('/')
-        } else {
-            path
-        };
-
-        // Always use IPC - mmap cache doesn't have content_hash
-        unsafe { sync_ipc_manifest_get(&self.socket_path, rel_path) }
+        // Send path as-is - manifest stores paths with VFS prefix (from --prefix option)
+        unsafe { sync_ipc_manifest_get(&self.socket_path, path) }
     }
 
     /// Check if path is in VFS domain (zero-alloc, O(1) string prefix check)
