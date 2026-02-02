@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use crate::reals::*;
 use crate::state::*;
 use libc::{c_char, c_int, stat as libc_stat};
@@ -197,7 +198,7 @@ pub unsafe fn fstatat_shim_linux(
     dirfd: c_int,
     path: *const c_char,
     buf: *mut libc_stat,
-    flags: c_int,
+    _flags: c_int,
 ) -> c_int {
     if path.is_null() {
         return -libc::EFAULT;
@@ -212,8 +213,5 @@ pub unsafe fn fstatat_shim_linux(
         return -2;
     }
 
-    match stat_impl_common(path_str, buf) {
-        Some(res) => res,
-        None => -2,
-    }
+    stat_impl_common(path_str, buf).unwrap_or(-2)
 }

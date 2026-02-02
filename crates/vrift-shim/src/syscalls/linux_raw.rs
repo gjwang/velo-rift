@@ -5,8 +5,6 @@
 //!
 //! Supports both AArch64 and x86_64 architectures.
 
-#![cfg(target_os = "linux")]
-
 use libc::{c_char, c_int, c_void, mode_t, off_t, size_t, ssize_t, stat as libc_stat};
 
 /// Set errno from negative syscall return value
@@ -731,7 +729,7 @@ pub unsafe fn raw_lseek(fd: c_int, offset: off_t, whence: c_int) -> off_t {
             "svc #0",
             in("x8") 62i64, // SYS_lseek
             in("x0") fd as i64,
-            in("x1") offset as i64,
+            in("x1") offset,
             in("x2") whence as i64,
             lateout("x0") ret,
         );
@@ -773,7 +771,7 @@ pub unsafe fn raw_ftruncate(fd: c_int, length: off_t) -> c_int {
             "svc #0",
             in("x8") 46i64, // SYS_ftruncate
             in("x0") fd as i64,
-            in("x1") length as i64,
+            in("x1") length,
             lateout("x0") ret,
         );
         if ret < 0 {

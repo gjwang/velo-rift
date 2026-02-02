@@ -418,6 +418,7 @@ pub unsafe extern "C" fn utimes_shim(path: *const c_char, times: *const libc::ti
 }
 
 /// utimensat_shim: Block timestamp modifications on VFS files (at variant)
+#[allow(unused_variables)]
 pub unsafe extern "C" fn utimensat_shim(
     dirfd: c_int,
     path: *const c_char,
