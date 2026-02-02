@@ -81,9 +81,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             format!("/tmp/vrift_cow_{}_XXXXXX\0", unsafe { libc::getpid() }).into_bytes();
         let temp_fd = unsafe { libc::mkstemp(template.as_mut_ptr() as *mut libc::c_char) };
         if temp_fd < 0 {
-            vfs_log!("COW FAILED: mkstemp failed (errno={})", unsafe {
-                *libc::__error()
-            });
+            vfs_log!("COW FAILED: mkstemp failed (errno={})", crate::get_errno());
             return None;
         }
 

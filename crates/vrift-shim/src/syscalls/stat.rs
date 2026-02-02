@@ -1,6 +1,7 @@
 use crate::state::*;
 use libc::{c_char, c_int, stat as libc_stat};
 use std::ffi::CStr;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "macos")]
