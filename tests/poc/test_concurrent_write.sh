@@ -14,6 +14,7 @@ cleanup() { rm -rf "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Test with Python
+export TEST_DIR="$TEST_DIR"
 DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
 import os
 import sys
