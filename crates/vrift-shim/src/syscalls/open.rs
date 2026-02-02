@@ -21,13 +21,40 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
     // Get shim state
     let state = ShimState::get()?;
 
-    // Check if path is in VFS domain
-    if !state.psfs_applicable(path_str) {
-        return None; // Not our path, passthrough
-    }
+    // Architecture: Use unified PathResolver to handle relative/absolute paths
+    let vpath = match state.resolve_path(path_str) {
+        Some(p) => {
+            vfs_log!(
+                "open path='{}' -> resolved='{}' (VFS HIT)",
+                path_str,
+                p.absolute
+            );
+            p
+        }
+        None => {
+            return None;
+        }
+    };
 
     // Query manifest via IPC
-    let entry = state.query_manifest_ipc(path_str)?;
+    let entry = match state.query_manifest_ipc(&vpath) {
+        Some(e) => {
+            vfs_log!(
+                "manifest lookup '{}': FOUND (mode=0o{:o}, size={})",
+                vpath.manifest_key,
+                e.mode,
+                e.size
+            );
+            e
+        }
+        None => {
+            vfs_log!(
+                "manifest lookup '{}': NOT FOUND -> passthrough",
+                vpath.manifest_key
+            );
+            return None;
+        }
+    };
 
     // Build CAS blob path
     let hash_hex = hex_encode(&entry.content_hash);
@@ -43,13 +70,12 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
     let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
 
     if is_write {
-        if (entry.mode & 0o200) == 0 {
-            set_errno(libc::EACCES);
-            return Some(-1);
-        }
+        vfs_log!("open write request for '{}'", vpath.absolute);
 
-        // CoW: Copy blob to temp file for writes
+        // BBW (Break-Before-Write): Always create a CoW temp copy for writes.
         let temp_path = format!("/tmp/vrift_cow_{}.tmp", libc::getpid());
+        vfs_log!("COW TRIGGERED: '{}' -> '{}'", vpath.absolute, temp_path);
+
         let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
         let temp_cpath = std::ffi::CString::new(temp_path.as_str()).ok()?;
 
@@ -70,9 +96,19 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
                     libc::write(dst_fd, buf.as_ptr() as *const c_void, n as usize);
                 }
                 libc::close(dst_fd);
+                vfs_log!("COW copy successful");
+            } else {
+                vfs_log!(
+                    "COW FAILED: could not create temp file (errno={})",
+                    *libc::__error()
+                );
             }
             libc::close(src_fd);
         } else {
+            vfs_log!(
+                "COW: CAS blob not found (errno={}), creating empty temp",
+                *libc::__error()
+            );
             let dst_fd = libc::open(
                 temp_cpath.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
@@ -85,24 +121,35 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
 
         let fd = libc::open(temp_cpath.as_ptr(), flags, mode as libc::c_uint);
         if fd >= 0 {
+            vfs_log!("COW session started: fd={} vpath='{}'", fd, vpath.absolute);
             if let Ok(mut fds) = state.open_fds.lock() {
                 fds.insert(
                     fd,
                     OpenFile {
-                        vpath: path_str.to_string(),
+                        vpath: vpath.absolute.clone(),
                         temp_path: temp_path.clone(),
                         mmap_count: 0,
                     },
                 );
             }
+        } else {
+            vfs_log!(
+                "COW FAILED: final open of temp file failed (errno={})",
+                *libc::__error()
+            );
         }
         Some(fd)
     } else {
         let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
         let fd = libc::open(blob_cpath.as_ptr(), flags, mode as libc::c_uint);
+        vfs_log!("READ session: fd={} blob='{}'", fd, blob_path);
         if fd >= 0 {
             return Some(fd);
         }
+        vfs_log!(
+            "READ FAILED: could not open CAS blob (errno={})",
+            *libc::__error()
+        );
         set_errno(libc::ENOENT);
         Some(-1)
     }

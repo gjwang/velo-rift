@@ -759,9 +759,9 @@ async fn cmd_ingest(
             continue;
         }
 
-        // Build manifest path
-        let manifest_path = if relative.as_os_str().is_empty() {
-            format!("/{}", base_prefix)
+        // Build manifest path (RFC-0039: Always starts with /)
+        let manifest_path = if base_prefix.is_empty() {
+            format!("/{}", relative.display())
         } else {
             format!("/{}/{}", base_prefix, relative.display())
         };

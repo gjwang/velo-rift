@@ -1,10 +1,23 @@
 #[macro_export]
 macro_rules! shim_log {
     ($msg:expr) => {
-        // Assuming LOGGER is available in crate root or we import it?
-        // Actually, if we use this macro inside lib.rs modules, crate::LOGGER works if public.
-        // But LOGGER is currently private in lib.rs. I need to make it pub(crate).
         $crate::LOGGER.log($msg)
+    };
+}
+
+#[macro_export]
+macro_rules! vfs_log {
+    ($($arg:tt)*) => {
+        {
+            let pid = unsafe { libc::getpid() };
+            let msg = format!("[VFS][{}] {}\n", pid, format_args!($($arg)*));
+            unsafe {
+                $crate::LOGGER.log(&msg);
+                if $crate::state::DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                    libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+                }
+            }
+        }
     };
 }
 

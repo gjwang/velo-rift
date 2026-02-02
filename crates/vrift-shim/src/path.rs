@@ -1,98 +1,80 @@
-#![allow(unused_imports)]
-use libc::{c_char, c_int, c_void, AT_FDCWD};
+use libc::{c_char, c_int, AT_FDCWD};
 use std::ffi::CStr;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-static VIRTUAL_CWD_KEY_INIT: AtomicBool = AtomicBool::new(false);
-static VIRTUAL_CWD_KEY_VALUE: AtomicUsize = AtomicUsize::new(0);
+/// RFC-0049: Unified path resolution for VFS domain.
+/// Encapsulates absolute path and the corresponding manifest key.
+#[derive(Debug, Clone)]
+pub(crate) struct VfsPath {
+    pub absolute: String,
+    pub manifest_key: String,
+}
 
-/// Get or create the pthread key for VIRTUAL_CWD storage.
-/// Returns 0 if creation fails (will be treated as no virtual CWD).
-pub(crate) fn get_virtual_cwd_key() -> libc::pthread_key_t {
-    // Fast path: already initialized
-    if VIRTUAL_CWD_KEY_INIT.load(Ordering::Acquire) {
-        return VIRTUAL_CWD_KEY_VALUE.load(Ordering::Relaxed) as libc::pthread_key_t;
+pub(crate) struct PathResolver {
+    pub vfs_prefix: String,
+    pub project_root: String,
+}
+
+impl PathResolver {
+    pub fn new(vfs_prefix: &str, project_root: &str) -> Self {
+        Self {
+            vfs_prefix: vfs_prefix.to_string(),
+            project_root: project_root.to_string(),
+        }
     }
 
-    // Destructor to free the String when thread exits
-    extern "C" fn destructor(ptr: *mut c_void) {
-        if !ptr.is_null() {
-            unsafe {
-                let _ = Box::from_raw(ptr as *mut String);
+    /// Resolve an incoming path (absolute or relative) into a VfsPath.
+    /// Returns None if the path is not within the VFS domain.
+    pub fn resolve(&self, path: &str) -> Option<VfsPath> {
+        // 1. Resolve relative paths using project_root
+        let abs_path = if !path.starts_with('/') {
+            if self.project_root.is_empty() {
+                return None;
             }
+            format!("{}/{}", self.project_root, path)
+        } else {
+            path.to_string()
+        };
+
+        // 2. Normalize (handle .., ., //)
+        let mut buf = vec![0u8; abs_path.len() + 1];
+        let len = unsafe { raw_path_normalize(&abs_path, &mut buf)? };
+        let normalized = std::str::from_utf8(&buf[..len]).ok()?.to_string();
+
+        // 3. Check VFS applicability
+        if !normalized.starts_with(&self.vfs_prefix) {
+            return None;
         }
-    }
 
-    // Slow path: initialize (only one thread will succeed)
-    if crate::state::BOOTSTRAPPING.swap(true, Ordering::SeqCst) {
-        return 0;
-    }
+        // 4. Extract manifest key (relative to project_root, must start with /)
+        // If project_root is "/a/b" and normalized is "/a/b/c/d", manifest_key is "/c/d"
+        // RFC-0039: vrift ingest always prefixes paths with /
+        let manifest_key =
+            if !self.project_root.is_empty() && normalized.starts_with(&self.project_root) {
+                let key = normalized.strip_prefix(&self.project_root).unwrap_or("");
+                if !key.starts_with('/') {
+                    format!("/{}", key)
+                } else {
+                    key.to_string()
+                }
+            } else {
+                // Fallback: if not under project_root but under vfs_prefix
+                let key = normalized.strip_prefix(&self.vfs_prefix).unwrap_or("");
+                if !key.starts_with('/') {
+                    format!("/{}", key)
+                } else {
+                    key.to_string()
+                }
+            };
 
-    let mut key: libc::pthread_key_t = 0;
-    let ret = unsafe { libc::pthread_key_create(&mut key, Some(destructor)) };
-    if ret != 0 {
-        crate::state::BOOTSTRAPPING.store(false, Ordering::SeqCst);
-        return 0;
-    }
-
-    // Try to be the one to set the value (CAS)
-    let expected = 0usize;
-    if VIRTUAL_CWD_KEY_VALUE
-        .compare_exchange(expected, key as usize, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        VIRTUAL_CWD_KEY_INIT.store(true, Ordering::Release);
-        crate::state::BOOTSTRAPPING.store(false, Ordering::SeqCst);
-        key
-    } else {
-        // Another thread beat us, clean up and use their key
-        unsafe { libc::pthread_key_delete(key) };
-        crate::state::BOOTSTRAPPING.store(false, Ordering::SeqCst);
-        VIRTUAL_CWD_KEY_VALUE.load(Ordering::Relaxed) as libc::pthread_key_t
+        Some(VfsPath {
+            absolute: normalized,
+            manifest_key,
+        })
     }
 }
 
-/// Get the current virtual CWD for this thread (if set).
-pub(crate) fn get_virtual_cwd() -> Option<String> {
-    let key = get_virtual_cwd_key();
-    if key == 0 {
-        return None;
-    }
-    let ptr = unsafe { libc::pthread_getspecific(key) };
-    if ptr.is_null() {
-        None
-    } else {
-        unsafe { Some((*(ptr as *const String)).clone()) }
-    }
-}
-
-/// Set the virtual CWD for this thread.
-pub(crate) fn set_virtual_cwd(path: Option<String>) {
-    let key = get_virtual_cwd_key();
-    if key == 0 {
-        return;
-    }
-
-    // Free old value if any
-    let old_ptr = unsafe { libc::pthread_getspecific(key) };
-    if !old_ptr.is_null() {
-        unsafe {
-            let _ = Box::from_raw(old_ptr as *mut String);
-        }
-    }
-
-    // Set new value
-    let new_ptr = match path {
-        Some(s) => Box::into_raw(Box::new(s)) as *mut c_void,
-        None => ptr::null_mut(),
-    };
-    unsafe {
-        libc::pthread_setspecific(key, new_ptr);
-    }
-}
-
-/// Robust path normalization without heap allocation.
+/// Robust path normalization without heap allocation (low-level).
 /// Handles "..", ".", and duplicate slashes.
 /// Returns the length of the normalized path in `out`.
 pub(crate) unsafe fn raw_path_normalize(path: &str, out: &mut [u8]) -> Option<usize> {
@@ -135,6 +117,9 @@ pub(crate) unsafe fn raw_path_normalize(path: &str, out: &mut [u8]) -> Option<us
                 while out_idx > 1 && out[out_idx - 1] != b'/' {
                     out_idx -= 1;
                 }
+            } else if out_idx == 1 && out[0] == b'/' {
+                // At root, stay at root
+                continue;
             }
         } else {
             // Add slash if not at root and last char isn't slash
@@ -172,34 +157,6 @@ pub(crate) unsafe fn raw_path_normalize(path: &str, out: &mut [u8]) -> Option<us
     Some(out_idx)
 }
 
-/// Resolve a path, potentially relative to VIRTUAL_CWD.
-pub(crate) unsafe fn resolve_path_with_cwd(path: &str, out: &mut [u8]) -> Option<usize> {
-    if path.starts_with('/') {
-        return raw_path_normalize(path, out);
-    }
-
-    if let Some(vpath) = get_virtual_cwd() {
-        let mut tmp = [b'/'; 1024];
-        let vbytes = vpath.as_bytes();
-        if vbytes.len() < tmp.len() {
-            ptr::copy_nonoverlapping(vbytes.as_ptr(), tmp.as_mut_ptr(), vbytes.len());
-            let mut idx = vbytes.len();
-            if idx > 0 && tmp[idx - 1] != b'/' && idx < tmp.len() {
-                tmp[idx] = b'/';
-                idx += 1;
-            }
-            let pbytes = path.as_bytes();
-            if idx + pbytes.len() < tmp.len() {
-                ptr::copy_nonoverlapping(pbytes.as_ptr(), tmp.as_mut_ptr().add(idx), pbytes.len());
-                let full = std::str::from_utf8_unchecked(&tmp[..idx + pbytes.len()]);
-                return raw_path_normalize(full, out);
-            }
-        }
-    }
-
-    raw_path_normalize(path, out)
-}
-
 /// RFC-0049: Generate virtual inode from path
 /// Prevents st_ino collision when CAS dedup causes multiple logical files to share same blob
 /// Uses a simple hash to generate unique inode per logical path
@@ -224,9 +181,9 @@ pub(crate) unsafe fn resolve_path_at(
         return raw_path_normalize(path_str, out);
     }
     if dirfd == AT_FDCWD {
-        return resolve_path_with_cwd(path_str, out);
+        // Fallback to basic normalization if no complex resolver is available
+        return raw_path_normalize(path_str, out);
     }
     // Cannot resolve relative path to arbitrary dirfd easily without OS help.
-    // Fallback to None (treat as non-VFS)
     None
 }

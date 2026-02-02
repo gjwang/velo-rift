@@ -1,3 +1,4 @@
+use crate::path::{PathResolver, VfsPath};
 use libc::{c_int, c_void};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -454,6 +455,7 @@ pub(crate) struct ShimState {
     pub mmap_size: usize,
     /// Absolute path to project root
     pub project_root: String,
+    pub path_resolver: PathResolver,
 }
 
 impl ShimState {
@@ -517,7 +519,7 @@ impl ShimState {
         let state = Box::new(ShimState {
             // cas: std::sync::Mutex::new(None),
             cas_root,
-            vfs_prefix,
+            vfs_prefix: vfs_prefix.clone(),
             socket_path,
             open_fds: Mutex::new(HashMap::new()),
             active_mmaps: Mutex::new(HashMap::new()),
@@ -525,7 +527,8 @@ impl ShimState {
             bloom_ptr,
             mmap_ptr,
             mmap_size,
-            project_root,
+            project_root: project_root.clone(),
+            path_resolver: PathResolver::new(&vfs_prefix, &project_root),
         });
 
         Some(Box::into_raw(state))
@@ -585,24 +588,19 @@ impl ShimState {
 
     /// Query manifest directly via IPC (bypasses mmap cache)
     /// Required for open() which needs content_hash to locate CAS blob
-    pub(crate) fn query_manifest_ipc(&self, path: &str) -> Option<vrift_ipc::VnodeEntry> {
-        // Convert absolute path to relative by stripping project_root prefix
-        // Manifest stores relative paths like "deps/file.txt", not "/project/deps/file.txt"
-        let rel_path = if path.starts_with(&self.project_root) && !self.project_root.is_empty() {
-            let stripped = path.strip_prefix(&self.project_root).unwrap_or(path);
-            // Also strip leading slash if present
-            stripped.strip_prefix('/').unwrap_or(stripped)
-        } else {
-            path
-        };
-        unsafe { sync_ipc_manifest_get(&self.socket_path, rel_path) }
+    pub(crate) fn query_manifest_ipc(&self, vpath: &VfsPath) -> Option<vrift_ipc::VnodeEntry> {
+        // Use the centrally resolved manifest key
+        unsafe { sync_ipc_manifest_get(&self.socket_path, &vpath.manifest_key) }
     }
 
-    /// Check if path is in VFS domain (zero-alloc, O(1) string prefix check)
-    /// Returns true if path should be considered for Hot Stat acceleration
-    #[inline(always)]
+    /// Resolve an incoming path into a VfsPath if it belongs to the VFS.
+    pub(crate) fn resolve_path(&self, path: &str) -> Option<VfsPath> {
+        self.path_resolver.resolve(path)
+    }
+
+    /// Check if path is in VFS domain (Backwards compatibility shim)
     pub(crate) fn psfs_applicable(&self, path: &str) -> bool {
-        path.starts_with(&*self.vfs_prefix)
+        self.resolve_path(path).is_some()
     }
 
     /// Attempt O(1) stat lookup from manifest cache
