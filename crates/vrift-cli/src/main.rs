@@ -179,6 +179,15 @@ enum Commands {
         directory: Option<PathBuf>,
     },
 
+    /// Initialize a Velo Rift project in the current directory
+    ///
+    /// Creates .vrift/ directory and prepares for VFS operations
+    Init {
+        /// Project directory (default: current directory)
+        #[arg(value_name = "DIR")]
+        directory: Option<PathBuf>,
+    },
+
     /// Enter VFS Inception Mode - "Enter the Dream" 🌀
     ///
     /// Outputs shell script for eval. Usage: eval "$(vrift inception)"
@@ -359,6 +368,10 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
             let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
             active::deactivate(&dir)
         }
+        Commands::Init { directory } => {
+            let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
+            cmd_init(&dir)
+        }
         Commands::Inception { directory } => {
             let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
             inception::cmd_inception(&dir)
@@ -367,6 +380,62 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
         Commands::Hook { shell } => inception::cmd_hook(&shell),
         Commands::Config { command } => cmd_config(command),
     }
+}
+
+/// Initialize a Velo Rift project and enter inception mode
+///
+/// Usage: eval "$(vrift init)"
+fn cmd_init(directory: &Path) -> Result<()> {
+    use console::{style, Emoji};
+
+    static CHECK: Emoji<'_, '_> = Emoji("✔ ", "[ok] ");
+    static FOLDER: Emoji<'_, '_> = Emoji("📁 ", "");
+
+    let vrift_dir = directory.join(".vrift");
+    let project_name = directory
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+
+    // Check if already initialized
+    if vrift_dir.exists() {
+        eprintln!(
+            "{} Project already initialized at {}",
+            style("ℹ").blue(),
+            style(vrift_dir.display()).dim()
+        );
+        // Already initialized, just enter inception
+        return inception::cmd_inception(directory);
+    }
+
+    // Create .vrift directory structure
+    fs::create_dir_all(&vrift_dir)?;
+    fs::create_dir_all(vrift_dir.join("bin"))?;
+
+    // Create empty manifest placeholder
+    let manifest_path = vrift_dir.join("manifest.lmdb");
+    fs::File::create(&manifest_path)?;
+
+    // Output success (to stderr so it doesn't interfere with eval)
+    eprintln!();
+    eprintln!(
+        "{} {} {}",
+        FOLDER,
+        style("Initialized Velo Rift in").green(),
+        style(&project_name).green().bold()
+    );
+    eprintln!();
+    eprintln!("   {} Created {}", CHECK, style(".vrift/").dim());
+    eprintln!("   {} Created {}", CHECK, style(".vrift/bin/").dim());
+    eprintln!(
+        "   {} Created {}",
+        CHECK,
+        style(".vrift/manifest.lmdb").dim()
+    );
+    eprintln!();
+
+    // Now auto-enter inception mode
+    inception::cmd_inception(directory)
 }
 
 /// Configuration management commands
