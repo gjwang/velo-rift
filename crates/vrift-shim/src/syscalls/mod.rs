@@ -1,6 +1,8 @@
 // Syscall implementations
 pub mod dir;
 pub mod io;
+#[cfg(target_os = "linux")]
+pub mod linux_raw;
 pub mod mem;
 pub mod misc;
 pub mod mmap;

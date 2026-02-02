@@ -164,9 +164,9 @@ pub unsafe extern "C" fn link_shim(old: *const c_char, new: *const c_char) -> c_
     #[cfg(target_os = "linux")]
     {
         if INITIALIZING.load(Ordering::Relaxed) >= 2 {
-            return crate::syscalls::open::raw_link(old, new);
+            return crate::syscalls::linux_raw::raw_link(old, new);
         }
-        link_impl(old, new).unwrap_or_else(|| crate::syscalls::open::raw_link(old, new))
+        link_impl(old, new).unwrap_or_else(|| crate::syscalls::linux_raw::raw_link(old, new))
     }
 }
 
@@ -215,9 +215,9 @@ pub unsafe extern "C" fn unlink_shim(path: *const c_char) -> c_int {
     #[cfg(target_os = "linux")]
     {
         if INITIALIZING.load(Ordering::Relaxed) >= 2 {
-            return crate::syscalls::open::raw_unlink(path);
+            return crate::syscalls::linux_raw::raw_unlink(path);
         }
-        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::open::raw_unlink(path))
+        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_unlink(path))
     }
 }
 
@@ -235,9 +235,9 @@ pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
     #[cfg(target_os = "linux")]
     {
         if INITIALIZING.load(Ordering::Relaxed) >= 2 {
-            return crate::syscalls::open::raw_rmdir(path);
+            return crate::syscalls::linux_raw::raw_rmdir(path);
         }
-        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::open::raw_rmdir(path))
+        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_rmdir(path))
     }
 }
 
@@ -260,9 +260,9 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
 #[cfg(target_os = "linux")]
 pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> c_int {
     if INITIALIZING.load(Ordering::Relaxed) >= 2 {
-        return crate::syscalls::open::raw_mkdir(path, mode);
+        return crate::syscalls::linux_raw::raw_mkdir(path, mode);
     }
-    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::open::raw_mkdir(path, mode))
+    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_mkdir(path, mode))
 }
 
 /// Helper: Check if path is in VFS and return EPERM if so

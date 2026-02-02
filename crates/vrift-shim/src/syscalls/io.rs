@@ -11,7 +11,6 @@ use libc::off_t;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-#[cfg(target_os = "macos")]
 // Symbols imported from reals.rs via crate::reals
 /// Global FD tracking table: fd -> (path, is_vfs_file)
 static FD_TABLE: RwLock<Option<HashMap<c_int, FdEntry>>> = RwLock::new(None);

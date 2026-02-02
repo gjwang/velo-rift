@@ -1,3 +1,11 @@
+//! Real Symbol Storage
+//!
+//! Pattern 2682: Provides access to real libc functions to avoid recursion deadlocks.
+//!
+//! On macOS: Uses dlsym(RTLD_NEXT) to get the real libc functions.
+//! On Linux: Returns pointers to raw assembly syscall wrappers (Pattern 2692)
+//!           to completely bypass libc and avoid any recursion.
+
 use libc::{c_char, c_void};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -15,6 +23,23 @@ impl RealSymbol {
         }
     }
 
+    /// Get the real function pointer.
+    /// On macOS: Uses dlsym(RTLD_NEXT)
+    /// On Linux: This is deprecated - use linux_raw module directly
+    #[cfg(target_os = "macos")]
+    pub unsafe fn get(&self) -> *mut c_void {
+        let p = self.ptr.load(Ordering::Acquire);
+        if !p.is_null() {
+            return p;
+        }
+        let f = libc::dlsym(libc::RTLD_NEXT, self.name.as_ptr() as *const c_char);
+        self.ptr.store(f, Ordering::Release);
+        f
+    }
+
+    /// On Linux, we still support dlsym for compatibility,
+    /// but prefer using linux_raw module for recursion-safe syscalls.
+    #[cfg(target_os = "linux")]
     pub unsafe fn get(&self) -> *mut c_void {
         let p = self.ptr.load(Ordering::Acquire);
         if !p.is_null() {
@@ -26,7 +51,7 @@ impl RealSymbol {
     }
 }
 
-// Global list of real symbols used by shims
+// Global list of real symbols used by shims (primarily macOS)
 pub static REAL_OPEN: RealSymbol = RealSymbol::new("open\0");
 pub static REAL_OPENAT: RealSymbol = RealSymbol::new("openat\0");
 pub static REAL_CLOSE: RealSymbol = RealSymbol::new("close\0");
@@ -65,3 +90,4 @@ pub static REAL_READDIR: RealSymbol = RealSymbol::new("readdir\0");
 pub static REAL_CLOSEDIR: RealSymbol = RealSymbol::new("closedir\0");
 pub static REAL_GETCWD: RealSymbol = RealSymbol::new("getcwd\0");
 pub static REAL_CHDIR: RealSymbol = RealSymbol::new("chdir\0");
+pub static REAL_LINK: RealSymbol = RealSymbol::new("link\0");
