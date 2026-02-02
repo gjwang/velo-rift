@@ -366,8 +366,9 @@ fn export_mmap_cache(manifest: &LmdbManifest, project_root: &Path) {
 async fn start_daemon() -> Result<()> {
     tracing::info!("vriftd: Starting multi-tenant daemon...");
 
-    let socket_path = "/tmp/vrift.sock";
-    let path = Path::new(socket_path);
+    let socket_path =
+        std::env::var("VRIFT_SOCKET_PATH").unwrap_or_else(|_| "/tmp/vrift.sock".to_string());
+    let path = Path::new(&socket_path);
 
     if path.exists() {
         tokio::fs::remove_file(path).await?;

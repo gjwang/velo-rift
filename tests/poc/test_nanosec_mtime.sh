@@ -13,6 +13,7 @@ echo ""
 
 # Setup
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 CAS_ROOT="$TEST_DIR/cas"
 PROJECT_DIR="$TEST_DIR/root"
 MANIFEST_DIR="$PROJECT_DIR/.vrift/manifest.lmdb"

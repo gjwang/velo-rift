@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_deep_path_nesting.sh - Verify path handling for deeply nested directories
 # Priority: P2 (Boundary Condition)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: Deep Path Nesting (100+ levels) ==="

@@ -3,8 +3,11 @@
 # Tests actual fcntl locking behavior, not source code
 # Priority: P1
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 
 echo "=== P1 Gap Test: fcntl() Record Locking Behavior ==="
 
@@ -15,7 +18,7 @@ trap cleanup EXIT
 echo "lock test content" > "$TEST_DIR/lockfile.txt"
 
 # Test fcntl locking with Python
-python3 << 'EOF'
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
 import os
 import sys
 import fcntl
@@ -58,7 +61,7 @@ EOF
 
 export TEST_FILE="$TEST_DIR/lockfile.txt"
 
-python3 -c "
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -c "
 import os
 import fcntl
 import sys

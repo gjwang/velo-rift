@@ -483,9 +483,14 @@ impl ShimState {
             })
         };
 
-        // Static default - no allocation needed
-        let socket_path: std::borrow::Cow<'static, str> =
-            std::borrow::Cow::Borrowed("/tmp/vrift.sock");
+        let socket_ptr = unsafe { libc::getenv(c"VRIFT_SOCKET_PATH".as_ptr()) };
+        let socket_path: std::borrow::Cow<'static, str> = if socket_ptr.is_null() {
+            std::borrow::Cow::Borrowed("/tmp/vrift.sock")
+        } else {
+            std::borrow::Cow::Owned(unsafe {
+                CStr::from_ptr(socket_ptr).to_string_lossy().into_owned()
+            })
+        };
 
         // NOTE: Bloom mmap is deferred - don't call during init
         let bloom_ptr = ptr::null();

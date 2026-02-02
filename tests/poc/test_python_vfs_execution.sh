@@ -65,18 +65,16 @@ echo ""
 echo "[STEP 2] Start daemon with manifest..."
 killall vriftd 2>/dev/null || true
 sleep 1
-"${PROJECT_ROOT}/target/debug/vriftd" start > /tmp/python_vfs_daemon.log 2>&1 &
+(unset DYLD_INSERT_LIBRARIES && unset DYLD_FORCE_FLAT_NAMESPACE && "${PROJECT_ROOT}/target/debug/vriftd" start) > /tmp/python_vfs_daemon.log 2>&1 &
 DAEMON_PID=$!
 sleep 2
 
 echo "[STEP 3] Execute Python script via VFS..."
-export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 export VRIFT_DEBUG=1
 
 # Run Python in background with timeout
 (
-    python3 /vrift/project/main.py 2>&1
+    DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 /vrift/project/main.py 2>&1
 ) &
 PYTHON_PID=$!
 

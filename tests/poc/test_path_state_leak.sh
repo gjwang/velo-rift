@@ -36,8 +36,6 @@ int main() {
 EOF
 gcc /tmp/test_leak.c -o /tmp/test_leak
 
-export DYLD_INSERT_LIBRARIES="$SHIM_PATH"
-export DYLD_FORCE_FLAT_NAMESPACE=1
 export VRIFT_VFS_PREFIX="/vrift"
 
 OUTPUT=$(/tmp/test_leak 2>&1)

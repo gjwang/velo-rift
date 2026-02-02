@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_o_excl_create.sh - Verify O_EXCL exclusive file creation
 # Priority: P1 (Used by compilers for temp files)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: O_EXCL Exclusive Create ==="

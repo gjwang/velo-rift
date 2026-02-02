@@ -3,9 +3,12 @@
 # Tests actual sendfile behavior, not source code
 # Priority: P0
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 
 echo "=== P0 Gap Test: sendfile() Behavior ==="
 
@@ -17,7 +20,7 @@ echo "Source content for sendfile test" > "$TEST_DIR/source.txt"
 touch "$TEST_DIR/dest.txt"
 
 # Test sendfile with Python (or copy_file_range on Linux)
-python3 << 'EOF'
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
 import os
 import sys
 
@@ -72,7 +75,7 @@ EOF
 export SRC_FILE="$TEST_DIR/source.txt"
 export DST_FILE="$TEST_DIR/dest.txt"
 
-python3 -c "
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -c "
 import os
 import sys
 

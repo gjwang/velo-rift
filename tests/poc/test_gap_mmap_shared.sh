@@ -96,13 +96,11 @@ sleep 2
 echo "[3] Running functional test..."
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 if [[ "$(uname)" == "Darwin" ]]; then
-    export DYLD_INSERT_LIBRARIES="$LD_PRELOAD"
-    export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 if [[ "$(uname)" == "Linux" ]]; then
     export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
 fi
-export VRIFT_socket_path="${VELO_PROJECT_ROOT}/.vrift/socket"
+export VRIFT_SOCKET_PATH="${VELO_PROJECT_ROOT}/.vrift/socket"
 
 TEST_FILE="$VELO_PROJECT_ROOT/mapped_file.txt"
 # Create initial file (size needs to be enough for mmap 4k or we handle SIGBUS?)

@@ -6,6 +6,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 
 echo "=== P2 Gap Test: ctime Behavior ==="
@@ -28,8 +29,6 @@ fi
 sleep 1
 
 # Change permissions (should update ctime, not mtime)
-export DYLD_INSERT_LIBRARIES="$SHIM_PATH"
-export DYLD_FORCE_FLAT_NAMESPACE=1
 export VRIFT_VFS_PREFIX="$TEST_DIR/workspace"
 
 chmod 755 "$TEST_DIR/workspace/test.txt" 2>/dev/null || true

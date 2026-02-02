@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_mkdir_recursive.sh - Verify mkdir -p and rmdir
 # Priority: P2 (Build systems create nested dirs)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: Mkdir Recursive and Rmdir ==="

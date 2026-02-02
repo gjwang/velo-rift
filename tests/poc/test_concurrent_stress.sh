@@ -3,6 +3,8 @@
 # Goal: Verify daemon handles high-concurrency stat/open requests
 # Priority: P2 - Identify race conditions and bottlenecks
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 set -e
 echo "=== Concurrent Daemon Stress Test ==="
 echo ""

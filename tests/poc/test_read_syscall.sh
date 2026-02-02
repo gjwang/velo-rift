@@ -1,49 +1,62 @@
 #!/bin/bash
-# Test: read Syscall Interception
-# Goal: Verify read() behavior for VFS files
-# Priority: P2 - Core file reading syscall
+# Test: read() Syscall Behavior
+# Priority: P0
 
-set -e
-echo "=== Test: read Syscall ==="
-echo ""
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Verifies that read() correctly retrieves content from VFS files
 
-SHIM_PATH="${VRIFT_SHIM_PATH:-$(dirname "$0")/../../target/debug/libvrift_shim.dylib}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEST_DIR=$(mktemp -d)
+export TEST_DIR
 
-echo "[1] Checking Shim for read Implementation:"
-if [[ -f "$SHIM_PATH" ]]; then
-    if nm -gU "$SHIM_PATH" 2>/dev/null | grep -qE " _read(_shim)?$"; then
-        echo "    ✅ read symbol found in shim"
-        READ_IMPL=true
-    else
-        echo "    ❌ read NOT intercepted in shim"
-        READ_IMPL=false
-    fi
-else
-    echo "    ⚠️ Shim not built"
-    READ_IMPL=false
-fi
+echo "=== Test: read() Syscall Behavior ==="
 
-echo ""
-echo "[2] Current Architecture:"
-echo "    VFS uses mmap-based file access instead of read()"
-echo "    When open() is called on VFS file:"
-echo "    1. Content is fetched from CAS"
-echo "    2. Written to temp file or memfd"
-echo "    3. Real fd is returned"
-echo "    4. Subsequent read() works on real fd"
-echo ""
+cleanup() { rm -rf "$TEST_DIR"; }
+trap cleanup EXIT
 
-echo "[3] Impact Analysis:"
-echo "    read() interception is OPTIONAL because:"
-echo "    • open() returns a real fd with correct content"
-echo "    • Normal read() syscall works on this real fd"
-echo "    • No VFS-specific read() logic needed"
-echo ""
+# Create test file
+echo "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" > "$TEST_DIR/test.txt"
 
-if [[ "$READ_IMPL" == "true" ]]; then
-    echo "✅ PASS: read interception implemented"
-else
-    echo "✅ PASS: read passthrough is acceptable"
-    echo "   Reason: open() materializes VFS content to real fd"
-fi
-exit 0
+# Test with Python
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
+import os
+import sys
+
+test_file = os.environ.get("TEST_FILE", "/tmp/test.txt")
+
+try:
+    fd = os.open(test_file, os.O_RDONLY)
+    
+    # Read chunk 1
+    chunk1 = os.read(fd, 10)
+    if chunk1 != b"0123456789":
+        print(f"❌ FAIL: Chunk 1 mismatch: {chunk1}")
+        sys.exit(1)
+        
+    # Read chunk 2
+    chunk2 = os.read(fd, 10)
+    if chunk2 != b"ABCDEFGHIJ":
+        print(f"❌ FAIL: Chunk 2 mismatch: {chunk2}")
+        sys.exit(1)
+        
+    os.close(fd)
+    print("✅ PASS: read() syscall verified for sequential access")
+    sys.exit(0)
+    
+except Exception as e:
+    print(f"read() test error: {e}")
+    sys.exit(1)
+EOF
+
+export TEST_FILE="$TEST_DIR/test.txt"
+
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -c "
+import os
+import sys
+fd = os.open('$TEST_DIR/test.txt', os.O_RDONLY)
+if os.read(fd, 4) == b'0123':
+    print('✅ PASS: read behavior verified')
+    os.close(fd)
+    sys.exit(0)
+sys.exit(1)
+"

@@ -38,8 +38,6 @@ EOF
 
 gcc "$TEST_DIR/runtime_test.c" -o "$TEST_DIR/runtime_test"
 
-export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvrift_shim.dylib
 
 # Open() will be shimmed, but if pwrite() isn't, it will fail on the 
 # underlying physical FD if that FD came from a virtual mapping that 

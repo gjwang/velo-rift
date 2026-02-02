@@ -196,7 +196,10 @@ pub unsafe extern "C" fn velo_open_impl(p: *const c_char, f: c_int, m: mode_t) -
         }
     }
 
-    // VFS logic entry
+    // VFS readiness check - passthrough if VFS not ready
+    if !is_vfs_ready() {
+        return raw_open(p, f, m);
+    }
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
         None => return raw_open(p, f, m),
@@ -263,7 +266,10 @@ pub unsafe extern "C" fn velo_openat_impl(
         }
     }
 
-    // VFS logic entry
+    // VFS readiness check - passthrough if VFS not ready
+    if !is_vfs_ready() {
+        return raw_openat(dirfd, p, f, m);
+    }
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
         None => return raw_openat(dirfd, p, f, m),

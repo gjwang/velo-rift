@@ -28,7 +28,7 @@ echo "[STEP 1] Ingesting directory..."
 
 # Step 2: Start Daemon
 echo "[STEP 2] Starting daemon..."
-"${PROJECT_ROOT}/target/debug/vriftd" start > /tmp/daemon_issue4.log 2>&1 &
+(unset DYLD_INSERT_LIBRARIES && unset DYLD_FORCE_FLAT_NAMESPACE && "${PROJECT_ROOT}/target/debug/vriftd" start) > /tmp/daemon_issue4.log 2>&1 &
 DAEMON_PID=$!
 sleep 2
 

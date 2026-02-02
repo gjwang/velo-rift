@@ -113,19 +113,25 @@ sleep 1
     echo $! > "$VELO_PROJECT_ROOT/daemon.pid"
 )
 DAEMON_PID=$(cat "$VELO_PROJECT_ROOT/daemon.pid")
-sleep 2
+# Wait for socket
+for i in {1..20}; do
+    if [[ -S "${VELO_PROJECT_ROOT}/.vrift/socket" ]]; then
+        echo "Daemon socket found after $i attempts."
+        break
+    fi
+    sleep 0.5
+done
+sleep 1
 
 echo ""
 echo "[3] Running functional test..."
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 if [[ "$(uname)" == "Darwin" ]]; then
-    export DYLD_INSERT_LIBRARIES="$LD_PRELOAD"
-    export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 if [[ "$(uname)" == "Linux" ]]; then
     export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
 fi
-export VRIFT_socket_path="${VELO_PROJECT_ROOT}/.vrift/socket"
+export VRIFT_SOCKET_PATH="${VELO_PROJECT_ROOT}/.vrift/socket"
 
 # Create file in VFS
 TEST_FILE="$VELO_PROJECT_ROOT/lock.txt"

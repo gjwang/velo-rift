@@ -3,6 +3,8 @@
 # Tests actual readdir behavior, not source code
 # Priority: P2
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR=$(mktemp -d)
 
@@ -15,7 +17,7 @@ trap cleanup EXIT
 touch "$TEST_DIR/a.txt" "$TEST_DIR/b.txt" "$TEST_DIR/c.txt"
 
 # Test readdir with Python
-python3 << 'EOF'
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
 import os
 import sys
 
@@ -43,7 +45,7 @@ EOF
 
 export TEST_DIR="$TEST_DIR"
 
-python3 -c "
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -c "
 import os
 import sys
 entries = os.listdir('$TEST_DIR')

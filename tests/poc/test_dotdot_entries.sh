@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_dotdot_entries.sh - Verify . and .. directory entries
 # Priority: P2 (Directory traversal, relative paths)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: Dot and DotDot Directory Entries ==="

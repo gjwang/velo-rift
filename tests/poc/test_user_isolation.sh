@@ -12,7 +12,7 @@ DAEMON_LOG="/tmp/vriftd_isolation.log"
 pkill vriftd
 export VR_THE_SOURCE="/tmp/vrift_source_isolation"
 mkdir -p "$VR_THE_SOURCE"
-./target/debug/vriftd start > "$DAEMON_LOG" 2>&1 &
+./target/debug/(unset DYLD_INSERT_LIBRARIES && unset DYLD_FORCE_FLAT_NAMESPACE && vriftd start) > "$DAEMON_LOG" 2>&1 &
 sleep 1
 
 # 2. Check if Daemon has any logic to identify the caller

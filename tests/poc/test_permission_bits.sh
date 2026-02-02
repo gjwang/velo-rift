@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_permission_bits.sh - Verify file permission handling
 # Priority: P2 (Execute permissions, read-only files)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: Permission Bits Handling ==="

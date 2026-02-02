@@ -5,6 +5,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 VELO_PROJECT_ROOT="$TEST_DIR/workspace"
 
 echo "=== Test: getcwd/chdir Virtual Directory Navigation (Runtime) ==="
@@ -46,7 +47,7 @@ echo "test" > "$VELO_PROJECT_ROOT/src/main.rs"
 # Setup Shim and run test
 DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" \
 DYLD_FORCE_FLAT_NAMESPACE=1 \
-VRIFT_socket_path="/tmp/vrift.sock" \
+VRIFT_SOCKET_PATH="/tmp/vrift.sock" \
 VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT" \
 "$TEST_DIR/chdir_test" "$VELO_PROJECT_ROOT/src"
 RET=$?

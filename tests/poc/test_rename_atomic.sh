@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_rename_atomic.sh - Verify rename atomicity for safe file updates
 # Priority: P1 (POSIX Semantics - Config updates, make)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: Rename Atomicity ==="

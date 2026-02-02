@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_flock_locking.sh - Verify file locking (flock)
 # Priority: P2 (Git, Cargo, SQLite use this)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: File Locking (flock) ==="

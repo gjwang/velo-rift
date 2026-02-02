@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_errno_handling.sh - Verify correct errno returns
 # Priority: P2 (Error handling correctness)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: Errno Handling ==="

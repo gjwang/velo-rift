@@ -29,8 +29,6 @@ EOF
 gcc /tmp/test_stat.c -o /tmp/test_stat
 
 # Run with shim
-export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 export VRIFT_VFS_PREFIX="/vrift"
 
 echo "[RUN] Executing stat with shim (timeout ${TIMEOUT}s)..."

@@ -3,6 +3,8 @@
 # Goal: Verify statx is intercepted (Linux extended stat API)
 # Priority: P2 - Required for systemd and modern Linux tools
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 set -e
 echo "=== Test: statx Interception Requirement ==="
 echo ""

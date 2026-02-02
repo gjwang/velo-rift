@@ -15,8 +15,6 @@ echo "=== Test: Path Normalization Bypass ==="
 # Create a dummy file on host that we'll try to 'escape' to
 echo "host_secret" > /tmp/vrift_host_secret.txt
 
-export DYLD_INSERT_LIBRARIES="$SHIM_PATH"
-export DYLD_FORCE_FLAT_NAMESPACE=1
 export VRIFT_VFS_PREFIX="/vrift"
 
 # We try to access a host file using a virtual prefix + traversal

@@ -7,6 +7,7 @@ echo "--- Manifest Convergence Functional Verification ---"
 
 # Setup
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 CAS_ROOT="$TEST_DIR/cas"
 PROJECT_DIR="$TEST_DIR/root"
 # LMDB manifest is now created in project's .vrift directory

@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_unlink_open_file.sh - Verify Unix unlink-while-open semantics
 # Priority: P1 (POSIX Semantics - Compilers use this)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: Unlink Open File Semantics ==="

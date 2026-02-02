@@ -9,6 +9,7 @@
 
 set -e
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 CAS_FILE="$TEST_DIR/cas_blob"
 
 echo "=== VFS Safety Verification ==="

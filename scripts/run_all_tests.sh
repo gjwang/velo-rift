@@ -29,6 +29,7 @@ for t in tests/poc/test_*.sh; do
         echo "⏱️ TIMEOUT: $name"
     else
         failed=$((failed+1))
+        echo "❌ FAIL: $name"
     fi
 done
 

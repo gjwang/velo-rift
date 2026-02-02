@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_special_filenames.sh - Verify handling of special characters in filenames
 # Priority: P2 (Boundary Condition)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: Special Filename Handling ==="

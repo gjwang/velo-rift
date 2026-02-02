@@ -53,13 +53,11 @@ echo "[OK] LMDB Manifest created at $VRIFT_MANIFEST_DIR"
 
 echo "[STEP 2] Start daemon with manifest..."
 killall vriftd 2>/dev/null || true
-"${PROJECT_ROOT}/target/debug/vriftd" start > /tmp/inception_daemon.log 2>&1 &
+(unset DYLD_INSERT_LIBRARIES && unset DYLD_FORCE_FLAT_NAMESPACE && "${PROJECT_ROOT}/target/debug/vriftd" start) > /tmp/inception_daemon.log 2>&1 &
 DAEMON_PID=$!
 sleep 2
 
 echo "[STEP 3] Compile via VFS (with shim)..."
-export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 export VRIFT_DEBUG=1
 
 # Run compilation in background with timeout

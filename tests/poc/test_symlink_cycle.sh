@@ -1,55 +1,45 @@
 #!/bin/bash
-# Test: Symlink Cycle Detection
-# Goal: Verify readlink handles circular symlinks without infinite recursion
-# Priority: P1 - Symlink cycles in node_modules can crash compilers
+# Test: Symlink Cycle Detection Behavior
+# Priority: P1
 
-set -e
-echo "=== Test: Symlink Cycle Detection ==="
-echo ""
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Verifies that symlink cycles don't crash the system
 
-SHIM_SRC="$(dirname "$0")/../../crates/vrift-shim/src/interpose.rs"
+echo "=== Test: Symlink Cycle Behavior ==="
 
-echo "[1] Symlink Resolution Analysis:"
+TEST_DIR=$(mktemp -d)
+export TEST_DIR
+cleanup() { rm -rf "$TEST_DIR"; }
+trap cleanup EXIT
 
-# Check readlink implementation
-if grep -q "readlink_shim" "$SHIM_SRC" 2>/dev/null; then
-    echo "    ✅ readlink interception found"
-else
-    echo "    ❌ readlink NOT intercepted"
-    exit 1
-fi
+# Create a cycle: a -> b -> a
+ln -s "$TEST_DIR/b" "$TEST_DIR/a"
+ln -s "$TEST_DIR/a" "$TEST_DIR/b"
 
-echo ""
-echo "[2] Cycle Detection Approaches:"
-echo "    Option A: Track visited paths (O(n) memory)"
-echo "    Option B: Limit resolution depth (Linux default: 40)"
-echo "    Option C: Return ELOOP on cycle detection"
-echo ""
+# Test with Python (should handle error gracefully)
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
+import os
+import sys
 
-echo "[3] Current Behavior:"
-echo "    VFS stores symlink targets in Manifest"
-echo "    readlink returns target from Manifest, not filesystem"
-echo "    Cycle detection depends on Manifest validation"
-echo ""
+test_dir = os.environ.get("TEST_DIR", "/tmp")
+cycle_start = os.path.join(test_dir, "a")
 
-echo "[4] Impact:"
-echo "    • npm/pnpm create symlink forests in node_modules"
-echo "    • Circular workspace references possible"
-echo "    • Without protection: stack overflow or hung process"
-echo ""
-
-echo "[5] Recommendation:"
-echo "    Implement depth limit (40) following POSIX standard"
-echo "    Return ELOOP errno on excessive depth"
-echo ""
-
-# Check for cycle detection
-if grep -qE "ELOOP|depth|visited" "$SHIM_SRC" 2>/dev/null; then
-    echo "✅ PASS: Cycle protection appears implemented"
-    exit 0
-else
-    echo "⚠️ No explicit cycle detection found"
-    echo "   May rely on OS-level ELOOP protection"
-    echo "   Priority: P2"
-    exit 0  # Not failing - OS may provide protection
-fi
+try:
+    # Try to open or stat the cycle
+    print(f"Attempting to stat symlink cycle: {cycle_start}")
+    os.stat(cycle_start)
+    print("❌ FAIL: stat succeeded on infinite loop (unexpected)")
+    sys.exit(1)
+except OSError as e:
+    # Expected: ELOOP (Too many levels of symbolic links)
+    if e.errno == 62 or e.errno == 40: # 62 on macOS, 40 on Linux
+        print(f"✅ PASS: Symlink cycle correctly detected (ELOOP: {e})")
+        sys.exit(0)
+    else:
+        print(f"⚠️ INFO: stat failed with error {e.errno}: {e}")
+        # Not strictly a failure if it didn't hang
+        sys.exit(0)
+except Exception as e:
+    print(f"Cycle detection error: {e}")
+    sys.exit(1)
+EOF

@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_o_append_atomic.sh - Verify O_APPEND atomicity
 # Priority: P2 (Log files, build output)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: O_APPEND Atomicity ==="

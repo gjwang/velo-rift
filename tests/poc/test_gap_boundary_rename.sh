@@ -3,6 +3,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 VELO_PROJECT_ROOT="$TEST_DIR/workspace"
 DAEMON_BIN="${PROJECT_ROOT}/target/debug/vriftd"
 
@@ -42,7 +43,7 @@ mkdir -p "$VELO_PROJECT_ROOT/.vrift"
 echo "Hello boundary" > "$VELO_PROJECT_ROOT/test.txt"
 EXTERNAL_DIR="$TEST_DIR/external"
 mkdir -p "$EXTERNAL_DIR"
-export VRIFT_socket_path="/tmp/vrift.sock"
+export VRIFT_SOCKET_PATH="/tmp/vrift.sock"
 
 # Start Daemon
 rm -f /tmp/vrift.sock
@@ -81,8 +82,6 @@ sleep 2
 # Setup Shim
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 if [[ "$(uname)" == "Darwin" ]]; then
-    export DYLD_INSERT_LIBRARIES="$LD_PRELOAD"
-    # export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 export RUST_LOG=debug
 # Set VFS prefix to the project workspace so psfs_applicable matches correctly

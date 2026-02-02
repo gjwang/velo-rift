@@ -3,6 +3,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 VELO_PROJECT_ROOT="$TEST_DIR/workspace"
 
 echo "=== P0 Gap Test: Permission Bypass (CAS Mode Corruption) ==="
@@ -41,8 +42,6 @@ chmod 444 "$VELO_PROJECT_ROOT/protected.txt"
 # Setup Shim
 export LD_PRELOAD="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
 if [[ "$(uname)" == "Darwin" ]]; then
-    export DYLD_INSERT_LIBRARIES="$LD_PRELOAD"
-    export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 

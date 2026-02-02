@@ -6,6 +6,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 
 echo "=== Compiler Gap: utimes/futimes Behavior ==="
 

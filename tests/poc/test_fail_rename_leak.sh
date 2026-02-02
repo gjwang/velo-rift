@@ -32,8 +32,6 @@ EOF
 
 gcc "$TEST_DIR/rename_test.c" -o "$TEST_DIR/rename_test"
 
-export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES=$(pwd)/target/debug/libvrift_shim.dylib
 
 # This WILL fail because "/vrift/test" does not exist on the host filesystem 
 # and the shim is not intercepting rename to redirect it.

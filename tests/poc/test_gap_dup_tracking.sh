@@ -3,9 +3,12 @@
 # Tests actual dup behavior, not source code
 # Priority: P1
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 
 echo "=== P1 Gap Test: dup/dup2 FD Tracking ==="
 
@@ -16,7 +19,7 @@ trap cleanup EXIT
 echo "Test content for dup" > "$TEST_DIR/test.txt"
 
 # Test dup/dup2 with Python
-python3 << 'EOF'
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
 import os
 import sys
 
@@ -56,7 +59,7 @@ EOF
 
 export TEST_FILE="$TEST_DIR/test.txt"
 
-python3 -c "
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -c "
 import os
 import sys
 

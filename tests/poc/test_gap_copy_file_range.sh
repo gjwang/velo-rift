@@ -3,6 +3,8 @@
 # Tests actual copy behavior, not source code
 # Priority: P0
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR=$(mktemp -d)
 
@@ -16,7 +18,7 @@ echo "Source content for copy test" > "$TEST_DIR/source.txt"
 touch "$TEST_DIR/dest.txt"
 
 # Test copy with Python
-python3 << 'EOF'
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
 import os
 import sys
 import shutil
@@ -66,7 +68,7 @@ EOF
 
 export TEST_DIR="$TEST_DIR"
 
-python3 -c "
+DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -c "
 import shutil
 import sys
 shutil.copy('$TEST_DIR/source.txt', '$TEST_DIR/dest2.txt')

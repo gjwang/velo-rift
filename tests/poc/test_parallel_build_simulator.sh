@@ -7,6 +7,7 @@
 echo "--- Parallel Build Stability Verification ---"
 
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 CAS_ROOT="$TEST_DIR/cas"
 MANIFEST="$TEST_DIR/manifest.bin"
 mkdir -p "$CAS_ROOT" "$TEST_DIR/root"
@@ -22,8 +23,6 @@ done
 export VRIFT_MANIFEST="$MANIFEST"
 export VR_THE_SOURCE="$CAS_ROOT"
 export VRIFT_VFS_PREFIX="$TEST_DIR/root"
-export DYLD_FORCE_FLAT_NAMESPACE=1
-export DYLD_INSERT_LIBRARIES="$(pwd)/target/debug/libvrift_shim.dylib"
 
 # 3. Simulate Parallel Writes (CoW triggers)
 echo "[+] Starting parallel writes (simulating concurrent compilers)..."

@@ -1,6 +1,8 @@
 #!/bin/bash
 # test_eloop_detection.sh - Verify ELOOP (too many symlink levels)
 # Priority: P2 (Symlink cycle prevention)
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 set -e
 
 echo "=== Test: ELOOP Symlink Detection ==="

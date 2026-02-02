@@ -28,8 +28,6 @@ gcc /tmp/check_fds.c -o /tmp/check_fds
 
 echo "[1] Running child process through shim..."
 # Trigger shim init by opening a file
-export DYLD_INSERT_LIBRARIES="$SHIM_PATH"
-export DYLD_FORCE_FLAT_NAMESPACE=1
 export VRIFT_DEBUG=1
 
 # Run the helper. It will trigger shim init, then exec lsof.
