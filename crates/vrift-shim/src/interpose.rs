@@ -130,9 +130,10 @@ mod linux_shims {
 
     #[no_mangle]
     pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+        // RFC-0050: Only bypass when actually busy (state 3), allow state 2 to trigger initialization
         let init_state =
             unsafe { crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed) };
-        if init_state == 2 || init_state == 3 {
+        if init_state == 3 {
             #[cfg(target_arch = "x86_64")]
             {
                 let ret: i64;
