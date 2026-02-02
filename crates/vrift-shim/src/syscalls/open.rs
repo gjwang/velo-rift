@@ -315,7 +315,7 @@ pub unsafe extern "C" fn velo_open_impl(p: *const c_char, f: c_int, m: mode_t) -
                     lateout("x0") ret,
                 );
                 if ret < 0 {
-                    crate::set_errno(-ret as i64 as c_int);
+                    crate::set_errno(-ret as c_int);
                     -1
                 } else {
                     ret as c_int

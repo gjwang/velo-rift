@@ -171,10 +171,12 @@ fn rdtsc() -> u64 {
         std::arch::x86_64::_rdtsc()
     }
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        let mut cntpct: u64;
-        std::arch::asm!("mrs {0}, cntpct_el0", out(reg) cntpct);
-        cntpct
+    /* unsafe */
+    {
+        // let mut cntpct: u64;
+        // std::arch::asm!("mrs {0}, cntpct_el0", out(reg) cntpct);
+        // cntpct
+        0
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
