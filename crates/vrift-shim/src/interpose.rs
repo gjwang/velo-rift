@@ -15,12 +15,15 @@ use crate::syscalls::misc::{
 use crate::syscalls::mmap::{mmap_shim, munmap_shim};
 // C variadic wrappers call velo_*_impl which is defined in syscalls/open.rs
 #[cfg(target_os = "macos")]
+use crate::syscalls::open::{open_shim, openat_shim};
+#[cfg(target_os = "macos")]
 use crate::syscalls::path::{readlink_shim, realpath_shim};
 #[cfg(target_os = "macos")]
 use crate::syscalls::stat::{access_shim, fstat_shim, lstat_shim, stat_shim};
-use crate::syscalls::open::{open_shim, openat_shim};
 #[cfg(target_os = "macos")]
-use libc::{c_char, c_int, c_long, c_void, dirent, mode_t, pid_t, size_t, ssize_t, timespec, timeval, DIR};
+use libc::{
+    c_char, c_int, c_long, c_void, dirent, mode_t, pid_t, size_t, ssize_t, timespec, timeval, DIR,
+};
 #[cfg(target_os = "macos")]
 use std::ffi::CStr;
 

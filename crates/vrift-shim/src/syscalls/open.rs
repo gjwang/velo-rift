@@ -19,10 +19,7 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
     };
 
     // Get shim state
-    let state = match ShimState::get() {
-        Some(s) => s,
-        None => return None,
-    };
+    let state = ShimState::get()?;
 
     // Check if path is in VFS domain
     if !state.psfs_applicable(path_str) {
@@ -30,10 +27,7 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
     }
 
     // Query manifest via IPC
-    let entry = match state.query_manifest_ipc(path_str) {
-        Some(e) => e,
-        None => return None,
-    };
+    let entry = state.query_manifest_ipc(path_str)?;
 
     // Build CAS blob path
     let hash_hex = hex_encode(&entry.content_hash);
@@ -70,7 +64,9 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
                 let mut buf = [0u8; 8192];
                 loop {
                     let n = libc::read(src_fd, buf.as_mut_ptr() as *mut c_void, buf.len());
-                    if n <= 0 { break; }
+                    if n <= 0 {
+                        break;
+                    }
                     libc::write(dst_fd, buf.as_ptr() as *const c_void, n as usize);
                 }
                 libc::close(dst_fd);
@@ -82,24 +78,31 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
                 libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
                 0o644,
             );
-            if dst_fd >= 0 { libc::close(dst_fd); }
+            if dst_fd >= 0 {
+                libc::close(dst_fd);
+            }
         }
 
         let fd = libc::open(temp_cpath.as_ptr(), flags, mode as libc::c_uint);
         if fd >= 0 {
             if let Ok(mut fds) = state.open_fds.lock() {
-                fds.insert(fd, OpenFile {
-                    vpath: path_str.to_string(),
-                    temp_path: temp_path.clone(),
-                    mmap_count: 0,
-                });
+                fds.insert(
+                    fd,
+                    OpenFile {
+                        vpath: path_str.to_string(),
+                        temp_path: temp_path.clone(),
+                        mmap_count: 0,
+                    },
+                );
             }
         }
         Some(fd)
     } else {
         let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
         let fd = libc::open(blob_cpath.as_ptr(), flags, mode as libc::c_uint);
-        if fd >= 0 { return Some(fd); }
+        if fd >= 0 {
+            return Some(fd);
+        }
         set_errno(libc::ENOENT);
         Some(-1)
     }
@@ -146,36 +149,56 @@ pub unsafe extern "C" fn velo_open_impl(p: *const c_char, f: c_int, m: mode_t) -
     unsafe fn raw_open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
         #[cfg(target_os = "macos")]
         {
-            let ret: i64; let err: i64;
+            let ret: i64;
+            let err: i64;
             std::arch::asm!(
                 "mov x16, #5", "svc #0x80", "cset {err}, cs",
                 in("x0") path, in("x1") flags as i64, in("x2") mode as i64,
                 lateout("x0") ret, err = out(reg) err,
             );
-            if err != 0 { set_errno(ret as c_int); -1 } else { ret as c_int }
+            if err != 0 {
+                set_errno(ret as c_int);
+                -1
+            } else {
+                ret as c_int
+            }
         }
         #[cfg(target_os = "linux")]
         {
-            #[cfg(target_arch = "x86_64")] {
+            #[cfg(target_arch = "x86_64")]
+            {
                 let ret: i64;
                 std::arch::asm!(
                     "syscall", in("rax") 2, in("rdi") path, in("rsi") flags as i64, in("rdx") mode as i64,
                     lateout("rax") ret,
                 );
-                if ret < 0 { set_errno(-ret as c_int); -1 } else { ret as c_int }
+                if ret < 0 {
+                    set_errno(-ret as c_int);
+                    -1
+                } else {
+                    ret as c_int
+                }
             }
-            #[cfg(target_arch = "aarch64")] {
+            #[cfg(target_arch = "aarch64")]
+            {
                 let ret: i64;
                 std::arch::asm!(
                     "mov x8, #56", "svc #0", in("x0") -100i64, in("x1") path, in("x2") flags as i64, in("x3") mode as i64,
                     lateout("x0") ret,
                 );
-                if ret < 0 { set_errno(-ret as c_int); -1 } else { ret as c_int }
+                if ret < 0 {
+                    set_errno(-ret as c_int);
+                    -1
+                } else {
+                    ret as c_int
+                }
             }
         }
     }
 
-    if !is_vfs_ready() { return raw_open(p, f, m); }
+    if !is_vfs_ready() {
+        return raw_open(p, f, m);
+    }
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
         None => return raw_open(p, f, m),
@@ -185,41 +208,66 @@ pub unsafe extern "C" fn velo_open_impl(p: *const c_char, f: c_int, m: mode_t) -
 
 /// Unified openat implementation called by C bridge
 #[no_mangle]
-pub unsafe extern "C" fn velo_openat_impl(dirfd: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int {
+pub unsafe extern "C" fn velo_openat_impl(
+    dirfd: c_int,
+    p: *const c_char,
+    f: c_int,
+    m: mode_t,
+) -> c_int {
     #[inline(always)]
     unsafe fn raw_openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
         #[cfg(target_os = "macos")]
         {
-            let ret: i64; let err: i64;
+            let ret: i64;
+            let err: i64;
             std::arch::asm!(
                 "mov x16, #463", "svc #0x80", "cset {err}, cs",
                 in("x0") dirfd as i64, in("x1") path, in("x2") flags as i64, in("x3") mode as i64,
                 lateout("x0") ret, err = out(reg) err,
             );
-            if err != 0 { set_errno(ret as c_int); -1 } else { ret as c_int }
+            if err != 0 {
+                set_errno(ret as c_int);
+                -1
+            } else {
+                ret as c_int
+            }
         }
         #[cfg(target_os = "linux")]
         {
-            #[cfg(target_arch = "x86_64")] {
+            #[cfg(target_arch = "x86_64")]
+            {
                 let ret: i64;
                 std::arch::asm!(
                     "syscall", in("rax") 257, in("rdi") dirfd as i64, in("rsi") path, in("rdx") flags as i64, in("r10") mode as i64,
                     lateout("rax") ret,
                 );
-                if ret < 0 { set_errno(-ret as c_int); -1 } else { ret as c_int }
+                if ret < 0 {
+                    set_errno(-ret as c_int);
+                    -1
+                } else {
+                    ret as c_int
+                }
             }
-            #[cfg(target_arch = "aarch64")] {
+            #[cfg(target_arch = "aarch64")]
+            {
                 let ret: i64;
                 std::arch::asm!(
                     "mov x8, #56", "svc #0", in("x0") dirfd as i64, in("x1") path, in("x2") flags as i64, in("x3") mode as i64,
                     lateout("x0") ret,
                 );
-                if ret < 0 { set_errno(-ret as c_int); -1 } else { ret as c_int }
+                if ret < 0 {
+                    set_errno(-ret as c_int);
+                    -1
+                } else {
+                    ret as c_int
+                }
             }
         }
     }
 
-    if !is_vfs_ready() { return raw_openat(dirfd, p, f, m); }
+    if !is_vfs_ready() {
+        return raw_openat(dirfd, p, f, m);
+    }
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
         None => return raw_openat(dirfd, p, f, m),
@@ -229,10 +277,14 @@ pub unsafe extern "C" fn velo_openat_impl(dirfd: c_int, p: *const c_char, f: c_i
 
 #[cfg(target_os = "macos")]
 fn set_errno(e: c_int) {
-    unsafe { *libc::__error() = e; }
+    unsafe {
+        *libc::__error() = e;
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn set_errno(e: c_int) {
-    unsafe { *libc::__errno_location() = e; }
+    unsafe {
+        *libc::__errno_location() = e;
+    }
 }
