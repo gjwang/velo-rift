@@ -1,10 +1,8 @@
 /**
- * Multi-Platform Variadic Shim
- * Supports: macOS (ARM64), Linux (x86_64, ARM64)
+ * Multi-Platform Variadic Shim Implementation
  *
- * This bridge solves the variadic ABI hazard and enables "Delayed VFS
- * Activation". It uses raw inline assembly for syscalls during the
- * initialization phase to prevent recursion and deadlocks.
+ * Provides clean, fixed-argument entry points for Rust shims
+ * to solve the Variadic ABI hazard on macOS ARM64.
  */
 
 #include <errno.h>
@@ -25,7 +23,6 @@
 #define SYS_OPEN 2
 #define SYS_OPENAT 257
 #elif defined(__linux__) && defined(__aarch64__)
-// Linux AArch64 often only has openat
 #define SYS_OPENAT 56
 #define AT_FDCWD -100
 #endif
@@ -35,18 +32,13 @@
 extern int velo_open_impl(const char *path, int flags, mode_t mode);
 extern int velo_openat_impl(int dirfd, const char *path, int flags,
                             mode_t mode);
-
-extern _Atomic char INITIALIZING; /* 1 = Busy/Initializing, 0 = Ready */
+extern _Atomic char INITIALIZING;
 
 /* --- Raw Syscall Implementation --- */
 
 #if defined(__aarch64__)
-/**
- * ARM64 (AArch64) Raw Syscall
- */
 static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
                                long arg4) {
-  long ret;
 #if defined(__APPLE__)
   long err_flag;
   register long x16 __asm__("x16") = number;
@@ -54,7 +46,6 @@ static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
   register long x1 __asm__("x1") = arg2;
   register long x2 __asm__("x2") = arg3;
   register long x3 __asm__("x3") = arg4;
-
   __asm__ volatile("svc #0x80\n"
                    "cset %1, cs\n"
                    : "+r"(x0), "=r"(err_flag)
@@ -66,13 +57,11 @@ static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
   }
   return x0;
 #else
-  // Linux ARM64
   register long x8 __asm__("x8") = number;
   register long x0 __asm__("x0") = arg1;
   register long x1 __asm__("x1") = arg2;
   register long x2 __asm__("x2") = arg3;
   register long x3 __asm__("x3") = arg4;
-
   __asm__ volatile("svc #0\n"
                    : "+r"(x0)
                    : "r"(x8), "r"(x1), "r"(x2), "r"(x3)
@@ -85,9 +74,6 @@ static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
 #endif
 }
 #elif defined(__x86_64__)
-/**
- * x86_64 Raw Syscall (Linux)
- */
 static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
                                long arg4) {
   long ret;
@@ -103,21 +89,9 @@ static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
 }
 #endif
 
-/* --- Wrappers --- */
+/* --- Implementation Functions (called by Rust proxies or direct shims) --- */
 
-#if defined(__APPLE__)
-int open_c_wrapper(const char *path, int flags, ...) {
-#else
-int open(const char *path, int flags, ...) {
-#endif
-  mode_t mode = 0;
-  if (flags & O_CREAT) {
-    va_list ap;
-    va_start(ap, flags);
-    mode = (mode_t)va_arg(ap, int);
-    va_end(ap);
-  }
-
+int open_shim_c_impl(const char *path, int flags, mode_t mode) {
   if (INITIALIZING) {
 #if defined(__linux__) && defined(__aarch64__) && !defined(SYS_OPEN)
     return (int)raw_syscall(SYS_OPENAT, AT_FDCWD, (long)path, (long)flags,
@@ -129,19 +103,7 @@ int open(const char *path, int flags, ...) {
   return velo_open_impl(path, flags, mode);
 }
 
-#if defined(__APPLE__)
-int openat_c_wrapper(int dirfd, const char *path, int flags, ...) {
-#else
-int openat(int dirfd, const char *path, int flags, ...) {
-#endif
-  mode_t mode = 0;
-  if (flags & O_CREAT) {
-    va_list ap;
-    va_start(ap, flags);
-    mode = (mode_t)va_arg(ap, int);
-    va_end(ap);
-  }
-
+int openat_shim_c_impl(int dirfd, const char *path, int flags, mode_t mode) {
   if (INITIALIZING) {
     return (int)raw_syscall(SYS_OPENAT, (long)dirfd, (long)path, (long)flags,
                             (long)mode);
@@ -149,8 +111,22 @@ int openat(int dirfd, const char *path, int flags, ...) {
   return velo_openat_impl(dirfd, path, flags, mode);
 }
 
+/* --- Primary Interception Entry Points --- */
+
+// macOS uses open_shim/openat_shim proxies from Rust side for symbol export.
+// Linux uses direct open/openat/open64/openat64 shims.
+
 #if defined(__linux__)
-// Linux specifics: open64 aliases
+int open(const char *path, int flags, ...) {
+  mode_t mode = 0;
+  if (flags & O_CREAT) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = (mode_t)va_arg(ap, int);
+    va_end(ap);
+  }
+  return open_shim_c_impl(path, flags, mode);
+}
 int open64(const char *path, int flags, ...) {
   va_list ap;
   mode_t mode = 0;
@@ -160,6 +136,16 @@ int open64(const char *path, int flags, ...) {
     va_end(ap);
   }
   return open(path, flags, mode);
+}
+int openat(int dirfd, const char *path, int flags, ...) {
+  mode_t mode = 0;
+  if (flags & O_CREAT) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = (mode_t)va_arg(ap, int);
+    va_end(ap);
+  }
+  return openat_shim_c_impl(dirfd, path, flags, mode);
 }
 int openat64(int dirfd, const char *path, int flags, ...) {
   va_list ap;
@@ -173,19 +159,20 @@ int openat64(int dirfd, const char *path, int flags, ...) {
 }
 #endif
 
+/* --- fcntl variadic bridge --- */
+
+extern int velo_fcntl_impl(int fd, int cmd, long arg);
+
 #if defined(__APPLE__)
-/* macOS Interpose - must be in the same file as the wrappers */
-typedef struct interpose_s {
-  void *new_func;
-  void *old_func;
-} interpose_t;
-
-extern int open(const char *, int, ...);
-extern int openat(int, const char *, int, ...);
-
-__attribute__((used)) static const interpose_t interposers[]
-    __attribute__((section("__DATA,__interpose"))) = {
-        {(void *)open_c_wrapper, (void *)open},
-        {(void *)openat_c_wrapper, (void *)openat},
-    };
+int fcntl_shim_c_impl(int fd, int cmd, long arg) {
+  return velo_fcntl_impl(fd, cmd, arg);
+}
+#else
+int fcntl(int fd, int cmd, ...) {
+  va_list ap;
+  va_start(ap, cmd);
+  long arg = va_arg(ap, long);
+  va_end(ap);
+  return velo_fcntl_impl(fd, cmd, arg);
+}
 #endif

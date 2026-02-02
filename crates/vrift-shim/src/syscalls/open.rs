@@ -105,7 +105,8 @@ unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c
     }
 }
 
-/// Convert hash bytes to hex string
+// --- Hex Encoding ---
+
 fn hex_encode(hash: &[u8; 32]) -> String {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
     let mut result = String::with_capacity(64);
@@ -114,6 +115,26 @@ fn hex_encode(hash: &[u8; 32]) -> String {
         result.push(HEX_CHARS[(byte & 0x0f) as usize] as char);
     }
     result
+}
+
+// --- C Bridge Proxies (Force Export) ---
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn open_shim(p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    extern "C" {
+        fn open_shim_c_impl(p: *const c_char, f: c_int, m: mode_t) -> c_int;
+    }
+    open_shim_c_impl(p, f, m)
+}
+
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn openat_shim(dfd: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int {
+    extern "C" {
+        fn openat_shim_c_impl(dfd: c_int, p: *const c_char, f: c_int, m: mode_t) -> c_int;
+    }
+    openat_shim_c_impl(dfd, p, f, m)
 }
 
 // --- Unified Implementation Entry Points ---
