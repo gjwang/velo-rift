@@ -5,13 +5,33 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
+# Determine OS and shim name
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    SHIM_NAME="libvrift_shim.dylib"
+    PRELOAD_VAR="DYLD_INSERT_LIBRARIES"
+else
+    SHIM_NAME="libvrift_shim.so"
+    PRELOAD_VAR="LD_PRELOAD"
+fi
+
+# Prefer release builds (CI), fallback to debug
+if [ -f "${PROJECT_ROOT}/target/release/${SHIM_NAME}" ]; then
+    SHIM_PATH="${PROJECT_ROOT}/target/release/${SHIM_NAME}"
+else
+    SHIM_PATH="${PROJECT_ROOT}/target/debug/${SHIM_NAME}"
+fi
 
 echo "=== Test: TLS Bootstrap Hang Behavior ==="
 
 if [[ ! -f "$SHIM_PATH" ]]; then
     echo "⚠️ Shim not found at $SHIM_PATH"
+    # exit 0  # Re-enable if you want it to be a hard failure in CI
     exit 0
+fi
+
+export "$PRELOAD_VAR"="$(realpath "$SHIM_PATH")"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
 
 # Run a simple command under the shim with a tight timeout

@@ -20,9 +20,16 @@ rm -rf "$VR_THE_SOURCE" "$MANIFEST" "$TEST_FILE"
 mkdir -p "$VR_THE_SOURCE"
 echo "test content" > "$TEST_FILE"
 
+# Prefer release builds (CI), fallback to debug
+if [ -f "${PROJECT_ROOT}/target/release/vrift" ]; then
+    VELO_BIN="${PROJECT_ROOT}/target/release/vrift"
+else
+    VELO_BIN="${PROJECT_ROOT}/target/debug/vrift"
+fi
+
 # Run ingest on a single file
-echo "[RUN] vrift ingest $TEST_FILE --output $MANIFEST --prefix /"
-OUTPUT=$("${PROJECT_ROOT}/target/debug/vrift" --the-source-root "$VR_THE_SOURCE" ingest "$TEST_FILE" --output "$MANIFEST" --prefix / 2>&1) || true
+echo "[RUN] $VELO_BIN --the-source-root $VR_THE_SOURCE ingest $TEST_FILE --output $MANIFEST --prefix /"
+OUTPUT=$("$VELO_BIN" --the-source-root "$VR_THE_SOURCE" ingest "$TEST_FILE" --output "$MANIFEST" --prefix / 2>&1) || true
 
 # Check results
 if [ -f "$MANIFEST" ]; then

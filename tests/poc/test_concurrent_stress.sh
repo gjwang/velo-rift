@@ -49,9 +49,9 @@ done
 wait
 END=$(get_time)
 
-DURATION=$(echo "$END - $START" | bc)
+DURATION=$(python3 -c "print($END - $START)")
 TOTAL_OPS=$((CONCURRENT * ITERATIONS * 100))
-OPS_PER_SEC=$(echo "scale=0; $TOTAL_OPS / $DURATION" | bc)
+OPS_PER_SEC=$(python3 -c "print(int($TOTAL_OPS / $DURATION))")
 
 echo "    Concurrent workers: $CONCURRENT"
 echo "    Total stat ops: $TOTAL_OPS"
@@ -76,9 +76,10 @@ done
 wait
 END=$(get_time)
 
-DURATION=$(echo "$END - $START" | bc)
+DURATION=$(python3 -c "print($END - $START)")
+OPS_PER_SEC=$(python3 -c "print(int($TOTAL_OPS / $DURATION))")
 echo "    Duration: ${DURATION}s"
-echo "    Throughput: ~$(echo "scale=0; $TOTAL_OPS / $DURATION" | bc) ops/sec"
+echo "    Throughput: ~${OPS_PER_SEC} ops/sec"
 
 echo ""
 echo "[4] Race Condition Check:"
