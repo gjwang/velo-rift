@@ -13,8 +13,7 @@ use crate::syscalls::misc::{
 };
 #[cfg(target_os = "macos")]
 use crate::syscalls::mmap::{mmap_shim, munmap_shim};
-#[cfg(target_os = "macos")]
-use crate::syscalls::open::{open_shim, openat_shim};
+// C variadic wrappers call velo_*_impl which is defined in syscalls/open.rs
 #[cfg(target_os = "macos")]
 use crate::syscalls::path::{readlink_shim, realpath_shim};
 #[cfg(target_os = "macos")]
@@ -109,6 +108,15 @@ extern "C" {
     fn fchdir(fd: c_int) -> c_int;
     fn lseek(fd: c_int, offset: libc::off_t, whence: c_int) -> libc::off_t;
     fn ftruncate(fd: c_int, length: libc::off_t) -> c_int;
+}
+
+// C variadic wrappers (from src/c/variadic_shim.c)
+// These use va_list to correctly handle macOS ARM64 variadic ABI
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn open_c_wrapper(path: *const c_char, flags: c_int, ...) -> c_int;
+    fn openat_c_wrapper(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
+    fn fcntl_c_wrapper(fd: c_int, cmd: c_int, ...) -> c_int;
 }
 
 #[allow(unused_macros)]
@@ -295,18 +303,11 @@ pub unsafe extern "C" fn mkdir_shim(p: *const c_char, m: mode_t) -> c_int {
 
     mkdir(p, m)
 }
-// Variadic ABI Fix: fcntl() is fn(fd, cmd, ...) - arg only valid for certain cmds
+// Called by C variadic wrapper (fcntl_c_wrapper) with clean args
 #[cfg(target_os = "macos")]
 #[no_mangle]
-pub unsafe extern "C" fn fcntl_shim(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
-    // Variadic ABI safety: third arg only valid for certain commands
-    // F_GETFD, F_GETFL, F_GETOWN, F_GETPATH, etc. don't use arg
-    // F_SETFD, F_SETFL, F_DUPFD, F_SETOWN, etc. do use arg
-    let safe_arg = match cmd {
-        libc::F_GETFD | libc::F_GETFL => 0, // arg not used
-        _ => arg,                           // use provided arg
-    };
-    fcntl(fd, cmd, safe_arg)
+pub unsafe extern "C" fn velo_fcntl_impl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
+    fcntl(fd, cmd, arg)
 }
 #[cfg(target_os = "macos")]
 #[no_mangle]
@@ -352,22 +353,12 @@ pub unsafe extern "C" fn posix_spawnp_shim(
     posix_spawnp(p, f, fa, at, ar, e)
 }
 
-// NOTE: open() variadic ABI cannot work on macOS ARM64!
-// Variadic args go to STACK but non-variadic shim reads from REGISTERS.
-// O_CREAT check cannot fix this - mode is read from wrong location entirely.
-// TODO: Use inline assembly or naked function to handle variadic correctly.
-// #[cfg(target_os = "macos")]
-// #[link_section = "__DATA,__interpose"]
-// #[used]
-// pub static IT_OPEN: Interpose = Interpose {
-//     new_func: open_shim as *const (),
-//     old_func: open as *const (),
-// };
+// C variadic wrapper handles va_list correctly on macOS ARM64
 #[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
 #[used]
-#[allow(dead_code)]
 pub static IT_OPEN: Interpose = Interpose {
-    new_func: open_shim as *const (),
+    new_func: open_c_wrapper as *const (),
     old_func: open as *const (),
 };
 #[cfg(target_os = "macos")]
@@ -594,31 +585,14 @@ pub static IT_READ: Interpose = Interpose {
     new_func: read_shim as *const (),
     old_func: libc::read as *const (),
 };
-// NOTE: fcntl variadic ABI cannot be fixed with cmd check on macOS ARM64!
-// On macOS ARM64, variadic args are passed on STACK not registers, causing
-// fundamental ABI mismatch when caller passes 2 args but shim reads 3.
-// This breaks Tokio's F_SETFL O_NONBLOCK calls. Keeping fcntl_shim for Solid mode
-// file locking where we call it directly, but NOT interposing.
-// #[cfg(target_os = "macos")]
-// #[link_section = "__DATA,__interpose"]
-// #[used]
-// pub static IT_FCNTL: Interpose = Interpose {
-//     new_func: fcntl_shim as *const (),
-//     old_func: libc::fcntl as *const (),
-// };
-// NOTE: openat() has same variadic ABI issue as open() on macOS ARM64
-// #[cfg(target_os = "macos")]
-// #[link_section = "__DATA,__interpose"]
-// #[used]
-// pub static IT_OPENAT: Interpose = Interpose {
-//     new_func: openat_shim as *const (),
-//     old_func: openat as *const (),
-// };
+// fcntl is NOT interposed - F_SETLK/F_GETLK use struct flock* which is complex
+// VFS doesn't need to intercept fcntl, file locking works on real FDs
+// C variadic wrapper handles openat va_list correctly
 #[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
 #[used]
-#[allow(dead_code)]
 pub static IT_OPENAT: Interpose = Interpose {
-    new_func: openat_shim as *const (),
+    new_func: openat_c_wrapper as *const (),
     old_func: openat as *const (),
 };
 #[cfg(target_os = "macos")]
