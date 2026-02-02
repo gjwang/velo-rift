@@ -101,7 +101,7 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
     let real =
         std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_DUP.old_func);
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(oldfd);
     }
 
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
         IT_DUP2.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(oldfd, newfd);
     }
 
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn fchdir_shim(fd: c_int) -> c_int {
     let real =
         std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_FCHDIR.old_func);
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(fd);
     }
 
@@ -173,7 +173,7 @@ pub unsafe extern "C" fn lseek_shim(fd: c_int, offset: off_t, whence: c_int) -> 
         IT_LSEEK.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(fd, offset, whence);
     }
 
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn ftruncate_shim(fd: c_int, length: off_t) -> c_int {
         IT_FTRUNCATE.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(fd, length);
     }
 
@@ -218,7 +218,7 @@ pub unsafe extern "C" fn write_shim(
         *const (),
         unsafe extern "C" fn(c_int, *const c_void, libc::size_t) -> libc::ssize_t,
     >(IT_WRITE.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(fd, buf, count);
     }
     real(fd, buf, count)
@@ -236,7 +236,7 @@ pub unsafe extern "C" fn read_shim(
         *const (),
         unsafe extern "C" fn(c_int, *mut c_void, libc::size_t) -> libc::ssize_t,
     >(IT_READ.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
         return real(fd, buf, count);
     }
     real(fd, buf, count)
@@ -245,17 +245,27 @@ pub unsafe extern "C" fn read_shim(
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
+    use crate::interpose::IT_CLOSE;
     use crate::ipc::sync_ipc_manifest_reingest;
     use crate::state::{EventType, ShimGuard, ShimState};
 
+    // CRITICAL: Must use IT_CLOSE.old_func to get the real close function
+    let real =
+        std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_CLOSE.old_func);
+
+    // Pattern 2648/2649: Passthrough during initialization to avoid TLS hazard
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
+        return real(fd);
+    }
+
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
-        None => return libc::close(fd),
+        None => return real(fd),
     };
 
     let state = match ShimState::get() {
         Some(s) => s,
-        None => return libc::close(fd),
+        None => return real(fd),
     };
 
     // Check if this FD is a COW session
@@ -278,7 +288,7 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
         );
 
         // Final close of the temp file before reingest
-        let res = libc::close(fd);
+        let res = real(fd);
 
         // Trigger reingest IPC
         // RFC-0047: ManifestReingest updates the CAS and Manifest
@@ -304,6 +314,6 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     } else {
         // Not a COW file, but might be a VFS read-only file or non-VFS file
         untrack_fd(fd);
-        libc::close(fd)
+        real(fd)
     }
 }

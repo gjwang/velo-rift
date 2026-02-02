@@ -38,7 +38,7 @@ pub unsafe extern "C" fn rename_shim(old: *const c_char, new: *const c_char) -> 
         *const (),
         unsafe extern "C" fn(*const c_char, *const c_char) -> c_int,
     >(IT_RENAME.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
         return real(old, new);
     }
     rename_impl(old, new).unwrap_or_else(|| real(old, new))
@@ -66,7 +66,7 @@ pub unsafe extern "C" fn renameat_shim(
             *const (),
             unsafe extern "C" fn(c_int, *const c_char, c_int, *const c_char) -> c_int,
         >(IT_RENAMEAT.old_func);
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return real(oldfd, old, newfd, new);
         }
 
@@ -162,14 +162,14 @@ pub unsafe extern "C" fn link_shim(old: *const c_char, new: *const c_char) -> c_
         extern "C" {
             fn link(old: *const c_char, new: *const c_char) -> c_int;
         }
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return link(old, new);
         }
         link_impl(old, new).unwrap_or_else(|| link(old, new))
     }
     #[cfg(target_os = "linux")]
     {
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return crate::syscalls::open::raw_link(old, new);
         }
         link_impl(old, new).unwrap_or_else(|| crate::syscalls::open::raw_link(old, new))
@@ -192,7 +192,7 @@ pub unsafe extern "C" fn linkat_shim(
             *const (),
             unsafe extern "C" fn(c_int, *const c_char, c_int, *const c_char, c_int) -> c_int,
         >(IT_LINKAT.old_func);
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return real(oldfd, old, newfd, new, flags);
         }
         link_impl(old, new).unwrap_or_else(|| real(oldfd, old, newfd, new, flags))
@@ -216,14 +216,14 @@ pub unsafe extern "C" fn unlink_shim(path: *const c_char) -> c_int {
         let real = std::mem::transmute::<*const (), unsafe extern "C" fn(*const c_char) -> c_int>(
             IT_UNLINK.old_func,
         );
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return real(path);
         }
         block_vfs_mutation(path).unwrap_or_else(|| real(path))
     }
     #[cfg(target_os = "linux")]
     {
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return libc::unlink(path);
         }
         block_vfs_mutation(path).unwrap_or_else(|| libc::unlink(path))
@@ -238,14 +238,14 @@ pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
         let real = std::mem::transmute::<*const (), unsafe extern "C" fn(*const c_char) -> c_int>(
             IT_RMDIR.old_func,
         );
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return real(path);
         }
         block_vfs_mutation(path).unwrap_or_else(|| real(path))
     }
     #[cfg(target_os = "linux")]
     {
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return libc::rmdir(path);
         }
         block_vfs_mutation(path).unwrap_or_else(|| libc::rmdir(path))
@@ -261,14 +261,14 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
             *const (),
             unsafe extern "C" fn(*const c_char, libc::mode_t) -> c_int,
         >(IT_MKDIR.old_func);
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return real(path, mode);
         }
         block_vfs_mutation(path).unwrap_or_else(|| real(path, mode))
     }
     #[cfg(target_os = "linux")]
     {
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return libc::mkdir(path, mode);
         }
         block_vfs_mutation(path).unwrap_or_else(|| libc::mkdir(path, mode))
@@ -277,18 +277,40 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
 
 /// Helper: Check if path is in VFS and return EPERM if so
 /// RFC-0048: Must check is_vfs_ready() FIRST to avoid deadlock during init (Pattern 2543)
+/// RFC-0052: Standalone mode - check VRIFT_VFS_PREFIX even without daemon
 unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
     if path.is_null() {
         return None;
     }
-    let _guard = ShimGuard::enter()?;
-    let state = ShimState::get()?;
+
     let path_str = CStr::from_ptr(path).to_str().ok()?;
 
-    if state.psfs_applicable(path_str) {
-        crate::set_errno(libc::EPERM);
-        return Some(-1);
+    // First try: Full shim state check (daemon connected)
+    if let Some(_guard) = ShimGuard::enter() {
+        if let Some(state) = ShimState::get() {
+            if state.psfs_applicable(path_str) {
+                crate::set_errno(libc::EPERM);
+                return Some(-1);
+            }
+            return None;
+        }
     }
+
+    // Fallback: Standalone VFS prefix check (no daemon needed)
+    // This ensures mutation perimeter works even in tests without full daemon
+    // CRITICAL: Use libc::getenv() directly to avoid TLS hang (Pattern 2648)
+    // std::env::var() triggers Rust runtime TLS which hangs during shim init
+    let env_name = b"VRIFT_VFS_PREFIX\0";
+    let vfs_prefix_ptr = libc::getenv(env_name.as_ptr() as *const c_char);
+    if !vfs_prefix_ptr.is_null() {
+        if let Ok(vfs_prefix) = CStr::from_ptr(vfs_prefix_ptr).to_str() {
+            if path_str.starts_with(vfs_prefix) {
+                crate::set_errno(libc::EPERM);
+                return Some(-1);
+            }
+        }
+    }
+
     None
 }
 
@@ -302,7 +324,7 @@ pub unsafe extern "C" fn chmod_shim(path: *const c_char, mode: libc::mode_t) -> 
         *const (),
         unsafe extern "C" fn(*const c_char, libc::mode_t) -> c_int,
     >(IT_CHMOD.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
         return real(path, mode);
     }
     block_vfs_mutation(path).unwrap_or_else(|| real(path, mode))
@@ -321,7 +343,7 @@ pub unsafe extern "C" fn fchmodat_shim(
         *const (),
         unsafe extern "C" fn(c_int, *const c_char, libc::mode_t, c_int) -> c_int,
     >(IT_FCHMODAT.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
         return real(dirfd, path, mode, flags);
     }
     block_vfs_mutation(path).unwrap_or_else(|| real(dirfd, path, mode, flags))
@@ -337,7 +359,7 @@ pub unsafe extern "C" fn truncate_shim(path: *const c_char, length: libc::off_t)
         *const (),
         unsafe extern "C" fn(*const c_char, libc::off_t) -> c_int,
     >(IT_TRUNCATE.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
         return real(path, length);
     }
     block_vfs_mutation(path).unwrap_or_else(|| real(path, length))
@@ -353,7 +375,7 @@ pub unsafe extern "C" fn chflags_shim(path: *const c_char, flags: libc::c_uint) 
         *const (),
         unsafe extern "C" fn(*const c_char, libc::c_uint) -> c_int,
     >(IT_CHFLAGS.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
         return real(path, flags);
     }
     block_vfs_mutation(path).unwrap_or_else(|| real(path, flags))
@@ -383,7 +405,7 @@ pub unsafe extern "C" fn setxattr_shim(
             c_int,
         ) -> c_int,
     >(IT_SETXATTR.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
         return real(path, name, value, size, position, options);
     }
     block_vfs_mutation(path).unwrap_or_else(|| real(path, name, value, size, position, options))
@@ -401,7 +423,7 @@ pub unsafe extern "C" fn removexattr_shim(
         *const (),
         unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int,
     >(IT_REMOVEXATTR.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
         return real(path, name, options);
     }
     block_vfs_mutation(path).unwrap_or_else(|| real(path, name, options))
@@ -420,7 +442,7 @@ pub unsafe extern "C" fn utimes_shim(path: *const c_char, times: *const libc::ti
         *const (),
         unsafe extern "C" fn(*const c_char, *const libc::timeval) -> c_int,
     >(IT_UTIMES.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) != 0 {
+    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
         return real(path, times);
     }
     block_vfs_mutation(path).unwrap_or_else(|| real(path, times))
@@ -440,7 +462,7 @@ pub unsafe extern "C" fn utimensat_shim(
             *const (),
             unsafe extern "C" fn(c_int, *const c_char, *const libc::timespec, c_int) -> c_int,
         >(IT_UTIMENSAT.old_func);
-        if INITIALIZING.load(Ordering::Relaxed) != 0 {
+        if INITIALIZING.load(Ordering::Relaxed) >= 2 {
             return real(_dirfd, _path, _times, _flags);
         }
         block_vfs_mutation(_path).unwrap_or_else(|| real(_dirfd, _path, _times, _flags))
