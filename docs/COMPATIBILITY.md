@@ -15,6 +15,10 @@ The deep forensic audit and Proof of Failure (PoF) suite v2.0 have confirmed the
     -   `munmap` and `dlsym` are now fully intercepted and stable.
     -   **Variadic ABI Hazard Resolved**: Assembly stubs correctly handle `open` and `fcntl` stack-passed arguments on macOS ARM64.
     -   **DYLD Initialization Deadlock Resolved**: `pthread_key_t` TLS provides bootstrap safety, `INITIALIZING` AtomicBool forces early-boot passthrough.
+    -   **TLS Hang Fix (Pattern 2648/2649)**: Fixed process hang during dyld bootstrap:
+        -   Replaced `std::env::var()` with `libc::getenv()` (TLS-free)
+        -   Added `passthrough_if_init!` macro for consistent INITIALIZING state checks
+        -   Corrected state check logic: `INITIALIZING >= 2` (not `!= 0`) - states 0/1 are TLS-safe
 3.  **Vulnerability Perimeter Locked**:
     -   All critical gaps (Path Normalization, FD Leakage, State Leakage) have been quantified and captured in the PoF suite for automated regression tracking.
 
