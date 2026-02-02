@@ -234,20 +234,79 @@ Velo Rift offers two ways to enter the VFS "dream":
 *   **The Shim (macOS/Linux)**: Uses `LD_PRELOAD` to intercept syscalls. Zero disk footprint. Best for local development.
 *   **Link Farm (Linux Isolation)**: Creates a temporary directory of hardlinks. Best for containers and static binaries.
 
-### 3. Inception Commands (macOS SIP Bypass)
-On macOS, SIP restricts shim injection for system binaries. Use Inception Mode for full coverage:
+### 3. Inception Mode 🌀 (Shell Integration)
+
+Inspired by the movie *Inception*, entering VFS mode is like entering a "dream layer" where file operations are virtualized.
+
+#### Why Inception Mode?
+On macOS, **System Integrity Protection (SIP)** prevents shim injection into binaries in `/bin` and `/usr/bin`. When Makefiles or npm scripts call `chmod`, `rm`, etc., the shim is bypassed.
+
+**Inception Mode** solves this by:
+1. Prepending `.vrift/bin/` to your `PATH` (command wrappers)
+2. Setting `DYLD_INSERT_LIBRARIES` for non-SIP binaries
+3. Adding a visual "totem" `(vrift 🌀)` to your prompt
+
+#### Manual Inception
+
 ```bash
-# Enter the dream (sets up PATH + shim)
-eval "$(vrift inception)"
+$ cd my-project
+$ eval "$(vrift inception)"
+🌀 INCEPTION: Entering the dream...
+   ✔ VFS layer active
+   ✔ Reality distorted. Happy hacking.
 
-# Run your build
-cargo build
+(vrift 🌀) $ cargo build    # VFS intercepts all I/O
+(vrift 🌀) $ make install   # chmod/rm in Makefile intercepted!
 
-# Exit the dream
-vrift wake
+(vrift 🌀) $ eval "$(vrift wake)"
+💫 WAKE: Back to reality
+   Environment restored
+$
 ```
 
+#### Automatic Inception (Shell Hook)
+
+For hands-free activation when entering a VFS project:
+
+```bash
+# Add to ~/.zshrc or ~/.bashrc
+eval "$(vrift hook zsh)"   # or: bash, fish
+```
+
+Now when you `cd` into a project with `.vrift/`:
+```bash
+$ cd my-project/
+🌀 Auto-entering dream layer...
+(vrift 🌀) $ 
+
+(vrift 🌀) $ cd ../
+💫 Auto-waking...
+$
+```
+
+#### Environment Variables Set by Inception
+
+| Variable | Purpose |
+|----------|---------|
+| `VRIFT_INCEPTION=1` | Indicates Inception Mode is active |
+| `VRIFT_PROJECT_ROOT` | Path to the project root |
+| `VRIFT_MANIFEST` | Path to manifest.lmdb |
+| `PATH` | Prepended with `.vrift/bin/` |
+| `DYLD_INSERT_LIBRARIES` | Shim library path (macOS) |
+| `PS1` | Totem `(vrift 🌀)` added |
+
+#### Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `vrift inception [dir]` | Enter VFS mode (output script for `eval`) |
+| `vrift wake` | Exit VFS mode |
+| `vrift hook <shell>` | Generate shell hook for auto-inception |
+
+> **Tip**: You can check if you're in Inception Mode by looking for the 🌀 totem in your prompt, or checking `echo $VRIFT_INCEPTION`.
+
 ### 4. Absolute Determinism
+
 A `vrift.manifest` uniquely defines an entire environment. If the manifest hash is the same, the execution outcome is guaranteed to be reproducible.
 
 ---

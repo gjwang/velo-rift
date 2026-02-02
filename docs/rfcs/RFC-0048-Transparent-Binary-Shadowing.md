@@ -1,9 +1,9 @@
 # RFC-0048: SIP Bypass via PATH Shim (Inception Mode)
 
-## Status: PROPOSED
+## Status: ACTIVE (Phase 1 Complete)
 
 > **Original Approach (Binary Shadowing)**: ❌ NOT VIABLE  
-> **New Approach (PATH Shim / Inception Mode)**: ✅ PROPOSED
+> **Current Approach (PATH Shim / Inception Mode)**: ✅ IMPLEMENTED
 
 ---
 
@@ -22,180 +22,291 @@ On macOS, **System Integrity Protection (SIP)** prevents `DYLD_INSERT_LIBRARIES`
 
 ---
 
-## 2. Failed Approach: Binary Shadowing
+## 2. Design Philosophy
 
-### 2.1 Approach
+### 2.1 What We're NOT Doing
 
-Copy SIP-protected binaries to a shadow directory, re-sign with ad-hoc codesign, and redirect execution.
+| ❌ Rejected Approach | Why |
+|---------------------|-----|
+| Global LD_PRELOAD hijack | Too dangerous, breaks system |
+| ptrace / syscall hook | Security nightmare |
+| Replace /bin/bash | Instant user revolt |
+| Kernel LSM / fanotify | Too invasive |
 
-### 2.2 Result: ❌ BLOCKED
+### 2.2 What We ARE Doing
 
-> [!CAUTION]
-> **macOS Platform Binary Enforcement**: Apple-signed binaries carry `Platform identifier=15`. When copied and re-signed, the macOS kernel kills the process with SIGKILL.
+**Command-level interposition** (命令级透明代理)
 
-This restriction cannot be bypassed without disabling SIP (requires Recovery Mode) or kernel extensions.
+```
+User types: npm install
+Shell resolves: npm → shim → real npm
+```
+
+This is the same approach used by:
+- **ccache/sccache** - compiler wrapper
+- **asdf/mise** - version manager shims
+- **direnv** - shell hook auto-activation
+- **rustup** - toolchain proxy
+- **pyenv/nvm** - language version manager
 
 ---
 
-## 3. Proposed Solution: PATH Shim (Inception Mode)
+## 3. Security Tier System
 
-### 3.1 Concept: "Inception"
+### Level 0: PATH-based Command Shadowing (RECOMMENDED)
 
-Inspired by the movie *Inception* (盗梦空间), entering VFS mode is like entering a dream layer:
+This is the **primary and safest** approach.
+
+```
+~/.vrift/bin/npm   ← shim wrapper
+/usr/bin/npm       ← real binary
+```
+
+**Mechanism:**
+1. During `vrift inception`:
+   ```bash
+   export PATH="$PROJECT/.vrift/bin:$PATH"
+   ```
+2. `.vrift/bin/npm` does three things:
+   - Parse current cwd / env
+   - Prepare VFS mount / overlay
+   - `execve(real_npm, args, modified_env)`
+
+**Advantages:**
+- ✅ Completely user-space
+- ✅ Can opt-in / opt-out
+- ✅ Same legitimacy as pyenv/nvm/rustup
+- ✅ Clear security model
+- ✅ Enterprise-acceptable
+
+### Level 1: Shell Integration (Optional Enhancement)
+
+Shell hooks for **proactive preparation**, not interception:
+
+| Shell | Hook |
+|-------|------|
+| bash | `PROMPT_COMMAND` |
+| zsh | `preexec` / `precmd` |
+| fish | `--on-event fish_preexec` |
+
+**Purpose:**
+```
+User hits Enter
+       ↓
+Shell hook sees: npm install
+       ↓
+Warm up VFS mount / daemon connection
+       ↓
+Command executes (still real npm)
+```
+
+**Benefit:** Reduce cold-start latency without modifying command resolution.
+
+### Level 2: DYLD Shim (Current Implementation)
+
+For binaries that **do** load the shim (non-SIP):
+- Python scripts, Node programs, compiled user binaries
+- Works via `DYLD_INSERT_LIBRARIES`
+
+### Level 3: ❌ Rejected (Danger Zone)
+
+These approaches are explicitly **NOT** used:
+- Global LD_PRELOAD without user consent
+- Kernel LSM / fanotify forced redirection
+- ptrace I/O injection
+
+---
+
+## 4. Implementation: Inception Mode
+
+### 4.1 Concept: "Inception"
+
+Inspired by the movie (盗梦空间), entering VFS mode is like entering a dream layer:
 
 - **`vrift inception`** - Enter the dream (activate VFS environment)
 - **`vrift wake`** - Exit the dream (deactivate VFS environment)
+- **Shell totem** - `(vrift 🌀)` prompt indicates you're "in the dream"
 
-### 3.2 Industry Precedent
+### 4.2 Current Implementation (Phase 1 ✅)
 
-| Tool | Approach | 
-|------|----------|
-| **ccache/sccache** | PATH symlinks to wrapper |
-| **asdf/mise** | Shim directory with version resolution |
-| **direnv** | Shell hook + auto-activation |
-| **rustup** | Shim proxies to correct toolchain |
+#### Commands
 
-### 3.3 Architecture
+| Command | Status | Description |
+|---------|--------|-------------|
+| `vrift inception [dir]` | ✅ Implemented | Output shell script for `eval` |
+| `vrift wake` | ✅ Implemented | Restore environment |
+| `vrift hook <shell>` | ✅ Implemented | Auto-inception on cd |
 
-```
-                    Shell executes "chmod 755 file"
-                              ↓
-                    Search $PATH for "chmod"
-                              ↓
-            ┌─────────────────────────────────────┐
-            │ $PROJECT/.vrift/bin/chmod (wrapper) │ ← Found first
-            └─────────────────────────────────────┘
-                              ↓
-                    Wrapper checks target path
-                              ↓
-        ┌─────────────────┬─────────────────────────┐
-        │ In VFS project? │                         │
-        ↓                 ↓                         ↓
-       YES               NO                        
-        ↓                 ↓                         
-   vrift-chmod       /bin/chmod                  
-   (loads shim)      (passthrough)               
-```
-
-### 3.4 Commands
-
-#### `vrift inception` - Enter the Dream
+#### Environment Variables Set
 
 ```bash
-$ cd my-project
-$ eval "$(vrift inception)"
-🌀 Inception: Entering VFS layer for /Users/you/my-project
-   PATH prepended with .vrift/bin/
-   DYLD_INSERT_LIBRARIES set
-   Ready for build...
-```
-
-Output (for `eval`):
-```bash
-export VRIFT_PROJECT_ROOT="/Users/you/my-project"
+export VRIFT_PROJECT_ROOT="/path/to/project"
 export VRIFT_INCEPTION=1
-export PATH="/Users/you/my-project/.vrift/bin:$PATH"
-export DYLD_INSERT_LIBRARIES="/Users/you/my-project/.vrift/libvrift_shim.dylib"
+export VRIFT_MANIFEST="$VRIFT_PROJECT_ROOT/.vrift/manifest.lmdb"
+export PATH="$VRIFT_PROJECT_ROOT/.vrift/bin:$PATH"
+export DYLD_INSERT_LIBRARIES="/path/to/libvrift_shim.dylib"
 export DYLD_FORCE_FLAT_NAMESPACE=1
-echo "🌀 Inception: Entering VFS layer for $VRIFT_PROJECT_ROOT"
+export _VRIFT_OLD_PS1="$PS1"
+export PS1="(vrift 🌀) $PS1"
 ```
 
-#### `vrift wake` - Exit the Dream
+### 4.3 Pending Implementation (Phase 2)
 
-```bash
-$ vrift wake
-💫 Wake: Exiting VFS layer
-   Environment restored
+#### Wrapper Generation
+
+`.vrift/bin/` needs wrapper scripts for SIP-protected commands:
+
+**Directory Structure:**
+```
+.vrift/
+├── bin/
+│   ├── chmod      ← wrapper script
+│   ├── chown      ← wrapper script
+│   ├── rm         ← wrapper script
+│   ├── cp         ← wrapper script
+│   ├── mv         ← wrapper script
+│   ├── touch      ← wrapper script
+│   ├── mkdir      ← wrapper script
+│   ├── npm        ← wrapper script (optional)
+│   └── cargo      ← wrapper script (optional)
+├── helpers/
+│   ├── vrift-chmod  ← shim-loadable binary
+│   └── ...
+└── manifest.lmdb
 ```
 
-### 3.5 Shell Hook (Optional Auto-Inception)
-
-For automatic activation when entering a VFS project directory:
-
-```bash
-# Add to ~/.bashrc or ~/.zshrc
-eval "$(vrift hook bash)"   # or zsh/fish
-```
-
-Hook behavior:
-- `cd my-project/` → Auto-run `vrift inception` if `.vrift/` exists
-- `cd ../` → Auto-run `vrift wake` when leaving project
-
-### 3.6 Wrapper Scripts
-
-`.vrift/bin/chmod`:
+**Wrapper Script Example (`.vrift/bin/chmod`):**
 ```bash
 #!/bin/bash
+# Auto-generated by vrift inception
 # Inception-aware chmod wrapper
 
 TARGET="${@: -1}"
 [[ "$TARGET" != /* ]] && TARGET="$(pwd)/$TARGET"
 
 if [[ "$TARGET" == "$VRIFT_PROJECT_ROOT"* ]]; then
+    # VFS path: use helper that loads shim
     exec "$VRIFT_PROJECT_ROOT/.vrift/helpers/vrift-chmod" "$@"
 else
+    # Non-VFS path: passthrough to real binary
     exec /bin/chmod "$@"
 fi
 ```
 
-### 3.7 Helper Binaries
-
-Compiled binaries that **will** load the shim (not in SIP-protected paths):
-
-- `.vrift/helpers/vrift-chmod`
-- `.vrift/helpers/vrift-chown`
-- `.vrift/helpers/vrift-rm`
-- `.vrift/helpers/vrift-cp`
-- `.vrift/helpers/vrift-mv`
-- `.vrift/helpers/vrift-touch`
-
 ---
 
-## 4. User Experience
+## 5. User Experience
+
+### 5.1 Manual Inception
 
 ```bash
-# One-time setup (optional auto-inception)
-echo 'eval "$(vrift hook bash)"' >> ~/.bashrc
-
-# Manual inception
 $ cd my-project
 $ eval "$(vrift inception)"
-🌀 Inception: Entering VFS layer for /Users/you/my-project
+🌀 INCEPTION: Entering the dream...
+   ✔ VFS layer active
+   ✔ Reality distorted. Happy hacking.
 
-# Build now works with full VFS interception
-$ make build   # Makefile's chmod calls are now intercepted!
+(vrift 🌀) $ cargo build   # All I/O goes through VFS
+(vrift 🌀) $ make install  # chmod/cp in Makefile intercepted!
 
-# Exit when done
-$ vrift wake
-💫 Wake: Exiting VFS layer
+(vrift 🌀) $ eval "$(vrift wake)"
+💫 WAKE: Back to reality
+   Environment restored
+$
+```
 
-# Or just close the terminal
+### 5.2 Automatic Inception (Shell Hook)
+
+```bash
+# Add to ~/.zshrc
+eval "$(vrift hook zsh)"
+
+# Now inception is automatic:
+$ cd my-project/        # Auto-inception if .vrift/ exists
+🌀 Auto-entering dream layer...
+(vrift 🌀) $ 
+
+(vrift 🌀) $ cd ../     # Auto-wake when leaving
+💫 Auto-waking...
+$
 ```
 
 ---
 
-## 5. Implementation Plan
+## 6. Architecture Diagram
 
-### Phase 1: CLI Commands
-- [ ] Implement `vrift inception` - output shell env setup
-- [ ] Implement `vrift wake` - output shell env cleanup
-- [ ] Implement `vrift hook <shell>` - output shell hook code
-
-### Phase 2: Wrapper Generation
-- [ ] `vrift init` generates `.vrift/bin/` wrappers
-- [ ] Generate wrappers for: `chmod`, `chown`, `rm`, `cp`, `mv`, `touch`, `mkdir`, `rmdir`
-
-### Phase 3: Helper Binaries
-- [ ] Compile shim-loadable helper binaries
-- [ ] Bundle with vrift distribution or generate on `vrift init`
-
-### Phase 4: Documentation
-- [ ] Update USAGE.md with Inception Mode guide
-- [ ] Add examples for common build systems (Make, CMake, npm scripts)
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         User Shell (bash/zsh)                       │
+│                                                                     │
+│  eval "$(vrift inception)"                                          │
+│         ↓                                                           │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │              Environment Modified                            │   │
+│  │  PATH=".vrift/bin:$PATH"  DYLD_INSERT_LIBRARIES=... set     │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  User types: chmod 644 src/main.rs                                  │
+│         ↓                                                           │
+│  ┌─────────────────┐                                               │
+│  │ Shell PATH      │                                               │
+│  │ Resolution      │                                               │
+│  └────────┬────────┘                                               │
+│           ↓                                                         │
+│  ┌────────────────────────────────────────┐                        │
+│  │ .vrift/bin/chmod (wrapper script)      │                        │
+│  │                                         │                        │
+│  │  if path in VFS:                        │                        │
+│  │    exec .vrift/helpers/vrift-chmod      │  ← Loads shim!        │
+│  │  else:                                  │                        │
+│  │    exec /bin/chmod                      │  ← Passthrough        │
+│  └────────────────────────────────────────┘                        │
+│                                                                     │
+│  vrift-chmod loads libvrift_shim.dylib → IPC to vriftd → VFS Op    │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 6. Comparison with Previous Approach
+## 7. Implementation Plan
+
+### Phase 1: CLI Commands ✅ COMPLETE
+- [x] Implement `vrift inception` - output shell env setup
+- [x] Implement `vrift wake` - output shell env cleanup
+- [x] Implement `vrift hook <shell>` - output shell hook code
+- [x] Theatrical animations and prompt indicator
+
+### Phase 2: Wrapper Generation 🔜 NEXT
+- [ ] Generate `.vrift/bin/` wrappers during `vrift init` or first `inception`
+- [ ] Target commands: `chmod`, `chown`, `rm`, `cp`, `mv`, `touch`, `mkdir`, `rmdir`
+- [ ] Make wrappers executable and self-contained
+
+### Phase 3: Helper Binaries
+- [ ] Compile shim-loadable helper binaries (vrift-chmod, etc.)
+- [ ] Bundle with vrift distribution or compile on demand
+- [ ] These are NOT SIP-protected so shim injection works
+
+### Phase 4: Build System Integration
+- [ ] Test with Makefile-based projects
+- [ ] Test with npm/yarn scripts
+- [ ] Test with cargo build scripts
+- [ ] Document common patterns
+
+---
+
+## 8. Security Considerations
+
+| Concern | Mitigation |
+|---------|------------|
+| Wrapper scripts execute arbitrary code? | No - they only exec real binaries or vrift helpers |
+| PATH poisoning attack? | Only within Inception Mode, user must explicitly opt-in |
+| Privilege escalation? | No elevation; runs as current user |
+| Persistent after reboot? | No - environment is per-shell session |
+| Affects other users? | No - user-space PATH modification only |
+
+---
+
+## 9. Comparison with Previous Approach
 
 | Aspect | Binary Shadowing | Inception Mode |
 |--------|------------------|----------------|
@@ -205,3 +316,13 @@ $ vrift wake
 | Performance | Good (cached) | Good (instant) |
 | Security Changes | None | None |
 | User Experience | Transparent | Explicit (like virtualenv) |
+| Industry Precedent | None | ✅ Same as pyenv/rustup |
+
+---
+
+## 10. References
+
+- [ccache documentation](https://ccache.dev/manual.html) - PATH-based compiler wrapper
+- [mise documentation](https://mise.jdx.dev/) - Version manager with shims
+- [direnv](https://direnv.net/) - Shell environment auto-switching
+- [Inception (2010)](https://en.wikipedia.org/wiki/Inception) - Dream layer metaphor 🌀
