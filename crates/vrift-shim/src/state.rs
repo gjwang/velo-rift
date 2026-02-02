@@ -755,19 +755,24 @@ impl ShimState {
             return unsafe { Some(&*ptr) };
         }
         // RFC-0050: Four-state initialization lifecycle
-        // 2: Early-Init (Hazardous), 1: Gate Open (Ready), 3: Busy (Initializing), 0: Done
+        // 2: Early-Init (Hazardous/Waiting), 1: Gate Open (Ready), 3: Busy (Initializing), 0: Done
         let current = unsafe { INITIALIZING.load(Ordering::Acquire) };
-        if current == 2 || current == 3 {
-            // If it was 2 (Early-Init) or 3 (Already init-in-progress), return None
+        if current == 3 {
+            // 3 (Already init-in-progress), return None to fallback
             return None;
         }
 
-        // Attempt to transition from 1 (Ready) to 3 (Busy)
-        if unsafe {
+        // Attempt to transition to 3 (Busy)
+        // Try from 1 (Ready - C constructor ran), then from 2 (Early - C constructor didn't run yet)
+        let transitioned = unsafe {
             INITIALIZING
                 .compare_exchange(1, 3, Ordering::SeqCst, Ordering::Acquire)
-                .is_err()
-        } {
+                .is_ok()
+                || INITIALIZING
+                    .compare_exchange(2, 3, Ordering::SeqCst, Ordering::Acquire)
+                    .is_ok()
+        };
+        if !transitioned {
             // Someone else is initializing or we are already Done (0) but raced with SHIM_STATE load
             return None;
         }
