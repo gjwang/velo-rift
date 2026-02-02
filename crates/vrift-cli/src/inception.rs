@@ -30,6 +30,125 @@ const BOX_BR: &str = "╯";
 const BOX_H: &str = "─";
 const BOX_V: &str = "│";
 
+// ============================================================================
+// Main Entry Point: vrift shell (or just `vrift` with no args)
+// ============================================================================
+
+/// Enter VFS mode by spawning a new interactive subshell
+///
+/// This is the primary UX - no eval needed!
+/// Usage: `vrift` or `vrift shell`
+pub fn cmd_shell(project_dir: &Path) -> Result<()> {
+    use std::process::Command;
+
+    let vrift_dir = project_dir.join(".vrift");
+    let project_root = project_dir.canonicalize().context("resolve project path")?;
+    let project_root_str = project_root.to_string_lossy();
+    let project_name = project_root
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+
+    // Create .vrift if it doesn't exist (auto-init)
+    if !vrift_dir.exists() {
+        std::fs::create_dir_all(&vrift_dir)?;
+        std::fs::create_dir_all(vrift_dir.join("bin"))?;
+        let manifest_path = vrift_dir.join("manifest.lmdb");
+        std::fs::File::create(&manifest_path)?;
+
+        eprintln!(
+            "{} Initialized Velo Rift in {}",
+            style("📁").cyan(),
+            style(&project_name).green().bold()
+        );
+    }
+
+    // Check if already in inception
+    if env::var("VRIFT_INCEPTION").is_ok() {
+        eprintln!(
+            "{} Already in inception mode. Type 'exit' to wake up.",
+            WARN
+        );
+        return Ok(());
+    }
+
+    // Ensure wrappers exist
+    ensure_wrappers(&vrift_dir)?;
+
+    // Find the shim library
+    let shim_path = find_shim_library(&project_root)?;
+
+    // Get VFS stats
+    let (file_count, cas_size) = get_vfs_stats(&vrift_dir);
+
+    // Show animation
+    show_inception_animation();
+
+    // Print inception box
+    eprintln!();
+    eprintln!("{}{}{}", BOX_TL, BOX_H.repeat(35), BOX_TR);
+    eprintln!(
+        "{} {} INCEPTION                       {}",
+        BOX_V, TOTEM_SPIN, BOX_V
+    );
+    eprintln!("{}                                    {}", BOX_V, BOX_V);
+    eprintln!(
+        "{}    Project: {:<23} {}",
+        BOX_V,
+        truncate_str(&project_name, 23),
+        BOX_V
+    );
+    eprintln!(
+        "{}    VFS: {} files │ {:<15} {}",
+        BOX_V, file_count, cas_size, BOX_V
+    );
+    eprintln!("{}{}{}", BOX_BL, BOX_H.repeat(35), BOX_BR);
+    eprintln!();
+    eprintln!("{}", style("Type 'exit' or Ctrl+D to wake up").dim());
+    eprintln!();
+
+    // Detect user's shell
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+
+    // Build new PATH with wrappers
+    let current_path = env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}/.vrift/bin:{}", project_root_str, current_path);
+
+    // Spawn subshell with VFS environment
+    let status = Command::new(&shell)
+        .current_dir(&project_root)
+        .env("VRIFT_PROJECT_ROOT", &*project_root_str)
+        .env("VRIFT_INCEPTION", "1")
+        .env(
+            "VRIFT_MANIFEST",
+            format!("{}/.vrift/manifest.lmdb", project_root_str),
+        )
+        .env("PATH", new_path)
+        .env(
+            "DYLD_INSERT_LIBRARIES",
+            shim_path.to_string_lossy().as_ref(),
+        )
+        .env("DYLD_FORCE_FLAT_NAMESPACE", "1")
+        .env("PS1", format!("(vrift {}) $PS1", TOTEM_SPIN))
+        .status()?;
+
+    // Wake up message
+    eprintln!();
+    eprintln!("{}{}{}", BOX_TL, BOX_H.repeat(35), BOX_TR);
+    eprintln!(
+        "{} {} WAKE                            {}",
+        BOX_V, BELL, BOX_V
+    );
+    eprintln!("{}{}{}", BOX_BL, BOX_H.repeat(35), BOX_BR);
+    eprintln!();
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    Ok(())
+}
+
 /// Generate shell script for `eval "$(vrift inception)"`
 pub fn cmd_inception(project_dir: &Path) -> Result<()> {
     let vrift_dir = project_dir.join(".vrift");

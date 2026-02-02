@@ -47,7 +47,7 @@ struct Cli {
     the_source_root: PathBuf,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -266,13 +266,13 @@ fn main() -> Result<()> {
     let cas_root = vrift_manifest::normalize_path(&cli.the_source_root.to_string_lossy());
 
     // Isolation check MUST happen before Tokio runtime starts (single-threaded requirement)
-    if let Commands::Run {
+    if let Some(Commands::Run {
         manifest,
         command,
         isolate,
         base,
         daemon: _,
-    } = &cli.command
+    }) = &cli.command
     {
         if *isolate {
             return isolation::run_isolated(command, manifest, &cas_root, base.as_deref());
@@ -288,7 +288,16 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
-    match cli.command {
+    // If no command specified, enter shell mode (VFS subshell)
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            let dir = std::env::current_dir().unwrap();
+            return inception::cmd_shell(&dir);
+        }
+    };
+
+    match command {
         Commands::Ingest {
             directory,
             output,
