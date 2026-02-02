@@ -1,31 +1,54 @@
 /**
  * C Variadic Shim for macOS ARM64
  *
- * Problem: Rust can't correctly handle variadic functions (open, openat).
- * Solution: C wrapper extracts variadic args, checks VFS_READY, then either:
- *   - If VFS not ready: direct syscall (zero Rust calls during dyld init)
- *   - If VFS ready: call Rust velo_*_impl for VFS logic
- *
- * Architecture:
- *   libc caller → C shim (va_list) → [VFS check] → Rust/syscall
+ * This bridge solves the variadic ABI hazard on macOS ARM64 and avoids
+ * deadlocks during dyld initialization by using direct svc #0x80 syscalls
+ * when the shim is bootstrapping.
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-/* Rust VFS implementation functions - only called when VFS is ready */
+/* Rust VFS implementation functions */
 extern int velo_open_impl(const char *path, int flags, mode_t mode);
 extern int velo_openat_impl(int dirfd, const char *path, int flags,
                             mode_t mode);
 
-/* VFS_READY flag exported from Rust - atomic bool (1 byte) */
-extern _Atomic bool VFS_READY;
+/* Atomic flags exported from Rust (1-byte atomics) */
+extern _Atomic char INITIALIZING;
+
+/**
+ * Raw syscall for macOS ARM64 (AArch64) using svc #0x80
+ * Correctly handles the Carry bit for error detection.
+ */
+static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
+                               long arg4) {
+  long ret;
+  long err_flag;
+  register long x16 __asm__("x16") = number;
+  register long x0 __asm__("x0") = arg1;
+  register long x1 __asm__("x1") = arg2;
+  register long x2 __asm__("x2") = arg3;
+  register long x3 __asm__("x3") = arg4;
+
+  __asm__ volatile("svc #0x80\n"
+                   "cset %1, cs\n" /* %1 (err_flag) = 1 if Carry Set, else 0 */
+                   : "+r"(x0), "=r"(err_flag)
+                   : "r"(x16), "r"(x1), "r"(x2), "r"(x3)
+                   : "memory");
+
+  if (err_flag) {
+    errno = (int)x0;
+    return -1;
+  }
+  return x0;
+}
 
 /**
  * open() variadic wrapper
@@ -40,12 +63,16 @@ int open_c_wrapper(const char *path, int flags, ...) {
     va_end(ap);
   }
 
-  /* Fast path: VFS not ready - direct syscall, no Rust calls */
-  if (!VFS_READY) {
-    return (int)syscall(SYS_open, path, flags, mode);
+  /*
+   * Recursion & Boot Guard:
+   * If we are in dyld init OR Velo state initialization,
+   * we MUST use direct syscalls to avoid deadlock.
+   */
+  if (INITIALIZING) {
+    /* macOS SYS_open = 5 */
+    return (int)raw_syscall(5, (long)path, (long)flags, (long)mode, 0);
   }
 
-  /* VFS path: call Rust implementation */
   return velo_open_impl(path, flags, mode);
 }
 
@@ -62,16 +89,11 @@ int openat_c_wrapper(int dirfd, const char *path, int flags, ...) {
     va_end(ap);
   }
 
-  /* Fast path: VFS not ready - direct syscall, no Rust calls */
-  if (!VFS_READY) {
-#ifdef SYS_openat
-    return (int)syscall(SYS_openat, dirfd, path, flags, mode);
-#else
-    extern int __openat(int, const char *, int, mode_t);
-    return __openat(dirfd, path, flags, mode);
-#endif
+  if (INITIALIZING) {
+    /* macOS SYS_openat = 463 */
+    return (int)raw_syscall(463, (long)dirfd, (long)path, (long)flags,
+                            (long)mode);
   }
 
-  /* VFS path: call Rust implementation */
   return velo_openat_impl(dirfd, path, flags, mode);
 }

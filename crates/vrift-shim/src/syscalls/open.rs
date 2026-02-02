@@ -1,5 +1,5 @@
 #[cfg(target_os = "macos")]
-use crate::interpose::*;
+
 use crate::state::*;
 use libc::{c_char, c_int, c_void, mode_t};
 use std::ffi::CStr;
@@ -8,7 +8,7 @@ use std::ptr;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicPtr;
 #[cfg(target_os = "macos")]
-use std::sync::atomic::Ordering;
+
 
 /// Open implementation with VFS detection and CoW semantics.
 ///
@@ -250,16 +250,23 @@ pub unsafe extern "C" fn velo_open_impl(p: *const c_char, f: c_int, m: mode_t) -
     unsafe fn raw_open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
         // macOS ARM64 syscall: open = 5
         let ret: i64;
+        let err: i64;
         std::arch::asm!(
             "mov x16, #5",     // SYS_open = 5
             "svc #0x80",       // syscall
+            "cset {err}, cs",  // err = 1 if carry set, else 0
             in("x0") path,
             in("x1") flags as i64,
             in("x2") mode as i64,
             lateout("x0") ret,
-            options(nostack)
+            err = out(reg) err,
         );
-        ret as c_int
+        if err != 0 {
+            set_errno(ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
     }
 
     // Fast path: VFS not ready - passthrough directly to kernel
@@ -292,17 +299,24 @@ pub unsafe extern "C" fn velo_openat_impl(
     unsafe fn raw_openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
         // macOS ARM64 syscall: openat = 463
         let ret: i64;
+        let err: i64;
         std::arch::asm!(
             "mov x16, #463",   // SYS_openat = 463
             "svc #0x80",       // syscall
+            "cset {err}, cs",  // err = 1 if carry set, else 0
             in("x0") dirfd as i64,
             in("x1") path,
             in("x2") flags as i64,
             in("x3") mode as i64,
             lateout("x0") ret,
-            options(nostack)
+            err = out(reg) err,
         );
-        ret as c_int
+        if err != 0 {
+            set_errno(ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
     }
 
     // Fast path: VFS not ready - passthrough directly to kernel

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::ipc::*;
@@ -16,31 +16,32 @@ use crate::ipc::*;
 
 pub(crate) static SHIM_STATE: AtomicPtr<ShimState> = AtomicPtr::new(ptr::null_mut());
 /// Flag to indicate shim is still initializing. All syscalls passthrough during this phase.
-/// RFC-0049: Defaults to TRUE to ensure passthrough during extremely early dyld phases.
-pub(crate) static INITIALIZING: AtomicBool = AtomicBool::new(false);
+/// RFC-0049: Defaults to 1 (TRUE) to ensure passthrough during extremely early dyld phases.
+/// Exported to C wrapper as a recursion guard.
+#[no_mangle]
+pub static INITIALIZING: AtomicU8 = AtomicU8::new(1);
+
 /// Flag to prevent recursion during TLS key creation (bootstrap phase)
 pub(crate) static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 pub(crate) static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// VFS activation flag - starts FALSE, becomes TRUE when daemon connection is established.
+/// VFS activation flag - starts 0 (FALSE), becomes 1 (TRUE) when daemon connection is established.
 /// Until VFS_READY is true, all open/openat calls passthrough to kernel directly.
 /// This enables "zero config" UX: boot fast, activate VFS seamlessly when ready.
 /// Exported with no_mangle so C wrapper can check it directly without FFI call.
 #[no_mangle]
-pub static VFS_READY: AtomicBool = AtomicBool::new(false);
+pub static VFS_READY: AtomicU8 = AtomicU8::new(0);
 
 /// Activate VFS - called when daemon handshake succeeds
 #[inline]
 pub fn activate_vfs() {
-    VFS_READY.store(true, Ordering::Release);
-    shim_log!("[VFS] Activated - virtual file operations enabled\n");
+    VFS_READY.store(1, Ordering::Release);
 }
 
 /// Check if VFS is ready for use
-/// VFS_READY is only set true after daemon handshake, so no need to check other init flags
 #[inline]
 pub fn is_vfs_ready() -> bool {
-    VFS_READY.load(Ordering::Acquire)
+    VFS_READY.load(Ordering::Acquire) != 0
 }
 
 // Lock-free recursion key using atomic instead of OnceLock (avoids mutex deadlock during library init)
@@ -87,7 +88,7 @@ pub(crate) fn get_recursion_key() -> libc::pthread_key_t {
 pub(crate) struct ShimGuard(bool); // bool: true = has active TLS guard
 impl ShimGuard {
     pub(crate) fn enter() -> Option<Self> {
-        if INITIALIZING.load(Ordering::Relaxed) || BOOTSTRAPPING.load(Ordering::Relaxed) {
+        if INITIALIZING.load(Ordering::Relaxed) != 0 || BOOTSTRAPPING.load(Ordering::Relaxed) {
             return None;
         }
 
@@ -531,7 +532,7 @@ impl ShimState {
             return unsafe { Some(&*ptr) };
         }
 
-        if INITIALIZING.swap(true, Ordering::SeqCst) {
+        if INITIALIZING.swap(1, Ordering::SeqCst) != 0 {
             return None;
         }
 
@@ -539,12 +540,15 @@ impl ShimState {
         let ptr = match Self::init() {
             Some(p) => p,
             None => {
-                INITIALIZING.store(false, Ordering::SeqCst);
+                INITIALIZING.store(0, Ordering::SeqCst);
                 return None;
             }
         };
         SHIM_STATE.store(ptr, Ordering::Release);
-        INITIALIZING.store(false, Ordering::SeqCst);
+        INITIALIZING.store(0, Ordering::SeqCst);
+
+        // Activate VFS - now it's safe to call into Rust from C wrappers.
+        activate_vfs();
 
         unsafe { Some(&*ptr) }
     }

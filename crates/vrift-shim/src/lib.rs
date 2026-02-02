@@ -33,7 +33,7 @@ pub use state::LOGGER;
 #[link_section = "__DATA,__mod_init_func"]
 pub static SET_READY: unsafe extern "C" fn() = {
     unsafe extern "C" fn ready() {
-        crate::state::INITIALIZING.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::state::INITIALIZING.store(0, std::sync::atomic::Ordering::SeqCst);
     }
     ready
 };
@@ -45,7 +45,7 @@ pub static SET_READY: unsafe extern "C" fn() = {
 #[used]
 pub static SET_READY_LINUX: unsafe extern "C" fn() = {
     unsafe extern "C" fn ready() {
-        crate::state::INITIALIZING.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::state::INITIALIZING.store(0, std::sync::atomic::Ordering::SeqCst);
     }
     ready
 };
