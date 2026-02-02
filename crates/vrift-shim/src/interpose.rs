@@ -314,8 +314,59 @@ pub unsafe extern "C" fn symlink_shim(p1: *const c_char, p2: *const c_char) -> c
 }
 #[cfg(target_os = "macos")]
 #[no_mangle]
-pub unsafe extern "C" fn flock_shim(fd: c_int, o: c_int) -> c_int {
-    flock(fd, o)
+pub unsafe extern "C" fn flock_shim(fd: c_int, op: c_int) -> c_int {
+    use crate::ipc::sync_ipc_flock;
+    use crate::state::{is_vfs_ready, ShimGuard, ShimState};
+    use crate::syscalls::io::get_fd_entry;
+
+    // RFC-0048: VFS Readiness Guard - passthrough if VFS not ready
+    if !is_vfs_ready() {
+        return flock(fd, op);
+    }
+
+    // Check if this FD is tracked as a VFS file
+    let entry = match get_fd_entry(fd) {
+        Some(e) if e.is_vfs => e,
+        _ => return flock(fd, op), // Non-VFS file, passthrough
+    };
+
+    // VFS file - coordinate lock through daemon for semantic isolation
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return flock(fd, op),
+    };
+
+    let state = match ShimState::get() {
+        Some(s) => s,
+        None => return flock(fd, op),
+    };
+
+    // Use daemon IPC for lock coordination
+    // entry.path is the VFS logical path
+    if sync_ipc_flock(&state.socket_path, &entry.path, op) {
+        0 // Success
+    } else {
+        // IPC failed or lock not granted - set errno appropriately
+        unsafe fn set_errno_local(e: c_int) {
+            #[cfg(target_os = "macos")]
+            {
+                extern "C" {
+                    fn __error() -> *mut c_int;
+                }
+                *__error() = e;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                *libc::__errno_location() = e;
+            }
+        }
+        if op & libc::LOCK_NB != 0 {
+            set_errno_local(libc::EWOULDBLOCK);
+        } else {
+            set_errno_local(libc::EINTR); // Interrupted
+        }
+        -1
+    }
 }
 // utimensat_shim moved to syscalls/misc.rs with VFS blocking logic
 // RFC-0047: VFS-aware mkdir - adds directory entry to Manifest for VFS paths

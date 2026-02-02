@@ -190,8 +190,17 @@ pub unsafe extern "C" fn linkat_shim(
 // ============================================================================
 
 /// Helper: Check if path is in VFS and return EPERM if so
+/// RFC-0048: Must check is_vfs_ready() FIRST to avoid deadlock during init (Pattern 2543)
 #[cfg(target_os = "macos")]
 unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
+    use crate::state::is_vfs_ready;
+
+    // RFC-0048: VFS Readiness Guard - passthrough if VFS not yet initialized
+    // This prevents deadlock when daemon connection is not established
+    if !is_vfs_ready() {
+        return None;
+    }
+
     if path.is_null() {
         return None;
     }
