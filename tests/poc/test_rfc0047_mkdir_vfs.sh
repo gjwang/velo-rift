@@ -20,7 +20,7 @@ SHIM_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/interpose.rs"
 echo "[1] Checking mkdir_shim implementation..."
 
 # Check if mkdir handles VFS paths
-if grep -A20 "mkdir_shim\|fn mkdir" "$SHIM_SRC" 2>/dev/null | grep -q "manifest.*insert\|ManifestUpsert\|add_dir"; then
+if grep -A40 "mkdir_shim" "$SHIM_SRC" 2>/dev/null | grep -q "manifest_mkdir\|ManifestUpsert\|ManifestMkdir"; then
     echo "    ✅ PASS: mkdir_shim creates Manifest entry"
     HAS_MANIFEST_OP=true
 else

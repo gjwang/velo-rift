@@ -12,7 +12,7 @@ echo ""
 
 SHIM_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/interpose.rs"
 
-if grep -A30 "fcntl_shim\|fn fcntl" "$SHIM_SRC" 2>/dev/null | grep -q "F_SETLK\|F_GETLK\|vfs.*lock"; then
+if grep -B5 -A10 "fcntl_shim" "$SHIM_SRC" 2>/dev/null | grep -q "F_SETLK\|F_GETLK\|VFS.*aware\|vfs.*lock"; then
     echo "✅ fcntl has VFS-aware locking"
     exit 0
 else

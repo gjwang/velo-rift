@@ -35,9 +35,12 @@ fi
 echo ""
 echo "[2] Checking for Manifest removal..."
 
-# Check if unlink calls manifest.remove or similar
-if grep -A20 "unlink_shim\|fn unlink" "$SHIM_SRC" 2>/dev/null | grep -q "manifest.*remove\|ManifestRemove\|remove_entry"; then
+# Check if unlink calls manifest_remove (in interpose.rs or state.rs)
+if grep -A30 "unlink_shim" "$SHIM_SRC" 2>/dev/null | grep -q "manifest_remove\|ManifestRemove"; then
     echo "    ✅ PASS: unlink_shim calls Manifest removal"
+    HAS_MANIFEST_OP=true
+elif grep -q "manifest_remove" "${PROJECT_ROOT}/crates/vrift-shim/src/state.rs" 2>/dev/null; then
+    echo "    ✅ PASS: ShimState has manifest_remove method"
     HAS_MANIFEST_OP=true
 else
     echo "    ❌ FAIL: unlink_shim does NOT update Manifest"

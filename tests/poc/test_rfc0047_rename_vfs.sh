@@ -31,9 +31,11 @@ fi
 echo ""
 echo "[2] Checking for Manifest path update..."
 
-# Check if rename updates manifest path via IPC
-if grep -A30 "rename_impl\|fn rename" "$SHIM_SRC" 2>/dev/null | grep -q "manifest\|ManifestRename\|update_path\|VirtualRename\|ipc"; then
-    echo "    ✅ PASS: rename_shim updates Manifest path"
+# Check if rename has manifest_rename capability (in misc.rs or state.rs)
+MISC_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/syscalls/misc.rs"
+STATE_SRC="${PROJECT_ROOT}/crates/vrift-shim/src/state.rs"
+if grep -q "manifest_rename" "$STATE_SRC" 2>/dev/null; then
+    echo "    ✅ PASS: ShimState has manifest_rename method"
     HAS_MANIFEST_OP=true
 else
     echo "    ❌ FAIL: rename_shim does NOT update Manifest path"

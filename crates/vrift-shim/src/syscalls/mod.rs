@@ -9,6 +9,7 @@ pub mod path;
 pub mod path_ops;
 pub mod process;
 pub mod stat;
+pub mod vfs_ops;
 
 // Re-export specific shims that need to be visible to interpose or extern C
 #[cfg(target_os = "macos")]

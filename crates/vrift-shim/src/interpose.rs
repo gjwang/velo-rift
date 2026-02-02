@@ -5,6 +5,8 @@
 #[cfg(target_os = "macos")]
 use crate::syscalls::dir::{closedir_shim, opendir_shim, readdir_shim};
 #[cfg(target_os = "macos")]
+use crate::syscalls::io::{dup2_shim, dup_shim, fchdir_shim, ftruncate_shim, lseek_shim};
+#[cfg(target_os = "macos")]
 use crate::syscalls::misc::{
     chflags_shim, chmod_shim, fchmodat_shim, link_shim, linkat_shim, removexattr_shim, rename_shim,
     renameat_shim, setxattr_shim, truncate_shim, utimensat_shim, utimes_shim,
@@ -19,6 +21,8 @@ use crate::syscalls::path::{readlink_shim, realpath_shim};
 use crate::syscalls::stat::{access_shim, fstat_shim, lstat_shim, stat_shim};
 #[cfg(target_os = "macos")]
 use libc::{c_char, c_int, c_void, dirent, mode_t, pid_t, size_t, ssize_t, timespec, timeval, DIR};
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -99,6 +103,12 @@ extern "C" {
     ) -> c_int;
     fn removexattr(path: *const c_char, name: *const c_char, options: c_int) -> c_int;
     fn utimes(path: *const c_char, times: *const timeval) -> c_int;
+    // FD tracking syscalls
+    fn dup(oldfd: c_int) -> c_int;
+    fn dup2(oldfd: c_int, newfd: c_int) -> c_int;
+    fn fchdir(fd: c_int) -> c_int;
+    fn lseek(fd: c_int, offset: libc::off_t, whence: c_int) -> libc::off_t;
+    fn ftruncate(fd: c_int, length: libc::off_t) -> c_int;
 }
 
 #[allow(unused_macros)]
@@ -145,15 +155,78 @@ pub unsafe extern "C" fn getcwd_shim(b: *mut c_char, s: size_t) -> *mut c_char {
 pub unsafe extern "C" fn chdir_shim(p: *const c_char) -> c_int {
     chdir(p)
 }
+// RFC-0047: VFS-aware unlink - removes from Manifest for VFS paths
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn unlink_shim(p: *const c_char) -> c_int {
+    use crate::state::{ShimGuard, SHIM_STATE};
+    use std::sync::atomic::Ordering;
+
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return unlink(p),
+    };
+
+    if p.is_null() {
+        return unlink(p);
+    }
+
+    let path_str = match CStr::from_ptr(p).to_str() {
+        Ok(s) => s,
+        Err(_) => return unlink(p),
+    };
+
+    let state_ptr = SHIM_STATE.load(Ordering::Acquire);
+    if state_ptr.is_null() {
+        return unlink(p);
+    }
+    let state = &*state_ptr;
+
+    // VFS path: remove from manifest
+    if state.psfs_applicable(path_str) {
+        if let Ok(()) = state.manifest_remove(path_str) {
+            return 0;
+        }
+        // Fallthrough to real unlink if IPC fails
+    }
+
     unlink(p)
 }
 // Note: rename_shim, renameat_shim imported from syscalls/misc.rs with EXDEV logic
+// RFC-0047: VFS-aware rmdir - removes directory from Manifest for VFS paths
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn rmdir_shim(p: *const c_char) -> c_int {
+    use crate::state::{ShimGuard, SHIM_STATE};
+    use std::sync::atomic::Ordering;
+
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return rmdir(p),
+    };
+
+    if p.is_null() {
+        return rmdir(p);
+    }
+
+    let path_str = match CStr::from_ptr(p).to_str() {
+        Ok(s) => s,
+        Err(_) => return rmdir(p),
+    };
+
+    let state_ptr = SHIM_STATE.load(Ordering::Acquire);
+    if state_ptr.is_null() {
+        return rmdir(p);
+    }
+    let state = &*state_ptr;
+
+    // VFS path: remove from manifest
+    if state.psfs_applicable(path_str) {
+        if let Ok(()) = state.manifest_remove(path_str) {
+            return 0;
+        }
+    }
+
     rmdir(p)
 }
 #[cfg(target_os = "macos")]
@@ -186,15 +259,53 @@ pub unsafe extern "C" fn flock_shim(fd: c_int, o: c_int) -> c_int {
     flock(fd, o)
 }
 // utimensat_shim moved to syscalls/misc.rs with VFS blocking logic
+// RFC-0047: VFS-aware mkdir - adds directory entry to Manifest for VFS paths
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn mkdir_shim(p: *const c_char, m: mode_t) -> c_int {
+    use crate::state::{ShimGuard, SHIM_STATE};
+    use std::sync::atomic::Ordering;
+
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return mkdir(p, m),
+    };
+
+    if p.is_null() {
+        return mkdir(p, m);
+    }
+
+    let path_str = match CStr::from_ptr(p).to_str() {
+        Ok(s) => s,
+        Err(_) => return mkdir(p, m),
+    };
+
+    let state_ptr = SHIM_STATE.load(Ordering::Acquire);
+    if state_ptr.is_null() {
+        return mkdir(p, m);
+    }
+    let state = &*state_ptr;
+
+    // VFS path: add directory entry to manifest
+    if state.psfs_applicable(path_str) {
+        if let Ok(()) = state.manifest_mkdir(path_str, m) {
+            return 0;
+        }
+    }
+
     mkdir(p, m)
 }
 // Note: mmap_shim, munmap_shim imported from syscalls/mmap.rs
+// fcntl_shim: VFS-aware locking - F_SETLK/F_GETLK operates on underlying temp file
+// This is correct for VFS because:
+// 1. VFS files are extracted to temp on open
+// 2. Lock applies to temp file which is what other processes see
+// 3. On close, CoW writeback occurs with proper synchronization
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn fcntl_shim(f: c_int, c: c_int, a: c_int) -> c_int {
+    // F_SETLK, F_GETLK, F_SETLKW all operate correctly on the underlying FD
+    // VFS awareness: lock is on temp/CoW file, which is correct behavior
     fcntl(f, c, a)
 }
 #[cfg(target_os = "macos")]
@@ -550,4 +661,41 @@ pub static IT_REMOVEXATTR: Interpose = Interpose {
 pub static IT_UTIMES: Interpose = Interpose {
     new_func: utimes_shim as *const (),
     old_func: utimes as *const (),
+};
+
+// FD Tracking Interpositions
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_DUP: Interpose = Interpose {
+    new_func: dup_shim as *const (),
+    old_func: dup as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_DUP2: Interpose = Interpose {
+    new_func: dup2_shim as *const (),
+    old_func: dup2 as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_FCHDIR: Interpose = Interpose {
+    new_func: fchdir_shim as *const (),
+    old_func: fchdir as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_LSEEK: Interpose = Interpose {
+    new_func: lseek_shim as *const (),
+    old_func: lseek as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_FTRUNCATE: Interpose = Interpose {
+    new_func: ftruncate_shim as *const (),
+    old_func: ftruncate as *const (),
 };

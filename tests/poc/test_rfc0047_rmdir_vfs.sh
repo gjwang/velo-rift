@@ -32,7 +32,7 @@ echo ""
 echo "[2] Checking for Manifest removal..."
 
 # Check if rmdir updates manifest
-if grep -A20 "rmdir_shim\|fn rmdir" "$SHIM_SRC" 2>/dev/null | grep -q "manifest.*remove\|ManifestRemove"; then
+if grep -A40 "rmdir_shim" "$SHIM_SRC" 2>/dev/null | grep -q "manifest_remove\|ManifestRemove"; then
     echo "    ✅ PASS: rmdir_shim removes Manifest entry"
     HAS_MANIFEST_OP=true
 else

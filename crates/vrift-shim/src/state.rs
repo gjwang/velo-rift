@@ -576,6 +576,33 @@ impl ShimState {
         false
     }
 
+    /// RFC-0047: Remove entry from manifest (for unlink/rmdir)
+    pub(crate) fn manifest_remove(&self, path: &str) -> Result<(), ()> {
+        if unsafe { sync_ipc_manifest_remove(&self.socket_path, path) } {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// RFC-0047: Create directory entry in manifest
+    pub(crate) fn manifest_mkdir(&self, path: &str, mode: libc::mode_t) -> Result<(), ()> {
+        if unsafe { sync_ipc_manifest_mkdir(&self.socket_path, path, mode.into()) } {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// RFC-0047: Rename manifest entry
+    pub(crate) fn manifest_rename(&self, old_path: &str, new_path: &str) -> Result<(), ()> {
+        if unsafe { sync_ipc_manifest_rename(&self.socket_path, old_path, new_path) } {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
     /// Query daemon for directory listing (for opendir/readdir)
     #[allow(dead_code)]
     pub(crate) fn query_dir_listing(&self, path: &str) -> Option<Vec<vrift_ipc::DirEntry>> {
