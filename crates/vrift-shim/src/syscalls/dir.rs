@@ -6,8 +6,6 @@ use crate::state::*;
 use libc::{c_int, c_void};
 #[cfg(target_os = "macos")]
 use std::ffi::CStr;
-#[cfg(target_os = "macos")]
-use std::sync::atomic::Ordering;
 
 #[no_mangle]
 #[cfg(target_os = "macos")]
@@ -18,9 +16,7 @@ pub unsafe extern "C" fn opendir_shim(path: *const libc::c_char) -> *mut c_void 
     >(IT_OPENDIR.old_func);
 
     // Early-boot passthrough
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(path);
-    }
+    passthrough_if_init!(real, path);
 
     if path.is_null() {
         return real(path);
@@ -91,9 +87,7 @@ pub unsafe extern "C" fn readdir_shim(dir: *mut c_void) -> *mut libc::dirent {
     >(IT_READDIR.old_func);
 
     // Pattern 2648/2649: Passthrough during initialization to avoid TLS hazard
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(dir);
-    }
+    passthrough_if_init!(real, dir);
 
     if dir.is_null() {
         return real(dir);
@@ -151,9 +145,7 @@ pub unsafe extern "C" fn closedir_shim(dir: *mut c_void) -> c_int {
     );
 
     // Pattern 2648/2649: Passthrough during initialization to avoid TLS hazard
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(dir);
-    }
+    passthrough_if_init!(real, dir);
 
     if dir.is_null() {
         return real(dir);
@@ -188,9 +180,7 @@ pub unsafe extern "C" fn getcwd_shim(
         *const (),
         unsafe extern "C" fn(*mut libc::c_char, libc::size_t) -> *mut libc::c_char,
     >(IT_GETCWD.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(buf, size);
-    }
+    passthrough_if_init!(real, buf, size);
     real(buf, size)
 }
 
@@ -200,8 +190,6 @@ pub unsafe extern "C" fn chdir_shim(path: *const libc::c_char) -> c_int {
     let real = std::mem::transmute::<*const (), unsafe extern "C" fn(*const libc::c_char) -> c_int>(
         IT_CHDIR.old_func,
     );
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(path);
-    }
+    passthrough_if_init!(real, path);
     real(path)
 }

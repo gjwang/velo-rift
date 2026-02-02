@@ -1,8 +1,6 @@
 use crate::state::*;
 use libc::{c_char, c_int, stat as libc_stat};
 use std::ffi::CStr;
-#[cfg(target_os = "macos")]
-use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "macos")]
 use crate::interpose::*;
@@ -91,9 +89,7 @@ pub unsafe extern "C" fn stat_shim(path: *const c_char, buf: *mut libc_stat) -> 
         *const (),
         unsafe extern "C" fn(*const c_char, *mut libc_stat) -> c_int,
     >(IT_STAT.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(path, buf);
-    }
+    passthrough_if_init!(real, path, buf);
     stat_impl(path, buf, true).unwrap_or_else(|| real(path, buf))
 }
 
@@ -104,9 +100,7 @@ pub unsafe extern "C" fn lstat_shim(path: *const c_char, buf: *mut libc_stat) ->
         *const (),
         unsafe extern "C" fn(*const c_char, *mut libc_stat) -> c_int,
     >(IT_LSTAT.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(path, buf);
-    }
+    passthrough_if_init!(real, path, buf);
     stat_impl(path, buf, false).unwrap_or_else(|| real(path, buf))
 }
 
@@ -116,9 +110,7 @@ pub unsafe extern "C" fn fstat_shim(fd: c_int, buf: *mut libc_stat) -> c_int {
     let real = std::mem::transmute::<*const (), unsafe extern "C" fn(c_int, *mut libc_stat) -> c_int>(
         IT_FSTAT.old_func,
     );
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(fd, buf);
-    }
+    passthrough_if_init!(real, fd, buf);
 
     // RFC-0044: fstat currently passthrough since shim doesn't track FDs yet
     real(fd, buf)
@@ -131,9 +123,7 @@ pub unsafe extern "C" fn access_shim(path: *const c_char, mode: c_int) -> c_int 
     let real = std::mem::transmute::<*const (), unsafe extern "C" fn(*const c_char, c_int) -> c_int>(
         IT_ACCESS.old_func,
     );
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(path, mode);
-    }
+    passthrough_if_init!(real, path, mode);
 
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
@@ -172,9 +162,7 @@ pub unsafe extern "C" fn fstatat_shim(
         *const (),
         unsafe extern "C" fn(c_int, *const c_char, *mut libc_stat, c_int) -> c_int,
     >(IT_FSTATAT.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 {
-        return real(dirfd, path, buf, flags);
-    }
+    passthrough_if_init!(real, dirfd, path, buf, flags);
 
     // Attempt VFS stat if path is absolute or AT_FDCWD
     if dirfd == libc::AT_FDCWD {

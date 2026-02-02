@@ -13,10 +13,6 @@ use std::sync::RwLock;
 
 #[cfg(target_os = "macos")]
 use crate::interpose::{IT_DUP, IT_DUP2, IT_FCHDIR, IT_FTRUNCATE, IT_LSEEK};
-#[cfg(target_os = "macos")]
-use crate::state::{CIRCUIT_TRIPPED, INITIALIZING};
-#[cfg(target_os = "macos")]
-use std::sync::atomic::Ordering;
 
 /// Global FD tracking table: fd -> (path, is_vfs_file)
 static FD_TABLE: RwLock<Option<HashMap<c_int, FdEntry>>> = RwLock::new(None);
@@ -101,9 +97,7 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
     let real =
         std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_DUP.old_func);
 
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(oldfd);
-    }
+    passthrough_if_init!(real, oldfd);
 
     let newfd = real(oldfd);
     if newfd >= 0 {
@@ -123,9 +117,7 @@ pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
         IT_DUP2.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(oldfd, newfd);
-    }
+    passthrough_if_init!(real, oldfd, newfd);
 
     // If newfd was tracked, untrack it (it's being replaced)
     untrack_fd(newfd);
@@ -150,9 +142,7 @@ pub unsafe extern "C" fn fchdir_shim(fd: c_int) -> c_int {
     let real =
         std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_FCHDIR.old_func);
 
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(fd);
-    }
+    passthrough_if_init!(real, fd);
 
     // If fd points to a VFS directory, we could update virtual CWD here
     // For now, just passthrough but track
@@ -173,9 +163,7 @@ pub unsafe extern "C" fn lseek_shim(fd: c_int, offset: off_t, whence: c_int) -> 
         IT_LSEEK.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(fd, offset, whence);
-    }
+    passthrough_if_init!(real, fd, offset, whence);
 
     // lseek works on the underlying file, which is correct for VFS
     // (VFS files are extracted to temp, so lseek on the temp file is correct)
@@ -193,9 +181,7 @@ pub unsafe extern "C" fn ftruncate_shim(fd: c_int, length: off_t) -> c_int {
         IT_FTRUNCATE.old_func,
     );
 
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(fd, length);
-    }
+    passthrough_if_init!(real, fd, length);
 
     // ftruncate works on the underlying file (CoW copy)
     // The Manifest update happens on close
@@ -218,9 +204,7 @@ pub unsafe extern "C" fn write_shim(
         *const (),
         unsafe extern "C" fn(c_int, *const c_void, libc::size_t) -> libc::ssize_t,
     >(IT_WRITE.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(fd, buf, count);
-    }
+    passthrough_if_init!(real, fd, buf, count);
     real(fd, buf, count)
 }
 
@@ -236,9 +220,7 @@ pub unsafe extern "C" fn read_shim(
         *const (),
         unsafe extern "C" fn(c_int, *mut c_void, libc::size_t) -> libc::ssize_t,
     >(IT_READ.old_func);
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(fd, buf, count);
-    }
+    passthrough_if_init!(real, fd, buf, count);
     real(fd, buf, count)
 }
 
@@ -254,9 +236,7 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
         std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_CLOSE.old_func);
 
     // Pattern 2648/2649: Passthrough during initialization to avoid TLS hazard
-    if INITIALIZING.load(Ordering::Relaxed) >= 2 || CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return real(fd);
-    }
+    passthrough_if_init!(real, fd);
 
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
