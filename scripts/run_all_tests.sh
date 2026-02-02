@@ -19,11 +19,13 @@ echo "=== Running All Tests (${TIMEOUT_SEC}s timeout each) ==="
 
 for t in tests/poc/test_*.sh; do
     name=$(basename "$t")
+    echo -n "🏃 $name ... "
     run_with_timeout "$t"
     code=$?
     
     if [ $code -eq 0 ]; then
         passed=$((passed+1))
+        echo "✅ PASS"
     elif [ $code -eq 142 ]; then  # SIGALRM = 14, exit code 128+14=142
         timeout_count=$((timeout_count+1))
         echo "⏱️ TIMEOUT: $name"

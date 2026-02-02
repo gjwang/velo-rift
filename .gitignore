@@ -78,3 +78,10 @@ ls_no_sip
 test.txt
 test_stat
 test_stat.c
+
+# Test Artifacts
+daemon.pid
+tests/poc/test_*_root/
+tests/poc/workdir/
+*.log
+
