@@ -8,8 +8,17 @@ set -e
 # Setup paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-VELO_BIN="${PROJECT_ROOT}/target/debug/vrift"
-VRIFTD_BIN="${PROJECT_ROOT}/target/debug/vriftd"
+
+# Prefer release builds (CI), fallback to debug
+if [ -f "${PROJECT_ROOT}/target/release/vrift" ]; then
+    VELO_BIN="${PROJECT_ROOT}/target/release/vrift"
+    VRIFTD_BIN="${PROJECT_ROOT}/target/release/vriftd"
+    BUILD_DIR="release"
+else
+    VELO_BIN="${PROJECT_ROOT}/target/debug/vrift"
+    VRIFTD_BIN="${PROJECT_ROOT}/target/debug/vriftd"
+    BUILD_DIR="debug"
+fi
 
 # Determine OS and preload variable
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -93,11 +102,11 @@ fi
 echo ""
 echo "Step 2: Testing WITH shim (Simulating CoW)..."
 
-# Find the shim
+# Find the shim (use same BUILD_DIR as binaries)
 if [[ "$OS_TYPE" == "Darwin" ]]; then
-    SHIM_BIN=$(find "$PROJECT_ROOT/target/debug" -name "libvrift_shim.dylib" | head -n 1)
+    SHIM_BIN=$(find "$PROJECT_ROOT/target/$BUILD_DIR" -name "libvrift_shim.dylib" | head -n 1)
 else
-    SHIM_BIN=$(find "$PROJECT_ROOT/target/debug" -name "libvrift_shim.so" | head -n 1)
+    SHIM_BIN=$(find "$PROJECT_ROOT/target/$BUILD_DIR" -name "libvrift_shim.so" | head -n 1)
 fi
 
 if [[ -z "$SHIM_BIN" ]]; then
