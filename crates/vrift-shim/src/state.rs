@@ -581,8 +581,16 @@ impl ShimState {
     /// Query manifest directly via IPC (bypasses mmap cache)
     /// Required for open() which needs content_hash to locate CAS blob
     pub(crate) fn query_manifest_ipc(&self, path: &str) -> Option<vrift_ipc::VnodeEntry> {
-        // Send path as-is - manifest stores paths with VFS prefix (from --prefix option)
-        unsafe { sync_ipc_manifest_get(&self.socket_path, path) }
+        // Convert absolute path to relative by stripping project_root prefix
+        // Manifest stores relative paths like "deps/file.txt", not "/project/deps/file.txt"
+        let rel_path = if path.starts_with(&self.project_root) && !self.project_root.is_empty() {
+            let stripped = path.strip_prefix(&self.project_root).unwrap_or(path);
+            // Also strip leading slash if present
+            stripped.strip_prefix('/').unwrap_or(stripped)
+        } else {
+            path
+        };
+        unsafe { sync_ipc_manifest_get(&self.socket_path, rel_path) }
     }
 
     /// Check if path is in VFS domain (zero-alloc, O(1) string prefix check)
