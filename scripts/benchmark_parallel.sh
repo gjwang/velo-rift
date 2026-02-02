@@ -11,6 +11,18 @@
 
 set -euo pipefail
 
+# Check for npm - install if not found (for CI)
+if ! command -v npm &>/dev/null; then
+    echo "⚠️  npm not found - installing..."
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm
+    else
+        echo "❌ Cannot install npm automatically on this platform"
+        echo "    Please install Node.js manually"
+        exit 0
+    fi
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCH_DIR="/tmp/vrift-bench"
