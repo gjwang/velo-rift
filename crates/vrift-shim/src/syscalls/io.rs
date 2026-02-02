@@ -97,6 +97,7 @@ pub fn is_vfs_fd(fd: c_int) -> bool {
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
+    // MUST use IT_DUP.old_func (not libc::dup) because libc::dup is interposed back to us
     let real =
         std::mem::transmute::<*const (), unsafe extern "C" fn(c_int) -> c_int>(IT_DUP.old_func);
 
@@ -117,6 +118,7 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
+    // MUST use IT_DUP2.old_func (not libc::dup2) because libc::dup2 is interposed back to us
     let real = std::mem::transmute::<*const (), unsafe extern "C" fn(c_int, c_int) -> c_int>(
         IT_DUP2.old_func,
     );
