@@ -34,6 +34,10 @@ extern int velo_openat_impl(int dirfd, const char *path, int flags,
                             mode_t mode);
 extern _Atomic char INITIALIZING;
 
+#if defined(__linux__)
+__attribute__((constructor)) void vfs_init_constructor() { INITIALIZING = 0; }
+#endif
+
 /* --- Raw Syscall Implementation --- */
 
 #if defined(__aarch64__)
@@ -117,7 +121,8 @@ int openat_shim_c_impl(int dirfd, const char *path, int flags, mode_t mode) {
 // Linux uses direct open/openat/open64/openat64 shims.
 
 #if defined(__linux__)
-int open(const char *path, int flags, ...) {
+__attribute__((visibility("default"))) int open(const char *path, int flags,
+                                                ...) {
   mode_t mode = 0;
   if (flags & O_CREAT) {
     va_list ap;
@@ -127,7 +132,8 @@ int open(const char *path, int flags, ...) {
   }
   return open_shim_c_impl(path, flags, mode);
 }
-int open64(const char *path, int flags, ...) {
+__attribute__((visibility("default"))) int open64(const char *path, int flags,
+                                                  ...) {
   va_list ap;
   mode_t mode = 0;
   if (flags & O_CREAT) {
@@ -137,7 +143,8 @@ int open64(const char *path, int flags, ...) {
   }
   return open(path, flags, mode);
 }
-int openat(int dirfd, const char *path, int flags, ...) {
+__attribute__((visibility("default"))) int openat(int dirfd, const char *path,
+                                                  int flags, ...) {
   mode_t mode = 0;
   if (flags & O_CREAT) {
     va_list ap;
@@ -147,7 +154,8 @@ int openat(int dirfd, const char *path, int flags, ...) {
   }
   return openat_shim_c_impl(dirfd, path, flags, mode);
 }
-int openat64(int dirfd, const char *path, int flags, ...) {
+__attribute__((visibility("default"))) int openat64(int dirfd, const char *path,
+                                                    int flags, ...) {
   va_list ap;
   mode_t mode = 0;
   if (flags & O_CREAT) {
@@ -168,7 +176,7 @@ int fcntl_shim_c_impl(int fd, int cmd, long arg) {
   return velo_fcntl_impl(fd, cmd, arg);
 }
 #else
-int fcntl(int fd, int cmd, ...) {
+__attribute__((visibility("default"))) int fcntl(int fd, int cmd, ...) {
   va_list ap;
   va_start(ap, cmd);
   long arg = va_arg(ap, long);
