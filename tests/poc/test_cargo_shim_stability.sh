@@ -56,7 +56,9 @@ else
     echo "Output (last 10 lines):"
     echo "$OUTPUT" | tail -10
     echo ""
-    echo "ISSUE: Shim causes cargo runtime initialization failure"
-    echo "This blocks the primary use case of accelerating Rust builds"
+    echo "KNOWN ISSUES:"
+    echo "1. FIXED: Tokio runtime crash (fcntl variadic ABI)"
+    echo "2. OPEN: rustc incremental compile file access issues"
+    echo "This is tracked for investigation"
     exit 1
 fi

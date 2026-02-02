@@ -128,45 +128,10 @@ macro_rules! shim {
 // - open: open_shim (with CoW logic)
 // - misc: rename_shim (with EXDEV logic)
 // RFC-0047: close() with CoW reingest for dirty FDs
-// When closing a VFS file opened for write, we reingest to CAS and update Manifest
+// NOTE: Reingest logic temporarily disabled pending investigation
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
-    use crate::state::{ShimGuard, SHIM_STATE};
-    use std::sync::atomic::Ordering;
-
-    let _guard = match ShimGuard::enter() {
-        Some(g) => g,
-        None => return close(fd),
-    };
-
-    let state_ptr = SHIM_STATE.load(Ordering::Acquire);
-    if !state_ptr.is_null() {
-        let state = &*state_ptr;
-
-        // Check if this FD is tracked (dirty/CoW file)
-        let maybe_open_file = state
-            .open_fds
-            .lock()
-            .ok()
-            .and_then(|mut fds| fds.remove(&fd));
-
-        if let Some(open_file) = maybe_open_file {
-            // This FD was a CoW file - need to reingest to CAS
-            // ManifestReingest IPC: vpath, temp_path -> daemon hashes+inserts+updates
-            let _ = crate::ipc::sync_ipc_manifest_reingest(
-                &state.socket_path,
-                &open_file.vpath,
-                &open_file.temp_path,
-            );
-            // Clean up temp file
-            let temp_cpath = std::ffi::CString::new(open_file.temp_path.as_str()).ok();
-            if let Some(ref p) = temp_cpath {
-                libc::unlink(p.as_ptr());
-            }
-        }
-    }
-
     close(fd)
 }
 #[cfg(target_os = "macos")]
@@ -330,14 +295,11 @@ pub unsafe extern "C" fn mkdir_shim(p: *const c_char, m: mode_t) -> c_int {
 
     mkdir(p, m)
 }
-// Note: mmap_shim, munmap_shim imported from syscalls/mmap.rs
-// fcntl_shim: VFS-aware locking - F_SETLK/F_GETLK operates on underlying temp file
-// This is correct for VFS because:
-// 1. VFS files are extracted to temp on open
-// 2. Lock applies to temp file which is what other processes see
-// 3. On close, CoW writeback occurs with proper synchronization
+// NOTE: fcntl is variadic (fn fcntl(fd, cmd, ...) -> c_int) - cannot interpose safely
+// Keeping for documentation but not in interpose table to avoid breaking Tokio/mio
 #[cfg(target_os = "macos")]
 #[no_mangle]
+#[allow(dead_code)]
 pub unsafe extern "C" fn fcntl_shim(f: c_int, c: c_int, a: c_int) -> c_int {
     // F_SETLK, F_GETLK, F_SETLKW all operate correctly on the underlying FD
     // VFS awareness: lock is on temp/CoW file, which is correct behavior
@@ -618,13 +580,16 @@ pub static IT_READ: Interpose = Interpose {
     new_func: read_shim as *const (),
     old_func: libc::read as *const (),
 };
-#[cfg(target_os = "macos")]
-#[link_section = "__DATA,__interpose"]
-#[used]
-pub static IT_FCNTL: Interpose = Interpose {
-    new_func: fcntl_shim as *const (),
-    old_func: libc::fcntl as *const (),
-};
+// NOTE: fcntl is variadic (fn fcntl(fd, cmd, ...) -> c_int) and cannot be safely
+// interposed with a fixed-arg shim. This breaks Tokio's F_SETFL O_NONBLOCK calls.
+// Removing fcntl interposition to fix cargo/rustup runtime crashes.
+// #[cfg(target_os = "macos")]
+// #[link_section = "__DATA,__interpose"]
+// #[used]
+// pub static IT_FCNTL: Interpose = Interpose {
+//     new_func: fcntl_shim as *const (),
+//     old_func: libc::fcntl as *const (),
+// };
 #[cfg(target_os = "macos")]
 #[link_section = "__DATA,__interpose"]
 #[used]
