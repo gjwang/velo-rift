@@ -272,7 +272,7 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
 /// Helper: Check if path is in VFS and return EPERM if so
 /// RFC-0048: Must check is_vfs_ready() FIRST to avoid deadlock during init (Pattern 2543)
 /// RFC-0052: Standalone mode - check VRIFT_VFS_PREFIX even without daemon
-unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
+pub(crate) unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
     if path.is_null() {
         return None;
     }
