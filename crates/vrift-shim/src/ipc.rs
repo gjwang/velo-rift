@@ -77,7 +77,9 @@ unsafe fn sync_rpc(
     socket_path: &str,
     request: &vrift_ipc::VeloRequest,
 ) -> Option<vrift_ipc::VeloResponse> {
-    use crate::state::{CIRCUIT_BREAKER_FAILED_COUNT, CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_TRIPPED};
+    use crate::state::{
+        EventType, CIRCUIT_BREAKER_FAILED_COUNT, CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_TRIPPED,
+    };
     use std::sync::atomic::Ordering;
 
     // Check circuit breaker first
@@ -89,11 +91,15 @@ unsafe fn sync_rpc(
     if fd < 0 {
         let count = CIRCUIT_BREAKER_FAILED_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
         let threshold = CIRCUIT_BREAKER_THRESHOLD.load(Ordering::Relaxed);
+        vfs_record!(EventType::IpcFail, 0, count as i32);
         if count >= threshold && !CIRCUIT_TRIPPED.swap(true, Ordering::SeqCst) {
             vfs_error!("DAEMON CONNECTION FAILED {} TIMES. CIRCUIT BREAKER TRIPPED. FALLING BACK TO PASSTHROUGH.", count);
+            vfs_record!(EventType::CircuitTripped, 0, count as i32);
         }
         return None;
     }
+
+    vfs_record!(EventType::IpcSuccess, 0, fd);
 
     // Success - reset failure count
     CIRCUIT_BREAKER_FAILED_COUNT.store(0, Ordering::Relaxed);

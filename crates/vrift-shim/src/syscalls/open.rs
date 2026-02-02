@@ -30,6 +30,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
                 path_str,
                 p.absolute
             );
+            vfs_record!(EventType::OpenHit, p.manifest_key_hash, 0);
             p
         }
         None => {
@@ -53,6 +54,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
                 "manifest lookup '{}': NOT FOUND -> passthrough",
                 vpath.manifest_key
             );
+            vfs_record!(EventType::OpenMiss, vpath.manifest_key_hash, -libc::ENOENT);
             return None;
         }
     };
@@ -99,6 +101,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
         let temp_cpath = std::ffi::CString::new(temp_path.as_str()).ok()?;
 
         vfs_log!("COW TRIGGERED: '{}' -> '{}'", vpath.absolute, temp_path);
+        vfs_record!(EventType::CowTriggered, vpath.manifest_key_hash, 0);
 
         let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
 

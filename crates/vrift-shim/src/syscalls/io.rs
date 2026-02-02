@@ -242,7 +242,7 @@ pub unsafe extern "C" fn read_shim(
 #[no_mangle]
 pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     use crate::ipc::sync_ipc_manifest_reingest;
-    use crate::state::{ShimGuard, ShimState};
+    use crate::state::{EventType, ShimGuard, ShimState};
 
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
@@ -261,6 +261,10 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
         None
     };
 
+    // Use a hash of the FD or 0 if not tracked for general close event
+    let file_id = 0; // Simplified for general close
+    vfs_record!(EventType::Close, file_id, fd);
+
     if let Some(info) = cow_info {
         vfs_log!(
             "COW CLOSE: fd={} vpath='{}' temp='{}'",
@@ -274,8 +278,19 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
 
         // Trigger reingest IPC
         // RFC-0047: ManifestReingest updates the CAS and Manifest
-        if !sync_ipc_manifest_reingest(&state.socket_path, &info.vpath, &info.temp_path) {
+        if sync_ipc_manifest_reingest(&state.socket_path, &info.vpath, &info.temp_path) {
+            vfs_record!(
+                EventType::ReingestSuccess,
+                vrift_ipc::fnv1a_hash(&info.vpath),
+                res
+            );
+        } else {
             vfs_log!("REINGEST FAILED: IPC error for '{}'", info.vpath);
+            vfs_record!(
+                EventType::ReingestFail,
+                vrift_ipc::fnv1a_hash(&info.vpath),
+                -1
+            );
         }
 
         // Note: info.temp_path is cleaned up by the daemon (zero-copy move)

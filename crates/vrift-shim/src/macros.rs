@@ -10,17 +10,36 @@ macro_rules! vfs_log_at_level {
     ($level:expr, $tag:expr, $($arg:tt)*) => {
         {
             if $crate::state::LOG_LEVEL.load(std::sync::atomic::Ordering::Relaxed) <= ($level as u8) {
-                let pid = unsafe { libc::getpid() };
-                let msg = format!("[VFS][{}][{}] {}\n", pid, $tag, format_args!($($arg)*));
-                unsafe {
-                    $crate::LOGGER.log(&msg);
-                    if $crate::state::DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                        libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+                // Stack-based formatting to avoid heap allocation
+                // Use a local buffer and recursion guard
+                if let Some(_guard) = $crate::state::ShimGuard::enter() {
+                    use std::fmt::Write;
+                    let mut buf = [0u8; 512];
+                    let mut wrapper = $crate::macros::StackWriter::new(&mut buf);
+                    let pid = unsafe { libc::getpid() };
+                    let _ = write!(wrapper, "[VFS][{}][{}] ", pid, $tag);
+                    let _ = write!(wrapper, $($arg)*);
+                    let _ = writeln!(wrapper);
+
+                    let msg = wrapper.as_str();
+                    unsafe {
+                        $crate::state::LOGGER.log(msg);
+                        if $crate::state::DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                            libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+                        }
                     }
                 }
             }
         }
     };
+}
+
+// Zero-allocation structured event recording (Flight Recorder)
+#[macro_export]
+macro_rules! vfs_record {
+    ($event:expr, $file_id:expr, $result:expr) => {{
+        $crate::state::FLIGHT_RECORDER.record($event, $file_id, $result as i32);
+    }};
 }
 
 #[macro_export]
@@ -68,4 +87,30 @@ macro_rules! get_real_shim {
             get_real!($storage, $name, $t)
         }
     }};
+}
+
+pub struct StackWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> StackWriter<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.buf[..self.pos]).unwrap_or("")
+    }
+}
+
+impl<'a> std::fmt::Write for StackWriter<'a> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let bytes = s.as_bytes();
+        let remaining = self.buf.len() - self.pos;
+        let to_copy = std::cmp::min(bytes.len(), remaining);
+        self.buf[self.pos..self.pos + to_copy].copy_from_slice(&bytes[..to_copy]);
+        self.pos += to_copy;
+        Ok(())
+    }
 }

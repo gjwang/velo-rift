@@ -8,6 +8,7 @@ use std::ptr;
 pub(crate) struct VfsPath {
     pub absolute: String,
     pub manifest_key: String,
+    pub manifest_key_hash: u64,
 }
 
 pub(crate) struct PathResolver {
@@ -67,9 +68,11 @@ impl PathResolver {
                 }
             };
 
+        let manifest_key_hash = vrift_ipc::fnv1a_hash(&manifest_key);
         Some(VfsPath {
             absolute: normalized,
             manifest_key,
+            manifest_key_hash,
         })
     }
 }

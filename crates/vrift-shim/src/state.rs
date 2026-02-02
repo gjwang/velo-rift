@@ -48,6 +48,120 @@ pub enum LogLevel {
     Off = 5,
 }
 
+// ============================================================================
+// Flight Recorder (RFC-0039 §82)
+// ============================================================================
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    OpenHit = 1,
+    OpenMiss = 2,
+    StatHit = 3,
+    StatMiss = 4,
+    CowTriggered = 5,
+    IpcFail = 6,
+    IpcSuccess = 7,
+    CircuitTripped = 8,
+    VfsInit = 9,
+    Close = 10,
+    ReingestSuccess = 11,
+    ReingestFail = 12,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FlightEntry {
+    pub timestamp: u64,
+    pub event_type: u8,
+    pub _pad: [u8; 7], // Alignment for u64
+    pub file_id: u64,  // 64-bit hash (FNV1a)
+    pub result: i32,
+    pub _pad2: [u8; 4], // Pad to 32 bytes
+}
+
+pub const FLIGHT_RECORDER_SIZE: usize = 32768; // 32K entries * 32 bytes = 1MB
+pub struct FlightRecorder {
+    pub buffer: [FlightEntry; FLIGHT_RECORDER_SIZE],
+    pub head: AtomicUsize,
+}
+
+impl FlightRecorder {
+    pub const fn new() -> Self {
+        Self {
+            buffer: [FlightEntry {
+                timestamp: 0,
+                event_type: 0,
+                _pad: [0; 7],
+                file_id: 0,
+                result: 0,
+                _pad2: [0; 4],
+            }; FLIGHT_RECORDER_SIZE],
+            head: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Default for FlightRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FlightRecorder {
+    #[inline(always)]
+    pub fn record(&self, event: EventType, file_id: u64, result: i32) {
+        let idx = self.head.fetch_add(1, Ordering::Relaxed) % FLIGHT_RECORDER_SIZE;
+        // Safety: We are writing to a pre-allocated buffer.
+        // In a high-concurrency dylib, we accept that entries might be semi-corrupted
+        // if two threads write to the same index exactly at the same time,
+        // but this is extremely rare and better than locking.
+        unsafe {
+            let entry = &mut *self.buffer.as_ptr().add(idx).cast_mut();
+            entry.timestamp = rdtsc();
+            entry.event_type = event as u8;
+            entry.file_id = file_id;
+            entry.result = result;
+        }
+    }
+}
+
+pub static FLIGHT_RECORDER: FlightRecorder = FlightRecorder::new();
+
+pub static EVENT_NAMES: &[&str] = &[
+    "UNKNOWN",
+    "OpenHit",
+    "OpenMiss",
+    "StatHit",
+    "StatMiss",
+    "CowTriggered",
+    "IpcFail",
+    "IpcSuccess",
+    "CircuitTripped",
+    "VfsInit",
+    "Close",
+    "ReingestSuccess",
+    "ReingestFail",
+];
+
+#[inline(always)]
+fn rdtsc() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_rdtsc()
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let mut cntpct: u64;
+        std::arch::asm!("mrs {0}, cntpct_el0", out(reg) cntpct);
+        cntpct
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        0
+    }
+}
+
 impl LogLevel {
     pub fn from_u8(v: u8) -> Self {
         match v {
@@ -254,6 +368,41 @@ pub(crate) unsafe fn shim_log(msg: &str) {
     if DEBUG_ENABLED.load(Ordering::Relaxed) {
         libc::write(2, msg.as_ptr() as *const c_void, msg.len());
     }
+}
+
+pub fn vfs_dump_flight_recorder() {
+    let head = FLIGHT_RECORDER.head.load(Ordering::Relaxed);
+    let start = head.saturating_sub(FLIGHT_RECORDER_SIZE);
+
+    // Use a fixed buffer to avoid allocations during dump
+    let mut buf = [0u8; 256];
+
+    let pid = unsafe { libc::getpid() };
+    let header = format!("\n--- [VFS] Flight Recorder Dump (PID: {}) ---\n", pid);
+    let _ = unsafe { libc::write(2, header.as_ptr() as *const c_void, header.len()) };
+
+    for i in start..head {
+        let entry = &FLIGHT_RECORDER.buffer[i % FLIGHT_RECORDER_SIZE];
+        if entry.event_type == 0 {
+            continue;
+        }
+
+        let event_name = EVENT_NAMES
+            .get(entry.event_type as usize)
+            .unwrap_or(&"INVALID");
+
+        let mut wrapper = crate::macros::StackWriter::new(&mut buf);
+        use std::fmt::Write;
+        let _ = writeln!(
+            wrapper,
+            "[{:>15}] {:<16} ID:0x{:016x} RES:{}",
+            entry.timestamp, event_name, entry.file_id, entry.result
+        );
+        let msg = wrapper.as_str();
+        let _ = unsafe { libc::write(2, msg.as_ptr() as *const c_void, msg.len()) };
+    }
+    let footer = "--- End of Dump ---\n";
+    let _ = unsafe { libc::write(2, footer.as_ptr() as *const c_void, footer.len()) };
 }
 
 pub(crate) struct OpenFile {
@@ -618,6 +767,13 @@ impl ShimState {
         SHIM_STATE.store(ptr, Ordering::Release);
         INITIALIZING.store(0, Ordering::SeqCst);
 
+        // RFC-0039 §82: Record initialization event
+        vfs_record!(EventType::VfsInit, 0, 0);
+        // Setup signal handler for on-demand log dumping
+        unsafe { setup_signal_handler() };
+        // Register atexit hook for final log flush
+        unsafe { libc::atexit(dump_logs_atexit) };
+
         // Activate VFS - now it's safe to call into Rust from C wrappers.
         activate_vfs();
 
@@ -769,4 +925,19 @@ impl ShimState {
 
 extern "C" fn dump_logs_atexit() {
     LOGGER.dump_to_file();
+    // Also dump flight recorder to stderr if debug is enabled
+    if DEBUG_ENABLED.load(Ordering::Relaxed) {
+        vfs_dump_flight_recorder();
+    }
+}
+
+pub(crate) unsafe fn setup_signal_handler() {
+    #[cfg(target_os = "macos")]
+    {
+        use libc::{signal, SIGUSR1};
+        extern "C" fn handle_sigusr1(_sig: libc::c_int) {
+            vfs_dump_flight_recorder();
+        }
+        signal(SIGUSR1, handle_sigusr1 as usize);
+    }
 }

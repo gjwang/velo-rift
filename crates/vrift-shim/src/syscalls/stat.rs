@@ -40,6 +40,7 @@ unsafe fn stat_impl(
         (*buf).st_dev = 0x52494654; // "RIFT"
         (*buf).st_nlink = 1;
         (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str);
+        vfs_record!(EventType::StatHit, vrift_ipc::fnv1a_hash(path_str), 0);
         return Some(0);
     }
 
@@ -52,8 +53,15 @@ unsafe fn stat_impl(
         (*buf).st_dev = 0x52494654; // "RIFT"
         (*buf).st_nlink = 1;
         (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str);
+        vfs_record!(EventType::StatHit, vrift_ipc::fnv1a_hash(path_str), 0);
         return Some(0);
     }
+
+    vfs_record!(
+        EventType::StatMiss,
+        vrift_ipc::fnv1a_hash(path_str),
+        -libc::ENOENT
+    );
 
     // RFC-0047: Fallback for VFS files without manifest entry
     // Call real stat, then patch st_dev to mark as VFS file
