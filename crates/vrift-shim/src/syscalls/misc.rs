@@ -218,9 +218,9 @@ pub unsafe extern "C" fn unlink_shim(path: *const c_char) -> c_int {
     #[cfg(target_os = "linux")]
     {
         if INITIALIZING.load(Ordering::Relaxed) >= 2 {
-            return libc::unlink(path);
+            return crate::syscalls::open::raw_unlink(path);
         }
-        block_vfs_mutation(path).unwrap_or_else(|| libc::unlink(path))
+        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::open::raw_unlink(path))
     }
 }
 
@@ -240,9 +240,9 @@ pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
     #[cfg(target_os = "linux")]
     {
         if INITIALIZING.load(Ordering::Relaxed) >= 2 {
-            return libc::rmdir(path);
+            return crate::syscalls::open::raw_rmdir(path);
         }
-        block_vfs_mutation(path).unwrap_or_else(|| libc::rmdir(path))
+        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::open::raw_rmdir(path))
     }
 }
 
@@ -263,9 +263,9 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
     #[cfg(target_os = "linux")]
     {
         if INITIALIZING.load(Ordering::Relaxed) >= 2 {
-            return libc::mkdir(path, mode);
+            return crate::syscalls::open::raw_mkdir(path, mode);
         }
-        block_vfs_mutation(path).unwrap_or_else(|| libc::mkdir(path, mode))
+        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::open::raw_mkdir(path, mode))
     }
 }
 

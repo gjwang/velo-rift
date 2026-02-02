@@ -461,3 +461,137 @@ pub(crate) unsafe fn raw_link(old: *const c_char, new: *const c_char) -> c_int {
         }
     }
 }
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn raw_unlink(path: *const c_char) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!("syscall", in("rax") 87, in("rdi") path, lateout("rax") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!("svc #0", in("x8") 35i64, in("x0") -100i64, in("x1") path, in("x2") 0, lateout("x0") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn raw_rmdir(path: *const c_char) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!("syscall", in("rax") 84, in("rdi") path, lateout("rax") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!("svc #0", in("x8") 35i64, in("x0") -100i64, in("x1") path, in("x2") 512, lateout("x0") ret); // AT_REMOVEDIR = 0x200
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn raw_mkdir(path: *const c_char, mode: mode_t) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!("syscall", in("rax") 83, in("rdi") path, in("rsi") mode as i64, lateout("rax") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!("svc #0", in("x8") 34i64, in("x0") -100i64, in("x1") path, in("x2") mode as i64, lateout("x0") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn raw_chmod(path: *const c_char, mode: mode_t) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!("syscall", in("rax") 90, in("rdi") path, in("rsi") mode as i64, lateout("rax") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!("svc #0", in("x8") 40i64, in("x0") -100i64, in("x1") path, in("x2") mode as i64, in("x3") 0, lateout("x0") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn raw_fchmodat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: mode_t,
+    flags: c_int,
+) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!("syscall", in("rax") 268, in("rdi") dirfd as i64, in("rsi") path, in("rdx") mode as i64, in("r10") flags as i64, lateout("rax") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!("svc #0", in("x8") 40i64, in("x0") dirfd as i64, in("x1") path, in("x2") mode as i64, in("x3") flags as i64, lateout("x0") ret);
+        if ret < 0 {
+            crate::set_errno(-ret as c_int);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
