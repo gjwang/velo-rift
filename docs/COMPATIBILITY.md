@@ -99,8 +99,8 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 | **`chmod`** | Mutation | ✅ | ✅ | ⏳ | `test_shell_chmod_interception` | VFS: EROFS guard |
 | **`chown`** | Mutation | ➖ | ➖ | ➖ | (via `test_gap_mutation_perimeter`) | Passthrough by design |
 | **`utimes`** | Mutation | ✅ | ✅ | ⏳ | `test_gap_utimes` | VFS mtime via IPC |
-| **`statx`** | Metadata | ❌ | ❌ | ⏳ | `test_statx_interception` | Linux-only |
-| **`getdents`** | Discovery | ❌ | ❌ | ⏳ | (via `test_opendir_*`) | Linux raw syscall |
+| **`statx`** | Metadata | ⏳ | N/A | ⏳ | `test_statx_interception` | Linux-only (macOS has no statx) |
+| **`getdents`** | Discovery | ⏳ | N/A | ⏳ | (via `test_opendir_*`) | Linux raw syscall (macOS via readdir) |
 
 
 ---
