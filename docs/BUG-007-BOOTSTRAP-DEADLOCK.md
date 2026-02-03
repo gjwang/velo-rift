@@ -1,0 +1,134 @@
+# BUG-007: malloc/fstat Bootstrap Deadlock on macOS ARM64
+
+## Summary
+
+When using `DYLD_INSERT_LIBRARIES` to inject vrift-shim into a process on macOS ARM64, the process would hang with high CPU usage during the dyld bootstrap phase.
+
+## Symptoms
+
+- Process hangs immediately after launch
+- CPU usage spikes to 100% on one core
+- `sample` output shows deep recursive call stack in `fstat_shim`
+- Occurs with `DYLD_INSERT_LIBRARIES` and optionally `DYLD_FORCE_FLAT_NAMESPACE=1`
+
+## Root Cause Analysis
+
+### Call Chain Leading to Deadlock
+
+```
+dyld (dynamic linker)
+  └── _dyld_start
+       └── libSystem_initializer
+            └── __malloc_init
+                 └── _os_feature_table_once
+                      └── fstat(fd, &sb)
+                           └── [INTERPOSED] fstat_shim
+                                └── dlsym(RTLD_NEXT, "fstat")
+                                     └── malloc (NOT INITIALIZED YET!)
+                                          └── DEADLOCK/INFINITE RECURSION
+```
+
+### Why This Happens
+
+1. **Timing**: macOS calls `fstat` inside `__malloc_init` BEFORE malloc is ready to service requests.
+
+2. **Interposition**: With `DYLD_INSERT_LIBRARIES` active, the `__DATA,__interpose` section causes all `fstat` calls to redirect to `fstat_shim`.
+
+3. **dlsym Dependency**: The original `fstat_shim` implementation used:
+   ```rust
+   let real = REAL_FSTAT.get();  // Calls dlsym(RTLD_NEXT, "fstat")
+   ```
+   But `dlsym` internally allocates memory, requiring malloc.
+
+4. **old_func Trap**: We tried using `IT_FSTAT.old_func` (the interpose table's original function pointer), but with `DYLD_FORCE_FLAT_NAMESPACE=1`, this pointer is resolved to the same symbol that got interposed — creating infinite recursion.
+
+5. **RwLock Hazard**: Even bypassing dlsym, calling helper functions like `get_fd_entry()` uses `RwLock::read()` which may trigger pthread operations that also require initialized memory allocators.
+
+## Solution
+
+### Use Raw Assembly Syscalls
+
+Created `crates/vrift-shim/src/syscalls/macos_raw.rs` with inline assembly syscall wrappers:
+
+```rust
+#[inline(never)]
+pub unsafe fn raw_fstat64(fd: c_int, buf: *mut stat) -> c_int {
+    let ret: i64;
+    asm!(
+        "mov x16, {syscall}",  // Syscall number in x16
+        "svc #0x80",            // Trap to kernel
+        syscall = in(reg) 339,  // SYS_fstat64
+        in("x0") fd,
+        in("x1") buf,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    if ret < 0 { -1 } else { ret as c_int }
+}
+```
+
+This has **ZERO dependencies** on libc, pthread, or malloc.
+
+### Updated Shim Pattern
+
+```rust
+pub unsafe extern "C" fn fstat_shim(fd: c_int, buf: *mut stat) -> c_int {
+    // Check if still in early bootstrap (INITIALIZING >= 2)
+    if INITIALIZING.load(Relaxed) >= 2 {
+        return raw_fstat64(fd, buf);  // Use raw syscall
+    }
+
+    // Check recursion guard (uses TLS, safe after INITIALIZING < 2)
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return raw_fstat64(fd, buf),  // In recursion, use raw
+    };
+
+    // Normal VFS logic...
+    // ...
+    
+    // Default fallback: raw syscall (safest option)
+    raw_fstat64(fd, buf)
+}
+```
+
+## Affected Shims
+
+| Shim | Raw Syscall | Syscall Number |
+|------|-------------|----------------|
+| `fstat_shim` | `raw_fstat64` | 339 |
+| `close_shim` | `raw_close` | 6 |
+| `mmap_shim` | `raw_mmap` | 197 |
+| `munmap_shim` | `raw_munmap` | 73 |
+| `access_shim` | `raw_access` | 33 |
+
+## Testing
+
+```bash
+# Create test binary
+echo '#include <stdio.h>\nint main() { puts("OK"); }' | cc -x c - -o /tmp/test
+codesign -f -s - /tmp/test
+
+# Test with shim injection
+DYLD_INSERT_LIBRARIES=target/release/libvrift_shim.dylib \
+DYLD_FORCE_FLAT_NAMESPACE=1 \
+/tmp/test
+
+# Expected output: "OK" (not a hang)
+```
+
+## Debugging Tips
+
+If you encounter similar hangs:
+
+1. Use `sample <PID> 1` to capture the call stack
+2. Look for recursive patterns in `*_shim` functions
+3. Check if the recursion involves `dlsym`, `malloc`, or `pthread_*`
+4. The solution is always to use raw syscalls for bootstrap-phase operations
+
+## References
+
+- `/usr/include/sys/syscall.h` — macOS syscall numbers
+- Apple ARM64 Calling Convention documentation
+- `crates/vrift-shim/src/syscalls/linux_raw.rs` — similar pattern for Linux
+- Pattern 2682: Raw Assembly Syscall Wrappers

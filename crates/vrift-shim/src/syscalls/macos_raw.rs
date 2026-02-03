@@ -1,13 +1,64 @@
-//! Raw macOS syscall wrappers for bootstrap-safe operations.
+//! Raw macOS ARM64 syscall wrappers for bootstrap-safe operations.
 //!
-//! BUG-007: During dyld bootstrap (__malloc_init), calling libc functions can cause
-//! infinite recursion when DYLD_INSERT_LIBRARIES is active because the interposed
-//! functions call back into our shim.
+//! # BUG-007: malloc/fstat Bootstrap Deadlock
 //!
-//! This module provides bare-metal syscall wrappers using inline assembly that
-//! bypass libc entirely, making them safe to call at any stage of initialization.
+//! ## Problem Discovery
 //!
-//! Syscall numbers from: /usr/include/sys/syscall.h
+//! When using `DYLD_INSERT_LIBRARIES` to inject vrift-shim into a process,
+//! the process would hang during dyld bootstrap on macOS ARM64.
+//!
+//! Stack trace analysis using `sample` revealed:
+//! ```text
+//! dyld -> libSystem_initializer -> __malloc_init -> _os_feature_table_once -> fstat
+//!                                                                               ↓
+//!                                                                         fstat_shim (infinite recursion)
+//! ```
+//!
+//! ## Root Cause Analysis
+//!
+//! 1. **Timing**: `fstat` is called inside `__malloc_init` BEFORE malloc is ready
+//!
+//! 2. **Interpose Redirection**: With `DYLD_INSERT_LIBRARIES` active, all calls to
+//!    `fstat` get redirected to our `fstat_shim` via the `__DATA,__interpose` section
+//!
+//! 3. **dlsym Dependency**: `fstat_shim` was using `dlsym(RTLD_NEXT)` to get the
+//!    real fstat pointer. But `dlsym` internally uses malloc (not yet initialized)!
+//!
+//! 4. **IT_FSTAT.old_func Trap**: We tried using the interpose table's `old_func`
+//!    pointer, but with `DYLD_FORCE_FLAT_NAMESPACE=1`, even this points back to
+//!    our shim, creating infinite recursion.
+//!
+//! 5. **RwLock Hazard**: Even if we bypass dlsym, calling `get_fd_entry()` uses
+//!    `RwLock::read()` which may internally call syscalls that get interposed.
+//!
+//! ## Solution
+//!
+//! Use **inline assembly to directly invoke syscalls**, completely bypassing libc.
+//!
+//! On macOS ARM64:
+//! - Syscall number goes in x16
+//! - Arguments in x0-x5
+//! - `svc #0x80` triggers the syscall
+//! - Return value in x0
+//!
+//! This approach has ZERO dependencies on libc, malloc, or any other library.
+//!
+//! ## Affected Shims
+//!
+//! The following shims use raw syscalls during early init (`INITIALIZING >= 2`)
+//! or when in recursion (ShimGuard fails):
+//!
+//! - `fstat_shim` → [`raw_fstat64`] (SYS_fstat64 = 339)
+//! - `close_shim` → [`raw_close`] (SYS_close = 6)
+//! - `mmap_shim` → [`raw_mmap`] (SYS_mmap = 197)
+//! - `munmap_shim` → [`raw_munmap`] (SYS_munmap = 73)
+//! - `access_shim` → [`raw_access`] (SYS_access = 33)
+//!
+//! ## References
+//!
+//! - Syscall numbers: `/usr/include/sys/syscall.h`
+//! - ARM64 ABI: Apple ARM64 Function Calling Conventions
+//! - Pattern 2682: Raw Assembly Syscall Wrappers (linux_raw.rs)
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::arch::asm;
