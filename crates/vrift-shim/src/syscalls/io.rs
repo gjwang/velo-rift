@@ -10,7 +10,7 @@ use libc::c_int;
 use libc::c_void;
 #[cfg(target_os = "macos")]
 use libc::off_t;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 /// Global counter for open FDs to monitor saturation (RFC-0051)
 pub static OPEN_FD_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -271,8 +271,8 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
 
     // RFC-0051: Monitor FD usage on close (to reset warning thresholds)
     let _ = crate::syscalls::io::OPEN_FD_COUNT.fetch_update(
-        Ordering::Relaxed,
-        Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
         |val| Some(val.saturating_sub(1)),
     );
     state.check_fd_usage();
