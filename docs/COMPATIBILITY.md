@@ -127,19 +127,25 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 | **`sendfile`** | I/O | ⏳ | ⏳ | ⏳ | - | **GAP: Copy data between FDs** |
 | **`copy_file_range`** | I/O | ⏳ | N/A | ⏳ | - | **GAP: Copy data between FDs (Linux)** |
 
-### 🚨 Critical Gaps (7 syscalls pending)
+### 🚨 Critical Gaps (15+ syscalls pending)
 
-> **These syscalls can bypass VFS mutation protection.** Implementation required for 100% coverage.
+> **WARNING: These syscalls can bypass VFS mutation protection.** Reproduction scripts in `tests/poc/` have PROVEN bypasses for `unlinkat`, `mkdirat`, and `fchmod`.
 
 | Syscall | Risk | Priority | Category |
 |---------|------|----------|----------|
-| `unlinkat` | Delete VFS files via dirfd | **P0** | Mutation |
-| `mkdirat` | Create dirs in VFS via dirfd | **P0** | Mutation |
+| `unlinkat` | PROVEN BYPASS: Delete VFS files via dirfd | **P0** | Mutation |
+| `mkdirat` | PROVEN BYPASS: Create dirs in VFS via dirfd | **P0** | Mutation |
+| `exchangedata` | Atomic swap of virtual files with real files | **P0** | Mutation (macOS) |
 | `symlinkat` | Create symlinks in VFS | **P1** | Mutation |
-| `fchmod` | Change perms via FD | **P1** | Permission |
-| `futimens` | Modify times via FD | **P2** | Time |
+| `fchmod` | PROVEN BYPASS: Change perms via FD (CAS risk) | **P1** | Permission |
+| `fchown`, `fchownat` | Change ownership via FD | **P1** | Permission |
+| `readlinkat` | Read virtual symlinks via dirfd | **P1** | Path |
+| `creat` | Create files bypassing open_shim logic | **P2** | Mutation |
+| `futimens`, `futimes` | Modify times via FD | **P2** | Time |
 | `sendfile` | Copy data between FDs bypassing VFS | **P2** | I/O |
 | `copy_file_range` | Copy data between FDs bypassing VFS | **P2** | I/O |
+| `getattrlist`, `setattrlist` | macOS advanced metadata bypass | **P2** | Metadata |
+| `fstatvfs` | File system stats bypass | **P3** | Metadata |
 
 ### Passthrough by Design (No VFS Risk)
 
@@ -147,7 +153,7 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 |---------|--------|
 | `pread`, `pwrite` | Uses already-intercepted FDs |
 | `readv`, `writev` | Uses already-intercepted FDs |
-| `fchown`, `lchown`, `fchownat` | Output files, not VFS |
+| `lchown` | Output files, not VFS |
 | `openat2` | Linux 5.6+, rare, can use openat fallback |
 | `execveat` | Linux-only, rare |
 | `splice`, `tee`, `vmsplice` | Kernel pipe operations |
@@ -271,17 +277,17 @@ These are "invisible" behaviors discovered during deep forensic audit that may c
 
 | Category | Compliance | Status | Key Missing Operations |
 | :--- | :---: | :--- | :--- |
-| **Basic Metadata** | 100% | ✅ Full | `statx` (Linux-only, pending) |
-| **File I/O** | 92% | ⚠️ Gaps | `sendfile`, `copy_file_range` **PENDING** |
+| **Basic Metadata** | 90% | ⚠️ Gaps | `getattrlist`, `statvfs` **PENDING** |
+| **File I/O** | 80% | ⚠️ Gaps | `sendfile`, `copy_file_range`, `creat` **PENDING** |
 | **Directory Ops** | 100% | ✅ Full | None (Read-only traversal complete) |
-| **Namespace/Path** | 100% | ✅ Full | None (`fchdir` ✅, `getcwd` ✅, `chdir` ✅) |
-| **Mutation** | 85% | ⚠️ Gaps | `unlinkat`, `mkdirat`, `symlinkat` **PENDING** |
-| **Permissions** | 75% | ⚠️ Gaps | `fchmod` **PENDING** |
-| **Time Ops** | 67% | ⚠️ Gaps | `futimens` **PENDING** |
+| **Namespace/Path** | 90% | ⚠️ Gaps | `readlinkat` **PENDING** |
+| **Mutation** | 70% | ❌ Vulnerable | `unlinkat`, `mkdirat`, `symlinkat`, `exchangedata` |
+| **Permissions** | 60% | ❌ Vulnerable | `fchmod`, `fchown`, `fchownat` |
+| **Time Ops** | 50% | ❌ Vulnerable | `futimens`, `futimes`, `utimensat` (partial) |
 | **Dynamic Loading**| 100% | ✅ Full | None |
 | **Memory Management**| 100% | ✅ Full | None |
 
-> **Overall macOS Coverage**: 87% (45/52 syscalls) - 7 gaps to reach 100%
+> **Overall macOS Coverage**: ~75% (45/60 key syscalls) - 15+ critical gaps found in QA Audit
 
 ---
 
