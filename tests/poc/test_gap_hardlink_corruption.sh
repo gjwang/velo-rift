@@ -52,8 +52,9 @@ DAEMON_PID=$(cat "$TEST_DIR/daemon.pid")
 sleep 2
 
 # Register
-mkdir -p "$HOME/.vrift/registry"
-echo "{\"manifests\": {\"test_link\": {\"project_root\": \"$VELO_PROJECT_ROOT\"}}}" > "$HOME/.vrift/registry/manifests.json"
+export VRIFT_REGISTRY_DIR="$TEST_DIR/registry"
+mkdir -p "$VRIFT_REGISTRY_DIR"
+echo "{\"version\": 1, \"manifests\": {\"test_link\": {\"source_path\": \"/tmp/test_hardlink.manifest\", \"source_path_hash\": \"none\", \"project_root\": \"$VELO_PROJECT_ROOT\", \"registered_at\": \"2026-02-03T00:00:00Z\", \"last_verified\": \"2026-02-03T00:00:00Z\", \"status\": \"active\"}}}" > "$VRIFT_REGISTRY_DIR/manifests.json"
 kill $DAEMON_PID || true
 sleep 1
 (

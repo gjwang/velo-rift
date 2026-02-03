@@ -100,8 +100,9 @@ sleep 2
 # Or: Daemon checks `load_registered_workspaces`.
 # We can write to ~/.vrift/registry/manifests.json
 
-mkdir -p "$HOME/.vrift/registry"
-echo "{\"manifests\": {\"test\": {\"project_root\": \"$VELO_PROJECT_ROOT\"}}}" > "$HOME/.vrift/registry/manifests.json"
+export VRIFT_REGISTRY_DIR="$TEST_DIR/registry"
+mkdir -p "$VRIFT_REGISTRY_DIR"
+echo "{\"version\": 1, \"manifests\": {\"test\": {\"source_path\": \"/tmp/test_flock.manifest\", \"source_path_hash\": \"none\", \"project_root\": \"$VELO_PROJECT_ROOT\", \"registered_at\": \"2026-02-03T00:00:00Z\", \"last_verified\": \"2026-02-03T00:00:00Z\", \"status\": \"active\"}}}" > "$VRIFT_REGISTRY_DIR/manifests.json"
 kill $DAEMON_PID || true
 sleep 1
 (

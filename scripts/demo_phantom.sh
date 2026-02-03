@@ -117,6 +117,9 @@ setup_demo() {
     print_header "🏗️  Step 1: Setting Up Demo Environment"
     
     print_step "Cleaning previous demo..."
+    if [ -d "$DEMO_DIR" ] && [ "$(uname -s)" == "Darwin" ]; then
+        chflags -R nouchg "$DEMO_DIR" 2>/dev/null || true
+    fi
     rm -rf "$DEMO_DIR"
     mkdir -p "$DEMO_DIR"
     

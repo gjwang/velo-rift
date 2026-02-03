@@ -79,8 +79,11 @@ impl ManifestRegistry {
         }
     }
 
-    /// Get the registry directory path (~/.vrift/registry/)
+    /// Get the registry directory path (~/.vrift/registry/ or VRIFT_REGISTRY_DIR)
     pub fn registry_dir() -> Result<PathBuf> {
+        if let Ok(path) = std::env::var("VRIFT_REGISTRY_DIR") {
+            return Ok(PathBuf::from(path));
+        }
         let home = dirs::home_dir().context("Failed to get home directory")?;
         let registry_dir = home.join(".vrift").join("registry");
         Ok(registry_dir)

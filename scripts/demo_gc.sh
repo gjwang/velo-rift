@@ -75,6 +75,9 @@ echo ""
 
 print_step "0" "Setup - Creating demo environment"
 
+if [ -d "$DEMO_DIR" ] && [ "$(uname -s)" == "Darwin" ]; then
+    chflags -R nouchg "$DEMO_DIR" 2>/dev/null || true
+fi
 rm -rf "$DEMO_DIR"
 rm -f ~/.vrift/registry/manifests.json
 
