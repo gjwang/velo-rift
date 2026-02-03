@@ -91,11 +91,15 @@ pub fn is_vfs_fd(fd: c_int) -> bool {
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
+    // BUG-007: Use raw syscall during early init to avoid dlsym recursion
+    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+    if init_state >= 2 {
+        return crate::syscalls::macos_raw::raw_dup(oldfd);
+    }
+
     let real = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn(c_int) -> c_int>(
         crate::reals::REAL_DUP.get(),
     );
-
-    passthrough_if_init!(real, oldfd);
 
     let newfd = real(oldfd);
     if newfd >= 0 {
@@ -110,11 +114,15 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
+    // BUG-007: Use raw syscall during early init to avoid dlsym recursion
+    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+    if init_state >= 2 {
+        return crate::syscalls::macos_raw::raw_dup2(oldfd, newfd);
+    }
+
     let real = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn(c_int, c_int) -> c_int>(
         crate::reals::REAL_DUP2.get(),
     );
-
-    passthrough_if_init!(real, oldfd, newfd);
 
     // If newfd was tracked, untrack it (it's being replaced)
     untrack_fd(newfd);

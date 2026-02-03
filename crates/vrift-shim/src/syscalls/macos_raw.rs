@@ -297,6 +297,102 @@ pub unsafe fn raw_write(
     ret as libc::ssize_t
 }
 
+/// SYS_dup = 41 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_DUP: i64 = 41;
+
+/// SYS_dup2 = 90 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_DUP2: i64 = 90;
+
+/// SYS_lseek = 199 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_LSEEK: i64 = 199;
+
+/// SYS_ftruncate = 201 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_FTRUNCATE: i64 = 201;
+
+/// Raw dup syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_dup(oldfd: libc::c_int) -> libc::c_int {
+    let ret: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        syscall = in(reg) SYS_DUP,
+        in("x0") oldfd as i64,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    if ret < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+/// Raw dup2 syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_dup2(oldfd: libc::c_int, newfd: libc::c_int) -> libc::c_int {
+    let ret: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        syscall = in(reg) SYS_DUP2,
+        in("x0") oldfd as i64,
+        in("x1") newfd as i64,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    if ret < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+/// Raw lseek syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_lseek(fd: libc::c_int, offset: libc::off_t, whence: libc::c_int) -> libc::off_t {
+    let ret: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        syscall = in(reg) SYS_LSEEK,
+        in("x0") fd as i64,
+        in("x1") offset,
+        in("x2") whence as i64,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    ret as libc::off_t
+}
+
+/// Raw ftruncate syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_ftruncate(fd: libc::c_int, length: libc::off_t) -> libc::c_int {
+    let ret: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        syscall = in(reg) SYS_FTRUNCATE,
+        in("x0") fd as i64,
+        in("x1") length,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    if ret < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
 // =============================================================================
 // macOS x86_64 implementations
 // =============================================================================
@@ -543,6 +639,106 @@ pub unsafe fn raw_write(
     ret as libc::ssize_t
 }
 
+/// SYS_dup = 41 on macOS x86_64
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_DUP_X64: i64 = 41;
+
+/// SYS_dup2 = 90 on macOS x86_64
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_DUP2_X64: i64 = 90;
+
+/// SYS_lseek = 199 on macOS x86_64
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_LSEEK_X64: i64 = 199;
+
+/// SYS_ftruncate = 201 on macOS x86_64
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_FTRUNCATE_X64: i64 = 201;
+
+/// Raw dup syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_dup(oldfd: libc::c_int) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_DUP_X64 | 0x2000000,
+        in("rdi") oldfd as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+/// Raw dup2 syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_dup2(oldfd: libc::c_int, newfd: libc::c_int) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_DUP2_X64 | 0x2000000,
+        in("rdi") oldfd as i64,
+        in("rsi") newfd as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+/// Raw lseek syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_lseek(fd: libc::c_int, offset: libc::off_t, whence: libc::c_int) -> libc::off_t {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_LSEEK_X64 | 0x2000000,
+        in("rdi") fd as i64,
+        in("rsi") offset as i64,
+        in("rdx") whence as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    ret as libc::off_t
+}
+
+/// Raw ftruncate syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_ftruncate(fd: libc::c_int, length: libc::off_t) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_FTRUNCATE_X64 | 0x2000000,
+        in("rdi") fd as i64,
+        in("rsi") length as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
 // =============================================================================
 // Linux fallback (redirects to linux_raw.rs)
 // =============================================================================
@@ -605,4 +801,24 @@ pub unsafe fn raw_write(
     count: libc::size_t,
 ) -> libc::ssize_t {
     crate::syscalls::linux_raw::raw_write(fd, buf, count)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_dup(oldfd: libc::c_int) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_dup(oldfd)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_dup2(oldfd: libc::c_int, newfd: libc::c_int) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_dup2(oldfd, newfd)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_lseek(fd: libc::c_int, offset: libc::off_t, whence: libc::c_int) -> libc::off_t {
+    crate::syscalls::linux_raw::raw_lseek(fd, offset, whence)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_ftruncate(fd: libc::c_int, length: libc::off_t) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_ftruncate(fd, length)
 }
