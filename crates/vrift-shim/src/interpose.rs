@@ -127,6 +127,7 @@ extern "C" {
 #[cfg(target_os = "linux")]
 mod linux_shims {
     use super::*;
+    use libc::c_void;
 
     #[no_mangle]
     pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
