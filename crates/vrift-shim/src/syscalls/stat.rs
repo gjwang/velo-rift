@@ -3,6 +3,8 @@ use crate::reals::*;
 use crate::state::*;
 use libc::{c_char, c_int, stat as libc_stat};
 use std::ffi::CStr;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 
 /// Linux statx structures (RFC-0044: Metadata virtualization)
 #[cfg(target_os = "linux")]

@@ -499,16 +499,6 @@ mod linux_shims {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
-        crate::syscalls::misc::unlinkat_shim(dirfd, path, flags)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: mode_t) -> c_int {
-        crate::syscalls::misc::mkdirat_shim(dirfd, path, mode)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn symlinkat(
         p1: *const c_char,
         dirfd: c_int,
