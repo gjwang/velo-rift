@@ -53,7 +53,8 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             vfs_record!(EventType::OpenMiss, vpath.manifest_key_hash, -libc::ENOENT);
             let fd = unsafe { raw_open(path, flags, mode) };
             if fd >= 0 {
-                crate::syscalls::io::track_fd(fd, &vpath.manifest_key, true);
+                // No cache for miss (file not in manifest)
+                crate::syscalls::io::track_fd(fd, &vpath.manifest_key, true, None);
                 return Some(fd);
             }
             return None;
@@ -177,7 +178,16 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
         let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
         let fd = unsafe { libc::open(blob_cpath.as_ptr(), flags, mode as libc::c_uint) };
         if fd >= 0 {
-            crate::syscalls::io::track_fd(fd, &vpath.manifest_key, true);
+            // 🔥 Build and cache stat for VFS file
+            let mut cached_stat: libc::stat = unsafe { std::mem::zeroed() };
+            cached_stat.st_size = entry.size as _;
+            cached_stat.st_mode = entry.mode as u16;
+            cached_stat.st_mtime = entry.mtime as _;
+            cached_stat.st_dev = 0x52494654; // "RIFT"
+            cached_stat.st_nlink = 1;
+            cached_stat.st_ino = vrift_ipc::fnv1a_hash(&vpath.manifest_key) as _;
+
+            crate::syscalls::io::track_fd(fd, &vpath.manifest_key, true, Some(cached_stat));
             Some(fd)
         } else {
             None

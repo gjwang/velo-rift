@@ -22,6 +22,7 @@ pub static OPEN_FD_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub struct FdEntry {
     pub path: String,
     pub is_vfs: bool,
+    pub cached_stat: Option<libc::stat>,
 }
 
 // RFC-0051 / Pattern 2648: Using Mutex for FD_TABLE to avoid RwLock hazards during dyld bootstrap.
@@ -29,7 +30,7 @@ pub struct FdEntry {
 
 /// Track a new FD opened for a VFS path
 #[inline(always)]
-pub fn track_fd(fd: c_int, path: &str, is_vfs: bool) {
+pub fn track_fd(fd: c_int, path: &str, is_vfs: bool, cached_stat: Option<libc::stat>) {
     if fd < 0 {
         return;
     }
@@ -44,6 +45,7 @@ pub fn track_fd(fd: c_int, path: &str, is_vfs: bool) {
     let entry = Box::into_raw(Box::new(FdEntry {
         path: path.to_string(),
         is_vfs,
+        cached_stat,
     }));
 
     // Safety: Reactor is guaranteed to be initialized after ShimState::init()
@@ -126,7 +128,7 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
     if newfd >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
-            track_fd(newfd, &entry.path, entry.is_vfs);
+            track_fd(newfd, &entry.path, entry.is_vfs, entry.cached_stat);
         }
     }
     newfd
@@ -158,7 +160,7 @@ pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
     if result >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
-            track_fd(result, &entry.path, entry.is_vfs);
+            track_fd(result, &entry.path, entry.is_vfs, entry.cached_stat);
         }
     }
     result

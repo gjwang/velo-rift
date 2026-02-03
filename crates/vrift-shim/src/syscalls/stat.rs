@@ -155,30 +155,52 @@ pub unsafe extern "C" fn lstat_shim(path: *const c_char, buf: *mut libc_stat) ->
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn fstat_shim(fd: c_int, buf: *mut libc_stat) -> c_int {
-    // BUG-007: Use raw syscall during early init AND whenever in recursion.
-    // The recursion guard (ShimGuard) uses TLS which is safe only after INITIALIZING < 2.
-    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // Early init bypass
+    let init_state = crate::state::INITIALIZING.load(Relaxed);
     if init_state >= 2 {
         return crate::syscalls::macos_raw::raw_fstat64(fd, buf);
     }
 
-    // After early init, check recursion guard before accessing any complex state
+    // 🔥 ULTRA-FAST PATH: No ShimGuard for common case
+    if let Some(reactor) = crate::sync::get_reactor() {
+        let entry_ptr = reactor.fd_table.get(fd as u32);
+
+        // Untracked FD (99% case in compilation) → direct syscall
+        if entry_ptr.is_null() {
+            return crate::syscalls::macos_raw::raw_fstat64(fd, buf);
+        }
+
+        let entry = &*entry_ptr;
+
+        // Cache hit → instant return
+        if let Some(ref cached) = entry.cached_stat {
+            *buf = *cached;
+            return 0;
+        }
+    }
+
+    // Slow path: ShimGuard + manifest query
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
-        None => return crate::syscalls::macos_raw::raw_fstat64(fd, buf), // In recursion, use raw
+        None => return crate::syscalls::macos_raw::raw_fstat64(fd, buf),
     };
 
-    // RFC-OPT-001: Check if FD is tracked as VFS file
     if let Some(entry) = crate::syscalls::io::get_fd_entry(fd) {
+        if let Some(ref cached) = entry.cached_stat {
+            *buf = *cached;
+            return 0;
+        }
+
         if entry.is_vfs {
-            // Query manifest for virtual metadata
             if let Some(state) = ShimState::get() {
                 if let Some(vnode) = state.query_manifest(&entry.path) {
                     std::ptr::write_bytes(buf, 0, 1);
                     (*buf).st_size = vnode.size as _;
                     (*buf).st_mode = vnode.mode as u16;
                     (*buf).st_mtime = vnode.mtime as _;
-                    (*buf).st_dev = 0x52494654; // "RIFT"
+                    (*buf).st_dev = 0x52494654;
                     (*buf).st_nlink = 1;
                     (*buf).st_ino = vrift_ipc::fnv1a_hash(&entry.path) as _;
                     vfs_record!(EventType::StatHit, (*buf).st_ino, 0);
@@ -187,7 +209,7 @@ pub unsafe extern "C" fn fstat_shim(fd: c_int, buf: *mut libc_stat) -> c_int {
             }
         }
     }
-    // Default: use raw syscall (safer than dlsym-based real)
+
     crate::syscalls::macos_raw::raw_fstat64(fd, buf)
 }
 

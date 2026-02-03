@@ -710,7 +710,7 @@ mod linux_shims {
         let newfd = crate::syscalls::linux_raw::raw_dup(oldfd);
         if newfd >= 0 {
             if let Some(entry) = get_fd_entry(oldfd) {
-                track_fd(newfd, &entry.path, entry.is_vfs);
+                track_fd(newfd, &entry.path, entry.is_vfs, entry.cached_stat);
             }
         }
         newfd
@@ -729,7 +729,7 @@ mod linux_shims {
         let result = crate::syscalls::linux_raw::raw_dup2(oldfd, newfd);
         if result >= 0 {
             if let Some(entry) = get_fd_entry(oldfd) {
-                track_fd(result, &entry.path, entry.is_vfs);
+                track_fd(result, &entry.path, entry.is_vfs, entry.cached_stat);
             }
         }
         result
