@@ -804,7 +804,7 @@ mod linux_shims {
                 crate::set_errno(-ret as c_int);
                 return -1;
             }
-            return ret as c_int;
+            ret as c_int
         }
         #[cfg(target_arch = "aarch64")]
         {
