@@ -1,0 +1,64 @@
+#!/bin/bash
+# ============================================================================
+# Bug Reproduction: CLI Broken Pipe Panic
+# ============================================================================
+# Reproduction for the panic: 
+# "thread 'main' panicked at ... failed printing to stdout: Broken pipe"
+#
+# This happens because Rust's println! panics on EPIPE if the receiver
+# (like grep -q) closes the pipe early.
+
+set -e
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+VRIFT_BIN="$PROJECT_ROOT/target/release/vrift"
+
+# Setup work dir
+WORK_DIR="/tmp/vrift_repro_pipe"
+rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR/project"
+
+echo "----------------------------------------------------------------"
+echo "🐞 Reproduction: CLI Broken Pipe Panic"
+echo "----------------------------------------------------------------"
+
+# 1. Start Daemon
+pkill vriftd 2>/dev/null || true
+sleep 1
+export VRIFT_MANIFEST="$WORK_DIR/project/.vrift/manifest.lmdb"
+"$PROJECT_ROOT/target/release/vriftd" start > "$WORK_DIR/daemon.log" 2>&1 &
+DAEMON_PID=$!
+
+cleanup() {
+    kill $DAEMON_PID 2>/dev/null || true
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
+
+# Wait for daemon
+sleep 2
+
+# 2. Initialize
+cd "$WORK_DIR/project"
+"$VRIFT_BIN" init . >/dev/null 2>&1
+
+echo "🚀 Triggering pipe closure (vrift status | grep -q)..."
+
+# Run status and pipe to grep -q, capturing stderr
+"$VRIFT_BIN" status 2> "$WORK_DIR/stderr.log" | grep -q "Velo Rift Status"
+VRIFT_EXIT=${PIPESTATUS[0]}
+
+if grep -q "panicked" "$WORK_DIR/stderr.log"; then
+    echo "🔥 BUG DETECTED: CLI Panicked with Broken Pipe!"
+    cat "$WORK_DIR/stderr.log"
+    exit 0
+fi
+
+if [ $VRIFT_EXIT -ne 0 ]; then
+    echo "🔥 BUG DETECTED: CLI Exited with error $VRIFT_EXIT on broken pipe."
+    [ -s "$WORK_DIR/stderr.log" ] && cat "$WORK_DIR/stderr.log"
+    exit 0
+fi
+
+echo "✅ Test Finished: No panic detected. (The bug may already be patched or this environment handles EPIPE differently)"
+exit 1
