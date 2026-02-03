@@ -874,8 +874,11 @@ impl ShimState {
                 };
                 *crate::sync::REACTOR.get() = Some(reactor);
 
-                // Start Worker Thread via pthread
+                // Start Worker Thread via pthread BEFORE marking as ready
                 Self::spawn_worker();
+
+                // Now mark as ready for fast path in get_reactor()
+                crate::sync::mark_reactor_ready();
             }
             &crate::sync::get_reactor().unwrap().ring_buffer
         }

@@ -28,6 +28,7 @@ pub struct FdEntry {
 // Mutation (track_fd) and Read (get_fd_entry) ratio is balanced, but safety is paramount.
 
 /// Track a new FD opened for a VFS path
+#[inline(always)]
 pub fn track_fd(fd: c_int, path: &str, is_vfs: bool) {
     if fd < 0 {
         return;
@@ -38,7 +39,9 @@ pub fn track_fd(fd: c_int, path: &str, is_vfs: bool) {
         is_vfs,
     }));
 
-    if let Some(reactor) = crate::sync::get_reactor() {
+    // Safety: Reactor is guaranteed to be initialized after ShimState::init()
+    unsafe {
+        let reactor = crate::sync::get_reactor_unchecked();
         let old = reactor.fd_table.set(fd as usize, entry);
         if !old.is_null() {
             // Push old entry to RingBuffer for safe reclamation by Worker
@@ -50,11 +53,13 @@ pub fn track_fd(fd: c_int, path: &str, is_vfs: bool) {
 }
 
 /// Stop tracking an FD
+#[inline(always)]
 pub fn untrack_fd(fd: c_int) {
     if fd < 0 {
         return;
     }
-    if let Some(reactor) = crate::sync::get_reactor() {
+    unsafe {
+        let reactor = crate::sync::get_reactor_unchecked();
         let old = reactor.fd_table.remove(fd as usize);
         if !old.is_null() {
             let _ = reactor
@@ -65,16 +70,18 @@ pub fn untrack_fd(fd: c_int) {
 }
 
 /// Get a copy of the FD entry if it exists
+#[inline(always)]
 pub fn get_fd_entry(fd: c_int) -> Option<FdEntry> {
     if fd < 0 {
         return None;
     }
-    if let Some(reactor) = crate::sync::get_reactor() {
+    unsafe {
+        let reactor = crate::sync::get_reactor_unchecked();
         let entry_ptr = reactor.fd_table.get(fd as usize);
         if !entry_ptr.is_null() {
             // Safety: We assume the grace period in the RingBuffer is sufficient
             // to prevent UAF during this clone.
-            return Some(unsafe { (&*entry_ptr).clone() });
+            return Some((&*entry_ptr).clone());
         }
     }
     None
