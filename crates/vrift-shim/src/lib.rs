@@ -37,6 +37,7 @@ pub mod ipc;
 pub mod path;
 pub mod reals;
 pub mod state;
+pub mod sync;
 pub mod syscalls;
 
 extern "C" {

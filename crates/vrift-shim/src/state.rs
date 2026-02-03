@@ -1,11 +1,11 @@
 use crate::path::{PathResolver, VfsPath};
+use crate::sync::RecursiveMutex;
 use libc::{c_int, c_void};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
-use std::sync::Mutex;
 
 use crate::ipc::*;
 // use vrift_cas::CasStore;
@@ -661,11 +661,11 @@ pub(crate) struct ShimState {
     pub cas_root: std::borrow::Cow<'static, str>,
     pub vfs_prefix: std::borrow::Cow<'static, str>,
     pub socket_path: std::borrow::Cow<'static, str>,
-    pub open_fds: Mutex<HashMap<c_int, OpenFile>>,
+    pub open_fds: RecursiveMutex<HashMap<c_int, OpenFile>>,
     /// Active mmap regions (Addr -> Info)
-    pub active_mmaps: Mutex<HashMap<usize, MmapInfo>>,
+    pub active_mmaps: RecursiveMutex<HashMap<usize, MmapInfo>>,
     /// Synthetic directories for VFS readdir (DIR* pointer -> SyntheticDir)
-    pub open_dirs: Mutex<HashMap<usize, SyntheticDir>>,
+    pub open_dirs: RecursiveMutex<HashMap<usize, SyntheticDir>>,
     pub bloom_ptr: *const u8,
     /// RFC-0044 Hot Stat Cache: mmap'd manifest for O(1) stat lookup
     pub mmap_ptr: *const u8,
@@ -673,6 +673,11 @@ pub(crate) struct ShimState {
     /// Absolute path to project root
     pub project_root: String,
     pub path_resolver: PathResolver,
+    /// Cached soft FD limit to avoid syscalls in hot path (RFC-0051)
+    pub cached_soft_limit: AtomicUsize,
+    /// Packed warning state: [32-bit threshold | 32-bit timestamp] (RFC-0051)
+    /// Allows atomic updates of both values without locks.
+    pub last_usage_alert: std::sync::atomic::AtomicU64,
 }
 
 impl ShimState {
@@ -711,7 +716,76 @@ impl ShimState {
         }
     }
 
+    /// Attempt to raise RLIMIT_NOFILE to exactly 80% of the true hard cap.
+    pub(crate) fn boost_fd_limit() -> usize {
+        let mut soft_limit = 1024; // Default
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0 {
+            soft_limit = rl.rlim_cur as usize;
+            // Determine the "true" hard cap even if RLIM_INFINITY is returned
+            let hard_cap = if rl.rlim_max == libc::RLIM_INFINITY {
+                #[cfg(target_os = "macos")]
+                {
+                    let mut max_files: libc::c_int = 0;
+                    let mut size = std::mem::size_of_val(&max_files);
+                    if unsafe {
+                        libc::sysctlbyname(
+                            c"kern.maxfilesperproc".as_ptr(),
+                            &mut max_files as *mut _ as *mut _,
+                            &mut size,
+                            std::ptr::null_mut(),
+                            0,
+                        )
+                    } == 0
+                    {
+                        max_files as libc::rlim_t
+                    } else {
+                        10240 // Sane fallback
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    1048576
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                {
+                    65536
+                }
+            } else {
+                rl.rlim_max
+            };
+
+            // UX: Explicit guidance if hard limit is dangerously low
+            if hard_cap < 4096 {
+                let msg = "[vrift] ⚠️  WARNING: System FD hard limit is extremely low. This will likely cause build failures.\n\
+                     [vrift] 👉 Action: Run 'ulimit -Hn 65536' or check /etc/security/limits.conf\n";
+                unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
+            }
+
+            // Policy: Boost to EXACTLY 80% of the true hard cap.
+            let target = (hard_cap as f64 * 0.8) as libc::rlim_t;
+
+            if rl.rlim_cur < target {
+                let old_cur = rl.rlim_cur;
+                rl.rlim_cur = target;
+                if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) } == 0 {
+                    let msg = format!(
+                        "[vrift] 🚀 Optimized FD limit: {} -> {} (target: 80% of system cap)\n",
+                        old_cur, rl.rlim_cur
+                    );
+                    unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
+                    soft_limit = rl.rlim_cur as usize;
+                }
+            }
+        }
+        soft_limit
+    }
+
     pub(crate) fn init() -> Option<*mut Self> {
+        let soft_limit = Self::boost_fd_limit();
         unsafe { Self::init_logger() };
         let cas_ptr = unsafe { libc::getenv(c"VRIFT_CAS_ROOT".as_ptr()) };
         let cas_root: std::borrow::Cow<'static, str> = if cas_ptr.is_null() {
@@ -768,14 +842,16 @@ impl ShimState {
             cas_root,
             vfs_prefix: vfs_prefix.clone(),
             socket_path,
-            open_fds: Mutex::new(HashMap::new()),
-            active_mmaps: Mutex::new(HashMap::new()),
-            open_dirs: Mutex::new(HashMap::new()),
+            open_fds: RecursiveMutex::new(HashMap::new()),
+            active_mmaps: RecursiveMutex::new(HashMap::new()),
+            open_dirs: RecursiveMutex::new(HashMap::new()),
             bloom_ptr,
             mmap_ptr,
             mmap_size,
             project_root: project_root.clone(),
             path_resolver: PathResolver::new(&vfs_prefix, &project_root),
+            cached_soft_limit: AtomicUsize::new(soft_limit),
+            last_usage_alert: std::sync::atomic::AtomicU64::new(0),
         });
 
         // RFC-OPT-002: Symbol Prefetching is deferred to first syscall.
@@ -984,6 +1060,74 @@ impl ShimState {
             }
             libc::close(fd);
             bincode::deserialize(&resp_buf).ok()
+        }
+    }
+
+    /// Smart FD usage monitoring with zero-overhead, lock-free packed state.
+    /// Thresholds: 70% (Warning), 85% (Critical)
+    pub(crate) fn check_fd_usage(&self) {
+        let soft = self.cached_soft_limit.load(Ordering::Relaxed);
+        if soft == 0 {
+            return;
+        }
+
+        let count = crate::syscalls::io::OPEN_FD_COUNT.load(Ordering::Relaxed);
+        let usage_pct = (count * 100) / soft;
+
+        let msg = format!(
+            "[vrift] DEBUG: count={}, soft={}, pct={}\n",
+            count, soft, usage_pct
+        );
+        unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
+
+        // Determine current threshold level
+        let threshold = if usage_pct >= 85 {
+            85
+        } else if usage_pct >= 70 {
+            70
+        } else {
+            0
+        };
+
+        if threshold > 0 {
+            let packed = self.last_usage_alert.load(Ordering::Relaxed);
+            let last_threshold = (packed >> 32) as usize;
+            let last_time = packed & 0xFFFFFFFF;
+
+            let now = unsafe {
+                let mut ts = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+                ts.tv_sec as u64
+            };
+
+            // Condition: Higher threshold reached OR 10 seconds pass at same/higher threshold
+            if threshold > last_threshold || (threshold == last_threshold && now >= last_time + 10)
+            {
+                let new_packed = ((threshold as u64) << 32) | (now & 0xFFFFFFFF);
+                // Atomic CAS to ensure ONLY ONE thread logs at this second
+                if self
+                    .last_usage_alert
+                    .compare_exchange(packed, new_packed, Ordering::SeqCst, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    let level = if threshold >= 85 {
+                        "CRITICAL"
+                    } else {
+                        "WARNING"
+                    };
+                    let msg = format!(
+                        "[vrift] {}: FD usage at {}% ({} of {}). Build may hang soon!\n",
+                        level, usage_pct, count, soft
+                    );
+                    unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
+                }
+            }
+        } else if usage_pct < 50 && self.last_usage_alert.load(Ordering::Relaxed) != 0 {
+            // Hysteresis: Reset threshold if usage drops safely
+            self.last_usage_alert.store(0, Ordering::Release);
         }
     }
 }

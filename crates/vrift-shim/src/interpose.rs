@@ -11,8 +11,9 @@ use crate::syscalls::io::{
 #[cfg(target_os = "macos")]
 use crate::syscalls::misc::{
     chflags_shim, chmod_shim, fchmod_shim, fchmodat_shim, link_shim, linkat_shim, mkdir_shim,
-    mkdirat_shim, removexattr_shim, rename_shim, renameat_shim, rmdir_shim, setxattr_shim,
-    symlinkat_shim, truncate_shim, unlink_shim, unlinkat_shim, utimensat_shim, utimes_shim,
+    mkdirat_shim, removexattr_shim, rename_shim, renameat_shim, rmdir_shim, setrlimit_shim,
+    setxattr_shim, symlinkat_shim, truncate_shim, unlink_shim, unlinkat_shim, utimensat_shim,
+    utimes_shim,
 };
 #[cfg(target_os = "macos")]
 use crate::syscalls::mmap::{mmap_shim, munmap_shim};
@@ -117,6 +118,7 @@ extern "C" {
     fn mkdirat(dirfd: c_int, path: *const c_char, mode: mode_t) -> c_int;
     fn symlinkat(p1: *const c_char, dirfd: c_int, p2: *const c_char) -> c_int;
     fn fchmod(fd: c_int, mode: mode_t) -> c_int;
+    fn setrlimit(resource: c_int, rlp: *const libc::rlimit) -> c_int;
 }
 
 extern "C" {
@@ -1482,4 +1484,11 @@ pub static IT_SYMLINKAT: Interpose = Interpose {
 pub static IT_FCHMOD: Interpose = Interpose {
     new_func: fchmod_shim as *const (),
     old_func: fchmod as *const (),
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_SETRLIMIT: Interpose = Interpose {
+    new_func: setrlimit_shim as *const (),
+    old_func: libc::setrlimit as *const (),
 };

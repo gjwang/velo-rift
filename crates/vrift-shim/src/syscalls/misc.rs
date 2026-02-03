@@ -778,3 +778,24 @@ pub unsafe extern "C" fn utimensat_shim(
         -1
     }
 }
+#[no_mangle]
+pub unsafe extern "C" fn setrlimit_shim(resource: c_int, rlp: *const libc::rlimit) -> c_int {
+    #[cfg(target_os = "macos")]
+    let real = std::mem::transmute::<
+        *mut libc::c_void,
+        unsafe extern "C" fn(c_int, *const libc::rlimit) -> c_int,
+    >(crate::reals::REAL_SETRLIMIT.get());
+    #[cfg(target_os = "linux")]
+    let real = libc::setrlimit;
+
+    let ret = real(resource, rlp);
+
+    if ret == 0 && resource == libc::RLIMIT_NOFILE && !rlp.is_null() {
+        if let Some(state) = ShimState::get() {
+            let new_soft = (*rlp).rlim_cur as usize;
+            state.cached_soft_limit.store(new_soft, Ordering::Release);
+        }
+    }
+
+    ret
+}

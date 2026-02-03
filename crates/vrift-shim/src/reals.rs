@@ -95,3 +95,4 @@ pub static REAL_UNLINKAT: RealSymbol = RealSymbol::new("unlinkat\0");
 pub static REAL_MKDIRAT: RealSymbol = RealSymbol::new("mkdirat\0");
 pub static REAL_SYMLINKAT: RealSymbol = RealSymbol::new("symlinkat\0");
 pub static REAL_FCHMOD: RealSymbol = RealSymbol::new("fchmod\0");
+pub static REAL_SETRLIMIT: RealSymbol = RealSymbol::new("setrlimit\0");

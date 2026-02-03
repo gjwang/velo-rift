@@ -48,16 +48,15 @@ pub unsafe extern "C" fn opendir_shim(path: *const libc::c_char) -> *mut c_void 
         let ptr = Box::into_raw(syn_dir) as *mut c_void;
 
         // Track in open_dirs
-        if let Ok(mut dirs) = state.open_dirs.lock() {
-            dirs.insert(
-                ptr as usize,
-                SyntheticDir {
-                    vpath: String::new(),
-                    entries: vec![],
-                    position: 0,
-                },
-            );
-        }
+        let mut dirs = state.open_dirs.lock();
+        dirs.insert(
+            ptr as usize,
+            SyntheticDir {
+                vpath: String::new(),
+                entries: vec![],
+                position: 0,
+            },
+        );
 
         return ptr;
     }
@@ -97,39 +96,38 @@ pub unsafe extern "C" fn readdir_shim(dir: *mut c_void) -> *mut libc::dirent {
 
     // Try to read from synthetic dir if it's one of ours
     if let Some(state) = ShimState::get() {
-        if let Ok(dirs) = state.open_dirs.lock() {
-            if dirs.contains_key(&(dir as usize)) {
-                drop(dirs); // Release lock before accessing syn_dir
+        let dirs = state.open_dirs.lock();
+        if dirs.contains_key(&(dir as usize)) {
+            drop(dirs); // Release lock before accessing syn_dir
 
-                let sd = &mut *syn_dir;
-                if sd.position >= sd.entries.len() {
-                    return std::ptr::null_mut();
-                }
-
-                let entry = &sd.entries[sd.position];
-                sd.position += 1;
-
-                // Fill dirent buffer
-                DIRENT_BUF.d_ino = 1; // Synthetic inode
-                DIRENT_BUF.d_type = if entry.is_dir {
-                    libc::DT_DIR
-                } else {
-                    libc::DT_REG
-                };
-                DIRENT_BUF.d_namlen = entry.name.len() as u16;
-
-                // Copy name to buffer
-                let name_bytes = entry.name.as_bytes();
-                let copy_len = name_bytes.len().min(1023);
-                std::ptr::copy_nonoverlapping(
-                    name_bytes.as_ptr(),
-                    DIRENT_BUF.d_name.as_mut_ptr() as *mut u8,
-                    copy_len,
-                );
-                DIRENT_BUF.d_name[copy_len] = 0;
-
-                return &mut DIRENT_BUF;
+            let sd = &mut *syn_dir;
+            if sd.position >= sd.entries.len() {
+                return std::ptr::null_mut();
             }
+
+            let entry = &sd.entries[sd.position];
+            sd.position += 1;
+
+            // Fill dirent buffer
+            DIRENT_BUF.d_ino = 1; // Synthetic inode
+            DIRENT_BUF.d_type = if entry.is_dir {
+                libc::DT_DIR
+            } else {
+                libc::DT_REG
+            };
+            DIRENT_BUF.d_namlen = entry.name.len() as u16;
+
+            // Copy name to buffer
+            let name_bytes = entry.name.as_bytes();
+            let copy_len = name_bytes.len().min(1023);
+            std::ptr::copy_nonoverlapping(
+                name_bytes.as_ptr(),
+                DIRENT_BUF.d_name.as_mut_ptr() as *mut u8,
+                copy_len,
+            );
+            DIRENT_BUF.d_name[copy_len] = 0;
+
+            return &mut DIRENT_BUF;
         }
     }
 
@@ -153,11 +151,8 @@ pub unsafe extern "C" fn closedir_shim(dir: *mut c_void) -> c_int {
     // Check if this is a synthetic directory
     if let Some(state) = ShimState::get() {
         let is_synthetic = {
-            if let Ok(mut dirs) = state.open_dirs.lock() {
-                dirs.remove(&(dir as usize)).is_some()
-            } else {
-                false
-            }
+            let mut dirs = state.open_dirs.lock();
+            dirs.remove(&(dir as usize)).is_some()
         };
 
         if is_synthetic {

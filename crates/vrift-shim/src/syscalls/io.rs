@@ -5,17 +5,21 @@
 
 #[cfg(target_os = "macos")]
 use crate::state::ShimGuard;
+use crate::sync::RecursiveMutex;
 use libc::c_int;
 #[cfg(target_os = "macos")]
 use libc::c_void;
 #[cfg(target_os = "macos")]
 use libc::off_t;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Global counter for open FDs to monitor saturation (RFC-0051)
+pub static OPEN_FD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // Symbols imported from reals.rs via crate::reals
 /// Global FD tracking table: fd -> (path, is_vfs_file)
-static FD_TABLE: Mutex<Option<HashMap<c_int, FdEntry>>> = Mutex::new(None);
+static FD_TABLE: RecursiveMutex<Option<HashMap<c_int, FdEntry>>> = RecursiveMutex::new(None);
 
 #[derive(Clone, Debug)]
 pub struct FdEntry {
@@ -38,13 +42,12 @@ pub fn track_fd(fd: c_int, path: &str, is_vfs: bool) {
         is_vfs,
     };
 
-    if let Ok(mut table_guard) = FD_TABLE.lock() {
-        if table_guard.is_none() {
-            *table_guard = Some(HashMap::new());
-        }
-        if let Some(ref mut map) = *table_guard {
-            map.insert(fd, entry);
-        }
+    let mut table_guard = FD_TABLE.lock();
+    if table_guard.is_none() {
+        *table_guard = Some(HashMap::new());
+    }
+    if let Some(ref mut map) = *table_guard {
+        map.insert(fd, entry);
     }
 }
 
@@ -53,10 +56,9 @@ pub fn untrack_fd(fd: c_int) {
     if fd < 0 {
         return;
     }
-    if let Ok(mut table) = FD_TABLE.lock() {
-        if let Some(ref mut map) = *table {
-            map.remove(&fd);
-        }
+    let mut table = FD_TABLE.lock();
+    if let Some(ref mut map) = *table {
+        map.remove(&fd);
     }
 }
 
@@ -65,10 +67,9 @@ pub fn get_fd_entry(fd: c_int) -> Option<FdEntry> {
     if fd < 0 {
         return None;
     }
-    if let Ok(table) = FD_TABLE.lock() {
-        if let Some(ref map) = *table {
-            return map.get(&fd).cloned();
-        }
+    let table = FD_TABLE.lock();
+    if let Some(ref map) = *table {
+        return map.get(&fd).cloned();
     }
     None
 }
@@ -249,11 +250,18 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
         None => return crate::syscalls::macos_raw::raw_close(fd),
     };
 
+    // RFC-0051: Monitor FD usage on close (to reset warning thresholds)
+    let _ = crate::syscalls::io::OPEN_FD_COUNT.fetch_update(
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+        |val| Some(val.saturating_sub(1)),
+    );
+    state.check_fd_usage();
+
     // Check if this FD is a COW session
-    let cow_info = if let Ok(mut fds) = state.open_fds.lock() {
-        fds.remove(&fd) // Remove from tracking on close
-    } else {
-        None
+    let cow_info = {
+        let mut fds = state.open_fds.lock();
+        fds.remove(&fd)
     };
 
     // Use a hash of the FD or 0 if not tracked for general close event
