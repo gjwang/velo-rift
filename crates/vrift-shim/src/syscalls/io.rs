@@ -3,6 +3,7 @@
 //! Provides file descriptor tracking for VFS files, enabling proper
 //! handling of dup/dup2, fchdir, lseek, ftruncate, etc.
 
+use crate::state::ShimGuard;
 use libc::c_int;
 #[cfg(target_os = "macos")]
 use libc::c_void;
@@ -102,11 +103,12 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
         return crate::syscalls::macos_raw::raw_dup(oldfd);
     }
 
-    let real = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn(c_int) -> c_int>(
-        crate::reals::REAL_DUP.get(),
-    );
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return crate::syscalls::macos_raw::raw_dup(oldfd),
+    };
 
-    let newfd = real(oldfd);
+    let newfd = crate::syscalls::macos_raw::raw_dup(oldfd);
     if newfd >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
@@ -130,14 +132,15 @@ pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
         return crate::syscalls::macos_raw::raw_dup2(oldfd, newfd);
     }
 
-    let real = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn(c_int, c_int) -> c_int>(
-        crate::reals::REAL_DUP2.get(),
-    );
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return crate::syscalls::macos_raw::raw_dup2(oldfd, newfd),
+    };
 
     // If newfd was tracked, untrack it (it's being replaced)
     untrack_fd(newfd);
 
-    let result = real(oldfd, newfd);
+    let result = crate::syscalls::macos_raw::raw_dup2(oldfd, newfd);
     if result >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
@@ -216,22 +219,8 @@ pub unsafe extern "C" fn write_shim(
     buf: *const c_void,
     count: libc::size_t,
 ) -> libc::ssize_t {
-    // BUG-007: Use raw syscall during early init OR when shim not fully ready
-    // to avoid dlsym recursion and TLS pthread deadlock
-    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
-    if init_state >= 2
-        || crate::state::SHIM_STATE
-            .load(std::sync::atomic::Ordering::Acquire)
-            .is_null()
-    {
-        return crate::syscalls::macos_raw::raw_write(fd, buf, count);
-    }
-
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(c_int, *const c_void, libc::size_t) -> libc::ssize_t,
-    >(crate::reals::REAL_WRITE.get());
-    real(fd, buf, count)
+    // RFC-0051: Always use raw syscall for core I/O shims on macOS to avoid dlsym deadlocks
+    crate::syscalls::macos_raw::raw_write(fd, buf, count)
 }
 
 #[cfg(target_os = "macos")]
@@ -241,22 +230,8 @@ pub unsafe extern "C" fn read_shim(
     buf: *mut c_void,
     count: libc::size_t,
 ) -> libc::ssize_t {
-    // BUG-007: Use raw syscall during early init OR when shim not fully ready
-    // to avoid dlsym recursion and TLS pthread deadlock
-    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
-    if init_state >= 2
-        || crate::state::SHIM_STATE
-            .load(std::sync::atomic::Ordering::Acquire)
-            .is_null()
-    {
-        return crate::syscalls::macos_raw::raw_read(fd, buf, count);
-    }
-
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(c_int, *mut c_void, libc::size_t) -> libc::ssize_t,
-    >(crate::reals::REAL_READ.get());
-    real(fd, buf, count)
+    // RFC-0051: Always use raw syscall for core I/O shims on macOS to avoid dlsym deadlocks
+    crate::syscalls::macos_raw::raw_read(fd, buf, count)
 }
 
 #[cfg(target_os = "macos")]
@@ -265,26 +240,20 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     use crate::ipc::sync_ipc_manifest_reingest;
     use crate::state::{EventType, ShimGuard, ShimState};
 
-    // BUG-007: close is called during __malloc_init before dlsym is safe.
-    // Use raw syscall to completely bypass libc.
+    // BUG-007 / RFC-0051: Use raw syscall to completely bypass libc/dlsym during critical phases.
     let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
     if init_state >= 2 || crate::state::CIRCUIT_TRIPPED.load(std::sync::atomic::Ordering::Relaxed) {
         return crate::syscalls::macos_raw::raw_close(fd);
     }
 
-    // After init, we can safely use dlsym-cached version
-    let real = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn(c_int) -> c_int>(
-        crate::reals::REAL_CLOSE.get(),
-    );
-
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
-        None => return real(fd),
+        None => return crate::syscalls::macos_raw::raw_close(fd),
     };
 
     let state = match ShimState::get() {
         Some(s) => s,
-        None => return real(fd),
+        None => return crate::syscalls::macos_raw::raw_close(fd),
     };
 
     // Check if this FD is a COW session
@@ -307,7 +276,7 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
         );
 
         // Final close of the temp file before reingest
-        let res = real(fd);
+        let res = crate::syscalls::macos_raw::raw_close(fd);
 
         // Trigger reingest IPC
         // RFC-0047: ManifestReingest updates the CAS and Manifest
@@ -333,6 +302,6 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     } else {
         // Not a COW file, but might be a VFS read-only file or non-VFS file
         untrack_fd(fd);
-        real(fd)
+        crate::syscalls::macos_raw::raw_close(fd)
     }
 }

@@ -392,7 +392,14 @@ pub static LOGGER: Logger = Logger::new();
 pub(crate) unsafe fn shim_log(msg: &str) {
     LOGGER.log(msg);
     if DEBUG_ENABLED.load(Ordering::Relaxed) {
-        libc::write(2, msg.as_ptr() as *const c_void, msg.len());
+        #[cfg(target_os = "macos")]
+        {
+            crate::syscalls::macos_raw::raw_write(2, msg.as_ptr() as *const c_void, msg.len());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            libc::write(2, msg.as_ptr() as *const c_void, msg.len());
+        }
     }
 }
 
