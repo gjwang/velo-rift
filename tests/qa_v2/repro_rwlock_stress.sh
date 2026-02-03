@@ -26,6 +26,7 @@ gcc -O3 "$REPRO_SRC" -o "$REPRO_BIN" -lpthread
 
 # 2. Setup VFS Project
 WORK_DIR="/tmp/vrift_repro_stress"
+chflags -R nouchg "$WORK_DIR" 2>/dev/null || true
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/project/src"
 echo "Target" > "$WORK_DIR/project/src/target.txt"
