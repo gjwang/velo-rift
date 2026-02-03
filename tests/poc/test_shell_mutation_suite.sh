@@ -26,17 +26,37 @@ done
 
 # Setup shim environment with local PATH
 export PATH="$TEST_DIR/bin:$PATH"
-export DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
-export DYLD_FORCE_FLAT_NAMESPACE=1
+
+if [[ "$(uname)" == "Darwin" ]]; then
+    export SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
+    export SHIM_INJECT_VAR="DYLD_INSERT_LIBRARIES"
+    export DYLD_FORCE_FLAT_NAMESPACE=1
+else
+    export SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
+    export SHIM_INJECT_VAR="LD_PRELOAD"
+fi
+
+export $SHIM_INJECT_VAR="$SHIM_LIB"
 export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 
 FAILURES=0
 
 # Test 1: chmod
 echo -e "\n[Test 1] chmod 644"
-ORIGINAL=$(stat -f "%Lp" "$VELO_PROJECT_ROOT/test.txt")
-"$TEST_DIR/bin/chmod" 644 "$VELO_PROJECT_ROOT/test.txt" 2>/dev/null
-NEW=$(stat -f "%Lp" "$VELO_PROJECT_ROOT/test.txt")
+if [[ "$(uname)" == "Darwin" ]]; then
+    ORIGINAL=$(stat -f "%Lp" "$VELO_PROJECT_ROOT/test.txt")
+else
+    ORIGINAL=$(stat -c "%a" "$VELO_PROJECT_ROOT/test.txt")
+fi
+
+env "$SHIM_INJECT_VAR=$SHIM_LIB" "$TEST_DIR/bin/chmod" 644 "$VELO_PROJECT_ROOT/test.txt" 2>/dev/null
+
+if [[ "$(uname)" == "Darwin" ]]; then
+    NEW=$(stat -f "%Lp" "$VELO_PROJECT_ROOT/test.txt")
+else
+    NEW=$(stat -c "%a" "$VELO_PROJECT_ROOT/test.txt")
+fi
+
 if [[ "$ORIGINAL" != "$NEW" ]]; then
     echo "  ❌ FAIL: chmod bypassed (mode: $ORIGINAL -> $NEW)"
     ((FAILURES++))
@@ -47,7 +67,7 @@ fi
 # Test 2: rm
 echo -e "\n[Test 2] rm"
 echo "DELETABLE" > "$VELO_PROJECT_ROOT/delete_me.txt"
-if "$TEST_DIR/bin/rm" "$VELO_PROJECT_ROOT/delete_me.txt" 2>/dev/null; then
+if env "$SHIM_INJECT_VAR=$SHIM_LIB" "$TEST_DIR/bin/rm" "$VELO_PROJECT_ROOT/delete_me.txt" 2>/dev/null; then
     if [[ ! -f "$VELO_PROJECT_ROOT/delete_me.txt" ]]; then
         echo "  ❌ FAIL: rm bypassed (file deleted)"
         ((FAILURES++))
@@ -61,7 +81,7 @@ fi
 # Test 3: mv (rename)
 echo -e "\n[Test 3] mv (rename within VFS)"
 echo "MOVABLE" > "$VELO_PROJECT_ROOT/move_me.txt"
-if "$TEST_DIR/bin/mv" "$VELO_PROJECT_ROOT/move_me.txt" "$VELO_PROJECT_ROOT/moved.txt" 2>/dev/null; then
+if env "$SHIM_INJECT_VAR=$SHIM_LIB" "$TEST_DIR/bin/mv" "$VELO_PROJECT_ROOT/move_me.txt" "$VELO_PROJECT_ROOT/moved.txt" 2>/dev/null; then
     echo "  ⚠️  mv succeeded - check if virtualized or bypassed"
 else
     echo "  ✅ PASS: mv blocked"
@@ -70,7 +90,7 @@ fi
 # Test 4: cp (copy)
 echo -e "\n[Test 4] cp (copy within VFS)"
 echo "ORIGINAL" > "$VELO_PROJECT_ROOT/original.txt"
-if "$TEST_DIR/bin/cp" "$VELO_PROJECT_ROOT/original.txt" "$VELO_PROJECT_ROOT/copy.txt" 2>/dev/null; then
+if env "$SHIM_INJECT_VAR=$SHIM_LIB" "$TEST_DIR/bin/cp" "$VELO_PROJECT_ROOT/original.txt" "$VELO_PROJECT_ROOT/copy.txt" 2>/dev/null; then
     if [[ -f "$VELO_PROJECT_ROOT/copy.txt" ]]; then
         echo "  ✅ PASS: cp succeeded (expected for read-only source)"
     fi
@@ -80,10 +100,21 @@ fi
 
 # Test 5: touch (mtime modification)
 echo -e "\n[Test 5] touch (mtime change)"
-ORIGINAL_MTIME=$(stat -f "%m" "$VELO_PROJECT_ROOT/test.txt")
+if [[ "$(uname)" == "Darwin" ]]; then
+    ORIGINAL_MTIME=$(stat -f "%m" "$VELO_PROJECT_ROOT/test.txt")
+else
+    ORIGINAL_MTIME=$(stat -c "%Y" "$VELO_PROJECT_ROOT/test.txt")
+fi
+
 sleep 1
-"$TEST_DIR/bin/touch" "$VELO_PROJECT_ROOT/test.txt" 2>/dev/null
-NEW_MTIME=$(stat -f "%m" "$VELO_PROJECT_ROOT/test.txt")
+env "$SHIM_INJECT_VAR=$SHIM_LIB" "$TEST_DIR/bin/touch" "$VELO_PROJECT_ROOT/test.txt" 2>/dev/null
+
+if [[ "$(uname)" == "Darwin" ]]; then
+    NEW_MTIME=$(stat -f "%m" "$VELO_PROJECT_ROOT/test.txt")
+else
+    NEW_MTIME=$(stat -c "%Y" "$VELO_PROJECT_ROOT/test.txt")
+fi
+
 if [[ "$ORIGINAL_MTIME" != "$NEW_MTIME" ]]; then
     echo "  ❌ FAIL: touch bypassed (mtime changed)"
     ((FAILURES++))

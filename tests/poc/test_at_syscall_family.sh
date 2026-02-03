@@ -19,7 +19,16 @@ echo "at_test_content" > "$TEST_DIR/subdir/test.txt"
 export TEST_DIR="$TEST_DIR"
 
 # Test AT syscalls with Python
-DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib" DYLD_FORCE_FLAT_NAMESPACE=1 python3 << 'EOF'
+if [[ "$(uname)" == "Darwin" ]]; then
+    export SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
+    export SHIM_INJECT_VAR="DYLD_INSERT_LIBRARIES"
+    export DYLD_FORCE_FLAT_NAMESPACE=1
+else
+    export SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
+    export SHIM_INJECT_VAR="LD_PRELOAD"
+fi
+
+env "$SHIM_INJECT_VAR=$SHIM_LIB" python3 << 'EOF'
 import os
 import sys
 
