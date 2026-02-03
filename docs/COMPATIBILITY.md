@@ -94,10 +94,10 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 | **`flock`** | Control | ✅ | ✅ | ✅ | `test_gap_flock_semantic` | Daemon Lock Manager |
 | **`rename`** | Mutation | ✅ | ✅ | ✅ | - | VFS: EROFS guard |
 | **`unlink`** | Mutation | ✅ | ✅ | ✅ | - | VFS: EROFS guard |
-| **`mkdir`** | Mutation | ⏳ | ⏳ | ✅ | - | VFS: EROFS guard |
+| **`mkdir`** | Mutation | ✅ | ✅ | ✅ | - | VFS: EROFS guard |
 | **`rmdir`** | Mutation | ✅ | ✅ | ✅ | - | VFS: EROFS guard |
-| **`chmod`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
-| **`chown`** | Mutation | ⏳ | ⏳ | ⏳ | - | Passthrough (correct) |
+| **`chmod`** | Mutation | ✅ | ✅ | ⏳ | - | VFS: EROFS guard |
+| **`chown`** | Mutation | ➖ | ➖ | ➖ | - | Passthrough by design |
 | **`utimes`** | Mutation | ✅ | ✅ | ⏳ | `test_gap_utimes` | VFS mtime via IPC |
 | **`statx`** | Metadata | ❌ | ❌ | ⏳ | `test_statx_*` | Linux-only |
 | **`getdents`** | Discovery | ❌ | ❌ | ⏳ | - | Linux raw syscall |
@@ -208,13 +208,14 @@ These are "invisible" behaviors discovered during deep forensic audit that may c
 ## 🚩 Passthrough Gap Summary
 
 > All gaps are now tracked in the **Unified Syscall Registry** table above.
-> Look for rows with Status = ⏳ (Pending) to see remaining work.
+> Look for rows with Status = ⏳ (Pending) or ➖ (By Design) to see remaining work.
 
 **Remaining Work (macOS):**
-- **P2 (Low)**: `mkdir`, `chmod`, `chown`, `utimes` - Passthrough is correct for compile workflows
+- **P3 (Deferred)**: `chown` - Passthrough by design (not needed for compile workflows)
 
 **Completed (macOS):**
-- ✅ `unlink`, `rename`, `rmdir` - VFS paths return EROFS
+- ✅ `unlink`, `rename`, `rmdir`, `mkdir`, `chmod` - VFS paths return EROFS
+- ✅ `utimes` - VFS mtime via IPC
 
 
 ## 📜 POSIX Compliance Matrix (Syscall Level)
