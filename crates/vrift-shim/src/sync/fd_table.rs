@@ -2,12 +2,14 @@ use crate::syscalls::io::FdEntry;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-const TIER1_SIZE: usize = 1024;
+// RFC-0051: Tiered atomic array for lock-free FD tracking
+// 256K FDs should cover 99.9% of real-world scenarios while saving memory
+const TIER1_SIZE: usize = 256;
 const TIER2_SIZE: usize = 1024;
-pub const MAX_FDS: usize = TIER1_SIZE * TIER2_SIZE;
+pub const MAX_FDS: usize = TIER1_SIZE * TIER2_SIZE; // 262,144 FDs
 
 /// A tiered atomic array for wait-free FD tracking.
-/// Supports up to 1,048,576 FDs.
+/// Supports up to 262,144 FDs with lazy tier-2 allocation.
 #[repr(align(64))]
 pub struct FdTable {
     // Level 1: Sparse array of chunks
