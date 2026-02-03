@@ -28,11 +28,19 @@ done
 export PATH="$TEST_DIR/bin:$PATH"
 
 if [[ "$(uname)" == "Darwin" ]]; then
-    export SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
+    if [[ -f "${PROJECT_ROOT}/target/release/libvrift_shim.dylib" ]]; then
+        export SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_shim.dylib"
+    else
+        export SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.dylib"
+    fi
     export SHIM_INJECT_VAR="DYLD_INSERT_LIBRARIES"
     export DYLD_FORCE_FLAT_NAMESPACE=1
 else
-    export SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
+    if [[ -f "${PROJECT_ROOT}/target/release/libvrift_shim.so" ]]; then
+        export SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_shim.so"
+    else
+        export SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_shim.so"
+    fi
     export SHIM_INJECT_VAR="LD_PRELOAD"
 fi
 
