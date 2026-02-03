@@ -117,12 +117,12 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 | **`dup2`** | FD Ops | ✅ | ✅ | ⏳ | - | FD tracking |
 | **`lseek`** | FD Ops | ✅ | ✅ | ⏳ | - | FD passthrough |
 | **`fchdir`** | Namespace | ✅ | ✅ | ⏳ | - | Virtual CWD via FD |
-| **`statx`** | Metadata | ⏳ | N/A | ⏳ | `test_statx_interception` | Linux-only (macOS has no statx) |
+| **`statx`** | Metadata | ✅ | N/A | ✅ | `test_statx_interception` | Linux-only (Rust Toolchain support) |
 | **`getdents`** | Discovery | ⏳ | N/A | ⏳ | (via `test_opendir_*`) | Linux raw syscall (macOS via readdir) |
-| **`unlinkat`** | Mutation | ⏳ | ⏳ | ⏳ | `test_gap_unlinkat_bypass` | **GAP: Can bypass VFS via dirfd** |
-| **`mkdirat`** | Mutation | ⏳ | ⏳ | ⏳ | `test_gap_mkdirat_bypass` | **GAP: Can bypass VFS via dirfd** |
-| **`symlinkat`** | Mutation | ⏳ | ⏳ | ⏳ | `test_gap_symlinkat_bypass` | **GAP: Can bypass VFS via dirfd** |
-| **`fchmod`** | Permission | ⏳ | ⏳ | ⏳ | `test_gap_fchmod_bypass` | **GAP: Can chmod via FD** |
+| **`unlinkat`** | Mutation | ✅ | ✅ | ✅ | `test_gap_unlinkat_bypass` | VFS: EROFS guard |
+| **`mkdirat`** | Mutation | ✅ | ✅ | ✅ | `test_gap_mkdirat_bypass` | VFS: EROFS guard |
+| **`symlinkat`** | Mutation | ✅ | ✅ | ✅ | `test_gap_symlinkat_bypass` | VFS: EROFS guard |
+| **`fchmod`** | Permission | ✅ | ✅ | ✅ | `test_gap_fchmod_bypass` | VFS: EROFS guard (F_GETPATH/procfs) |
 | **`futimens`** | Time | ⏳ | ⏳ | ⏳ | `test_gap_futimens_bypass` | **GAP: Can modify times via FD** |
 | **`sendfile`** | I/O | ⏳ | ⏳ | ⏳ | `test_gap_sendfile_bypass` | **GAP: Copy data between FDs** |
 | **`copy_file_range`** | I/O | ⏳ | N/A | ⏳ | `test_gap_copy_file_range` | **GAP: Copy data between FDs (Linux)** |
@@ -133,11 +133,7 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 
 | Syscall | Risk | Priority | Category | POC Test |
 |---------|------|----------|----------|----------|
-| `unlinkat` | PROVEN BYPASS: Delete VFS files via dirfd | **P0** | Mutation | [sh](file:///Users/antigravity/rust_source/vrift_qa/tests/poc/test_gap_unlinkat_bypass.sh) |
-| `mkdirat` | PROVEN BYPASS: Create dirs in VFS via dirfd | **P0** | Mutation | [sh](file:///Users/antigravity/rust_source/vrift_qa/tests/poc/test_gap_mkdirat_bypass.sh) |
 | `exchangedata` | Atomic swap of virtual files with real files | **P0** | Mutation (macOS) | ⏳ TBD |
-| `symlinkat` | PROVEN BYPASS: Create symlinks in VFS | **P1** | Mutation | [C](file:///Users/antigravity/rust_source/vrift_qa/tests/poc/test_symlinkat_gap.c) |
-| `fchmod` | PROVEN BYPASS: Change perms via FD (CAS risk) | **P1** | Permission | [sh](file:///Users/antigravity/rust_source/vrift_qa/tests/poc/test_gap_fchmod_bypass.sh) |
 | `fchown`, `fchownat` | Change ownership via FD | **P1** | Permission | ⏳ TBD |
 | `readlinkat` | Read virtual symlinks via dirfd | **P1** | Path | ⏳ TBD |
 | `creat` | Create files bypassing open_shim logic | **P2** | Mutation | ⏳ TBD |

@@ -272,6 +272,13 @@ enum ConfigCommands {
 }
 
 fn main() -> Result<()> {
+    // BUG-008: Reset SIGPIPE handler to default to avoid panics when piping output (e.g. `vrift status | head`)
+    // Rust's default behavior ignores SIGPIPE and panics on print!, which is noisy for CLI tools.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

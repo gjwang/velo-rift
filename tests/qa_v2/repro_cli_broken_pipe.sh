@@ -55,6 +55,12 @@ if grep -q "panicked" "$WORK_DIR/stderr.log"; then
 fi
 
 if [ $VRIFT_EXIT -ne 0 ]; then
+    # 141 = 128 + 13 (SIGPIPE). This is expected behavior for unix tools (e.g. yes | header).
+    if [ $VRIFT_EXIT -eq 141 ]; then
+         echo "✅ Test Finished: CLI terminated gracefully with SIGPIPE (141). Panic Fixed."
+         exit 0
+    fi
+
     echo "🔥 BUG DETECTED: CLI Exited with error $VRIFT_EXIT on broken pipe."
     [ -s "$WORK_DIR/stderr.log" ] && cat "$WORK_DIR/stderr.log"
     exit 0
