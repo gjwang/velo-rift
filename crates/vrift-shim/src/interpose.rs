@@ -524,6 +524,143 @@ mod linux_shims {
         }
         ret
     }
+
+    // ========================================================================
+    // P0: Core I/O shims
+    // ========================================================================
+
+    #[no_mangle]
+    pub unsafe extern "C" fn close(fd: c_int) -> c_int {
+        use crate::syscalls::io::untrack_fd;
+
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_close(fd);
+        }
+
+        let _guard = match crate::state::ShimGuard::enter() {
+            Some(g) => g,
+            None => return crate::syscalls::linux_raw::raw_close(fd),
+        };
+
+        untrack_fd(fd);
+        crate::syscalls::linux_raw::raw_close(fd)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read(
+        fd: c_int,
+        buf: *mut c_void,
+        count: libc::size_t,
+    ) -> libc::ssize_t {
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_read(fd, buf, count);
+        }
+        crate::syscalls::linux_raw::raw_read(fd, buf, count)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write(
+        fd: c_int,
+        buf: *const c_void,
+        count: libc::size_t,
+    ) -> libc::ssize_t {
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_write(fd, buf, count);
+        }
+        crate::syscalls::linux_raw::raw_write(fd, buf, count)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_stat(path, buf);
+        }
+        crate::syscalls::linux_raw::raw_stat(path, buf)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn stat64(path: *const c_char, buf: *mut libc::stat) -> c_int {
+        stat(path, buf)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_lstat(path, buf);
+        }
+        crate::syscalls::linux_raw::raw_lstat(path, buf)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn lstat64(path: *const c_char, buf: *mut libc::stat) -> c_int {
+        lstat(path, buf)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut libc::stat) -> c_int {
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_fstat(fd, buf);
+        }
+        crate::syscalls::linux_raw::raw_fstat(fd, buf)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn fstat64(fd: c_int, buf: *mut libc::stat) -> c_int {
+        fstat(fd, buf)
+    }
+
+    // ========================================================================
+    // P1: FD tracking shims
+    // ========================================================================
+
+    #[no_mangle]
+    pub unsafe extern "C" fn dup(oldfd: c_int) -> c_int {
+        use crate::syscalls::io::{get_fd_entry, track_fd};
+
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_dup(oldfd);
+        }
+
+        let newfd = crate::syscalls::linux_raw::raw_dup(oldfd);
+        if newfd >= 0 {
+            if let Some(entry) = get_fd_entry(oldfd) {
+                track_fd(newfd, &entry.path, entry.is_vfs);
+            }
+        }
+        newfd
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn dup2(oldfd: c_int, newfd: c_int) -> c_int {
+        use crate::syscalls::io::{get_fd_entry, track_fd, untrack_fd};
+
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_dup2(oldfd, newfd);
+        }
+
+        untrack_fd(newfd);
+        let result = crate::syscalls::linux_raw::raw_dup2(oldfd, newfd);
+        if result >= 0 {
+            if let Some(entry) = get_fd_entry(oldfd) {
+                track_fd(result, &entry.path, entry.is_vfs);
+            }
+        }
+        result
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn dup3(oldfd: c_int, newfd: c_int, _flags: c_int) -> c_int {
+        // dup3 with flags=0 is essentially dup2
+        dup2(oldfd, newfd)
+    }
 }
 
 #[cfg(target_os = "macos")]

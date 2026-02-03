@@ -8,6 +8,8 @@ use libc::c_int;
 use libc::c_void;
 #[cfg(target_os = "macos")]
 use libc::off_t;
+#[cfg(target_os = "linux")]
+use libc::{c_void, off_t};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
