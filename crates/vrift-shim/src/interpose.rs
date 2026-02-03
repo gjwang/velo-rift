@@ -447,6 +447,19 @@ mod linux_shims {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_unlinkat(dirfd, path, flags);
+        }
+
+        if let Some(res) = crate::syscalls::misc::block_vfs_mutation(path) {
+            return res;
+        }
+        crate::syscalls::linux_raw::raw_unlinkat(dirfd, path, flags)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn chmod(path: *const c_char, mode: mode_t) -> c_int {
         // Double-guard: check INITIALIZING first
         let init_state =
@@ -487,6 +500,19 @@ mod linux_shims {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: mode_t) -> c_int {
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode);
+        }
+
+        if let Some(res) = crate::syscalls::misc::block_vfs_mutation(path) {
+            return res;
+        }
+        crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int {
         let mut ret = crate::syscalls::misc::rename_shim_linux(old, new);
         if ret == -2 {
@@ -524,6 +550,27 @@ mod linux_shims {
             }
         }
         ret
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn renameat(
+        olddirfd: c_int,
+        old: *const c_char,
+        newdirfd: c_int,
+        new: *const c_char,
+    ) -> c_int {
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_renameat(olddirfd, old, newdirfd, new);
+        }
+
+        if let Some(res) = crate::syscalls::misc::block_vfs_mutation(old) {
+            return res;
+        }
+        if let Some(res) = crate::syscalls::misc::block_vfs_mutation(new) {
+            return res;
+        }
+        crate::syscalls::linux_raw::raw_renameat(olddirfd, old, newdirfd, new)
     }
 
     // ========================================================================
