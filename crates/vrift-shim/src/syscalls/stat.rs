@@ -344,7 +344,7 @@ pub unsafe extern "C" fn statx_shim(
                 (*buf).stx_nlink = 1;
                 (*buf).stx_mtime.tv_sec = entry.mtime as _;
                 (*buf).stx_blksize = 4096;
-                (*buf).stx_blocks = (entry.size + 511) / 512;
+                (*buf).stx_blocks = entry.size.div_ceil(512);
                 vfs_record!(EventType::StatHit, (*buf).stx_ino, 0);
                 return 0;
             }
