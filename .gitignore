@@ -85,3 +85,9 @@ tests/poc/test_*_root/
 tests/poc/workdir/
 *.log
 
+
+# QA compiled binaries
+tests/qa_v2/mini_read
+tests/qa_v2/mini_mkdir
+tests/qa_v2/repro_rwlock_stress
+tests/qa_v2/repro_rwlock_stress.dSYM
