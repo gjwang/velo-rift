@@ -19,6 +19,10 @@ The deep forensic audit and Proof of Failure (PoF) suite v2.0 have confirmed the
         -   Replaced `std::env::var()` with `libc::getenv()` (TLS-free)
         -   Added `passthrough_if_init!` macro for consistent INITIALIZING state checks
         -   Corrected state check logic: `INITIALIZING >= 2` (not `!= 0`) - states 0/1 are TLS-safe
+    -   **Raw Syscall Coverage (BUG-007 Resolution)**:
+        -   20 raw syscall functions in `macos_raw.rs` (ARM64 + x86_64 + Linux fallback)
+        -   Bootstrap-critical syscalls bypass libc entirely during dyld init
+        -   Mutation shims use `quick_block_vfs_mutation()` for VFS check even in raw path
 3.  **Linux VFS Activation Verified**:
     -   **Core VFS**: `open`, `stat`, and CoW mechanisms verified on Linux x86_64 (Kernel 5.15+).
     -   **CI Status**: Tiers 1-4 passing (including E2E and Docker regression suites).
@@ -116,6 +120,24 @@ Velo Rift enforces strict security boundaries to prevent CAS-based attacks.
 | `VRIFT_VFS_PREFIX` | Virtual mount point. | `/vrift` | Path projection root. |
 | `VRIFT_DEBUG` | Enables stderr logging. | Disabled | Diagnostic stream. |
 | `VRIFT_SHIM_PATH` | Path to the `.dylib`/`.so`. | Internal | Dynamic injection. |
+
+---
+
+## 🔧 Raw Syscall Reference (BUG-007 Resolution)
+
+The following raw syscalls bypass libc entirely during dyld bootstrap, preventing deadlock:
+
+| Category | Syscalls | ARM64 SYS# |
+|----------|----------|------------|
+| I/O | read, write, close, dup, dup2, lseek, ftruncate | 3,4,6,41,90,199,201 |
+| Stat | fstat, stat, lstat, access | 339,338,340,33 |
+| Memory | mmap, munmap | 197,73 |
+| File | open, openat, fcntl, chmod | 5,463,92,15 |
+| Mutation | unlink, rmdir, mkdir, truncate | 10,137,136,200 |
+
+**Hardened Mutation Shims** (use `quick_block_vfs_mutation` in raw path):
+- `chmod_shim`, `unlink_shim`, `rmdir_shim`, `mkdir_shim`, `truncate_shim`
+- `fchmodat_shim`, `chflags_shim`, `setxattr_shim`, `removexattr_shim`, `utimes_shim`
 
 ---
 

@@ -411,11 +411,21 @@ pub unsafe extern "C" fn fchmodat_shim(
     mode: libc::mode_t,
     flags: c_int,
 ) -> c_int {
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
+        }
+        // No raw syscall for fchmodat, use real function
+    }
     let real = std::mem::transmute::<
         *mut libc::c_void,
         unsafe extern "C" fn(c_int, *const c_char, libc::mode_t, c_int) -> c_int,
     >(crate::reals::REAL_FCHMODAT.get());
-    passthrough_if_init!(real, dirfd, path, mode, flags);
     block_vfs_mutation(path).unwrap_or_else(|| real(dirfd, path, mode, flags))
 }
 
@@ -447,11 +457,20 @@ pub unsafe extern "C" fn truncate_shim(path: *const c_char, length: libc::off_t)
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn chflags_shim(path: *const c_char, flags: libc::c_uint) -> c_int {
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
+        }
+    }
     let real = std::mem::transmute::<
         *mut libc::c_void,
         unsafe extern "C" fn(*const c_char, libc::c_uint) -> c_int,
     >(crate::reals::REAL_CHFLAGS.get());
-    passthrough_if_init!(real, path, flags);
     block_vfs_mutation(path).unwrap_or_else(|| real(path, flags))
 }
 
@@ -467,6 +486,16 @@ pub unsafe extern "C" fn setxattr_shim(
     position: u32,
     options: c_int,
 ) -> c_int {
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
+        }
+    }
     let real = std::mem::transmute::<
         *mut libc::c_void,
         unsafe extern "C" fn(
@@ -478,7 +507,6 @@ pub unsafe extern "C" fn setxattr_shim(
             c_int,
         ) -> c_int,
     >(crate::reals::REAL_SETXATTR.get());
-    passthrough_if_init!(real, path, name, value, size, position, options);
     block_vfs_mutation(path).unwrap_or_else(|| real(path, name, value, size, position, options))
 }
 
@@ -489,11 +517,20 @@ pub unsafe extern "C" fn removexattr_shim(
     name: *const c_char,
     options: c_int,
 ) -> c_int {
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
+        }
+    }
     let real = std::mem::transmute::<
         *mut libc::c_void,
         unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int,
     >(crate::reals::REAL_REMOVEXATTR.get());
-    passthrough_if_init!(real, path, name, options);
     block_vfs_mutation(path).unwrap_or_else(|| real(path, name, options))
 }
 
@@ -505,11 +542,20 @@ pub unsafe extern "C" fn removexattr_shim(
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn utimes_shim(path: *const c_char, times: *const libc::timeval) -> c_int {
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
+        }
+    }
     let real = std::mem::transmute::<
         *mut libc::c_void,
         unsafe extern "C" fn(*const c_char, *const libc::timeval) -> c_int,
     >(crate::reals::REAL_UTIMES.get());
-    passthrough_if_init!(real, path, times);
     block_vfs_mutation(path).unwrap_or_else(|| real(path, times))
 }
 
