@@ -92,12 +92,12 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 | **`dlsym`** | Dynamic | ✅ | ✅ | ⏳ | `test_dlsym_*` | Symbol binding |
 | **`fcntl`** | Control | ✅ | ✅ | ✅ | `test_fcntl_*` | Flags tracking |
 | **`flock`** | Control | ✅ | ✅ | ✅ | `test_gap_flock_semantic` | Daemon Lock Manager |
-| **`rename`** | Mutation | ✅ | ✅ | ✅ | - | VFS: EROFS guard |
-| **`unlink`** | Mutation | ✅ | ✅ | ✅ | - | VFS: EROFS guard |
-| **`mkdir`** | Mutation | ✅ | ✅ | ✅ | - | VFS: EROFS guard |
-| **`rmdir`** | Mutation | ✅ | ✅ | ✅ | - | VFS: EROFS guard |
-| **`chmod`** | Mutation | ✅ | ✅ | ⏳ | - | VFS: EROFS guard |
-| **`chown`** | Mutation | ➖ | ➖ | ➖ | - | Passthrough by design |
+| **`rename`** | Mutation | ✅ | ✅ | ✅ | `test_gap_boundary_rename`, `test_rfc0047_rename_vfs` | VFS: EROFS guard |
+| **`unlink`** | Mutation | ✅ | ✅ | ✅ | `test_fail_unlink_cas`, `test_rfc0047_unlink_vfs` | VFS: EROFS guard |
+| **`mkdir`** | Mutation | ✅ | ✅ | ✅ | `test_mkdir_recursive`, `test_rfc0047_mkdir_vfs` | VFS: EROFS guard |
+| **`rmdir`** | Mutation | ✅ | ✅ | ✅ | `test_rfc0047_rmdir_vfs` | VFS: EROFS guard |
+| **`chmod`** | Mutation | ✅ | ✅ | ⏳ | `test_shell_chmod_interception` | VFS: EROFS guard |
+| **`chown`** | Mutation | ➖ | ➖ | ➖ | (via `test_gap_mutation_perimeter`) | Passthrough by design |
 | **`utimes`** | Mutation | ✅ | ✅ | ⏳ | `test_gap_utimes` | VFS mtime via IPC |
 | **`statx`** | Metadata | ❌ | ❌ | ⏳ | `test_statx_interception` | Linux-only |
 | **`getdents`** | Discovery | ❌ | ❌ | ⏳ | (via `test_opendir_*`) | Linux raw syscall |
