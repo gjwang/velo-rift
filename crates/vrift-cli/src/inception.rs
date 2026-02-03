@@ -37,9 +37,12 @@ const BOX_V: &str = "│";
 /// Enter VFS mode by spawning a new interactive subshell
 ///
 /// This is the primary UX - no eval needed!
-/// Usage: `vrift` or `vrift shell`
-pub fn cmd_shell(project_dir: &Path) -> Result<()> {
+pub async fn cmd_shell(project_dir: &Path) -> Result<()> {
+    let _ = crate::daemon::connect_to_daemon(project_dir).await;
     use std::process::Command;
+
+    // RFC-0052: Manage session persistence
+    let _session = crate::active::activate(project_dir, crate::active::ProjectionMode::Solid)?;
 
     let vrift_dir = project_dir.join(".vrift");
     let project_root = project_dir.canonicalize().context("resolve project path")?;
@@ -150,7 +153,13 @@ pub fn cmd_shell(project_dir: &Path) -> Result<()> {
 }
 
 /// Generate shell script for `eval "$(vrift inception)"`
-pub fn cmd_inception(project_dir: &Path) -> Result<()> {
+pub async fn cmd_inception(project_dir: &Path) -> Result<()> {
+    // RFC-0052: Ensure daemon is running
+    let _ = crate::daemon::connect_to_daemon(project_dir).await;
+
+    // RFC-0052: Manage session persistence
+    let _session = crate::active::activate(project_dir, crate::active::ProjectionMode::Solid)?;
+
     let vrift_dir = project_dir.join(".vrift");
 
     // Check if this is a valid VFS project
@@ -262,15 +271,9 @@ pub fn cmd_inception(project_dir: &Path) -> Result<()> {
 
 /// Generate shell script for exiting inception mode
 pub fn cmd_wake() -> Result<()> {
-    // Check if in inception
-    if env::var("VRIFT_INCEPTION").is_err() {
-        eprintln!(
-            "{} {}",
-            WARN,
-            style("Not in inception mode. Nothing to wake from.").yellow()
-        );
-        std::process::exit(0);
-    }
+    // RFC-0052: Deactivate persistent session
+    let project_root = env::var("VRIFT_PROJECT_ROOT").unwrap_or_else(|_| ".".to_string());
+    let _ = crate::active::deactivate(Path::new(&project_root));
 
     // Theatrical wake animation (to stderr)
     show_wake_animation();

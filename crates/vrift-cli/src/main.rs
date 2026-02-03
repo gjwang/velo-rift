@@ -211,6 +211,12 @@ enum Commands {
         shell: String,
     },
 
+    /// Service management (vriftd background service)
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommands,
+    },
+
     /// Configuration management
     Config {
         #[command(subcommand)]
@@ -226,6 +232,16 @@ enum DaemonCommands {
         #[arg(short, long, value_name = "DIR")]
         directory: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommands {
+    /// Install vriftd as a background service
+    Install,
+    /// Uninstall vriftd background service
+    Uninstall,
+    /// Restart vriftd background service
+    Restart,
 }
 
 #[derive(Subcommand)]
@@ -293,7 +309,7 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
         Some(cmd) => cmd,
         None => {
             let dir = std::env::current_dir().unwrap();
-            return inception::cmd_shell(&dir);
+            return inception::cmd_shell(&dir).await;
         }
     };
 
@@ -379,14 +395,19 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
         }
         Commands::Init { directory } => {
             let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
-            cmd_init(&dir)
+            cmd_init(&dir).await
         }
         Commands::Inception { directory } => {
             let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
-            inception::cmd_inception(&dir)
+            inception::cmd_inception(&dir).await
         }
         Commands::Wake => inception::cmd_wake(),
         Commands::Hook { shell } => inception::cmd_hook(&shell),
+        Commands::Service { command } => match command {
+            ServiceCommands::Install => cmd_service_install(),
+            ServiceCommands::Uninstall => cmd_service_uninstall(),
+            ServiceCommands::Restart => cmd_service_restart(),
+        },
         Commands::Config { command } => cmd_config(command),
     }
 }
@@ -394,7 +415,7 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
 /// Initialize a Velo Rift project and enter inception mode
 ///
 /// Usage: eval "$(vrift init)"
-fn cmd_init(directory: &Path) -> Result<()> {
+async fn cmd_init(directory: &Path) -> Result<()> {
     use console::{style, Emoji};
 
     static CHECK: Emoji<'_, '_> = Emoji("✔ ", "[ok] ");
@@ -414,16 +435,16 @@ fn cmd_init(directory: &Path) -> Result<()> {
             style(vrift_dir.display()).dim()
         );
         // Already initialized, just enter inception
-        return inception::cmd_inception(directory);
+        return inception::cmd_inception(directory).await;
     }
 
     // Create .vrift directory structure
     fs::create_dir_all(&vrift_dir)?;
     fs::create_dir_all(vrift_dir.join("bin"))?;
 
-    // Create empty manifest placeholder
+    // Create manifest.lmdb directory (LMDB needs a directory)
     let manifest_path = vrift_dir.join("manifest.lmdb");
-    fs::File::create(&manifest_path)?;
+    fs::create_dir_all(&manifest_path)?;
 
     // Output success (to stderr so it doesn't interfere with eval)
     eprintln!();
@@ -444,7 +465,7 @@ fn cmd_init(directory: &Path) -> Result<()> {
     eprintln!();
 
     // Now auto-enter inception mode
-    inception::cmd_inception(directory)
+    inception::cmd_inception(directory).await
 }
 
 /// Configuration management commands
@@ -1504,6 +1525,197 @@ async fn cmd_watch(cas_root: &Path, directory: &Path, output: &Path) -> Result<(
                 break;
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Install vriftd as a background service
+fn cmd_service_install() -> Result<()> {
+    let current_exe = std::env::current_exe()?;
+    let bin_dir = current_exe.parent().context("Failed to get bin dir")?;
+    let vriftd_bin = bin_dir.join("vriftd");
+
+    if !vriftd_bin.exists() {
+        anyhow::bail!("vriftd binary not found in {}", bin_dir.display());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        let agents_dir = home.join("Library/LaunchAgents");
+        std::fs::create_dir_all(&agents_dir)?;
+
+        let plist_path = agents_dir.join("sh.velo.vriftd.plist");
+        let plist_content = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>sh.velo.vriftd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+        <string>start</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vriftd.err.log</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/vriftd.out.log</string>
+</dict>
+</plist>"#,
+            vriftd_bin.display()
+        );
+
+        std::fs::write(&plist_path, plist_content)?;
+        println!("Created launchd agent: {}", plist_path.display());
+
+        // Load the agent
+        let status = std::process::Command::new("launchctl")
+            .arg("load")
+            .arg(&plist_path)
+            .status()?;
+
+        if status.success() {
+            println!("✅ vriftd service installed and started.");
+        } else {
+            println!("⚠️  Failed to load launchd agent. It might already be loaded.");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        let systemd_dir = home.join(".config/systemd/user");
+        std::fs::create_dir_all(&systemd_dir)?;
+
+        let service_path = systemd_dir.join("vriftd.service");
+        let service_content = format!(
+            r#"[Unit]
+Description=Velo Rift Daemon
+After=network.target
+
+[Service]
+ExecStart={} start
+Restart=always
+RestartSec=5
+StandardOutput=append:/tmp/vriftd.log
+StandardError=append:/tmp/vriftd.log
+
+[Install]
+WantedBy=default.target"#,
+            vriftd_bin.display()
+        );
+
+        std::fs::write(&service_path, service_content)?;
+        println!("Created systemd service: {}", service_path.display());
+
+        // Reload and enable
+        std::process::Command::new("systemctl")
+            .arg("--user")
+            .arg("daemon-reload")
+            .status()?;
+        std::process::Command::new("systemctl")
+            .arg("--user")
+            .arg("enable")
+            .arg("vriftd")
+            .status()?;
+        let status = std::process::Command::new("systemctl")
+            .arg("--user")
+            .arg("start")
+            .arg("vriftd")
+            .status()?;
+
+        if status.success() {
+            println!("✅ vriftd service installed and started.");
+        } else {
+            println!("❌ Failed to start systemd service.");
+        }
+    }
+
+    Ok(())
+}
+
+/// Uninstall vriftd background service
+fn cmd_service_uninstall() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        let plist_path = home.join("Library/LaunchAgents/sh.velo.vriftd.plist");
+
+        if plist_path.exists() {
+            std::process::Command::new("launchctl")
+                .arg("unload")
+                .arg(&plist_path)
+                .status()?;
+            std::fs::remove_file(&plist_path)?;
+            println!("✅ vriftd service uninstalled.");
+        } else {
+            println!("ℹ️  vriftd service not found.");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        let service_path = home.join(".config/systemd/user/vriftd.service");
+
+        if service_path.exists() {
+            std::process::Command::new("systemctl")
+                .arg("--user")
+                .arg("stop")
+                .arg("vriftd")
+                .status()?;
+            std::process::Command::new("systemctl")
+                .arg("--user")
+                .arg("disable")
+                .arg("vriftd")
+                .status()?;
+            std::fs::remove_file(&service_path)?;
+            println!("✅ vriftd service uninstalled.");
+        } else {
+            println!("ℹ️  vriftd service not found.");
+        }
+    }
+
+    Ok(())
+}
+
+/// Restart vriftd background service
+fn cmd_service_restart() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        let plist_path = home.join("Library/LaunchAgents/sh.velo.vriftd.plist");
+
+        if plist_path.exists() {
+            std::process::Command::new("launchctl")
+                .arg("unload")
+                .arg(&plist_path)
+                .status()?;
+            std::process::Command::new("launchctl")
+                .arg("load")
+                .arg(&plist_path)
+                .status()?;
+            println!("✅ vriftd service restarted.");
+        } else {
+            println!("⚠️  vriftd service not found. Use 'install' first.");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("systemctl")
+            .arg("--user")
+            .arg("restart")
+            .arg("vriftd")
+            .status()?;
+        println!("✅ vriftd service restarted.");
     }
 
     Ok(())
