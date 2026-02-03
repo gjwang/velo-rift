@@ -788,9 +788,19 @@ pub unsafe extern "C" fn setrlimit_shim(resource: c_int, rlp: *const libc::rlimi
     #[cfg(target_os = "linux")]
     let real = libc::setrlimit;
 
+    // Linux uses u32 for __rlimit_resource_t, macOS uses i32
+    #[cfg(target_os = "linux")]
+    let ret = real(resource as u32, rlp);
+    #[cfg(target_os = "macos")]
     let ret = real(resource, rlp);
 
-    if ret == 0 && resource == libc::RLIMIT_NOFILE && !rlp.is_null() {
+    // Linux uses u32 for RLIMIT_NOFILE constant
+    #[cfg(target_os = "linux")]
+    let is_nofile = resource as u32 == libc::RLIMIT_NOFILE;
+    #[cfg(target_os = "macos")]
+    let is_nofile = resource == libc::RLIMIT_NOFILE;
+
+    if ret == 0 && is_nofile && !rlp.is_null() {
         if let Some(state) = ShimState::get() {
             let new_soft = (*rlp).rlim_cur as usize;
             state.cached_soft_limit.store(new_soft, Ordering::Release);
