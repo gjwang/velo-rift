@@ -195,35 +195,178 @@ pub unsafe fn raw_access(path: *const libc::c_char, mode: libc::c_int) -> libc::
     }
 }
 
-// Stub implementations for other platforms
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-pub unsafe fn raw_fstat64(_fd: libc::c_int, _buf: *mut libc::stat) -> libc::c_int {
-    -1 // Not supported
+// =============================================================================
+// macOS x86_64 implementations
+// =============================================================================
+
+/// SYS_fstat64 on macOS x86_64 = 339
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_FSTAT64_X64: i64 = 339;
+
+/// SYS_close on macOS x86_64 = 6
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_CLOSE_X64: i64 = 6;
+
+/// SYS_mmap on macOS x86_64 = 197
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_MMAP_X64: i64 = 197;
+
+/// SYS_munmap on macOS x86_64 = 73
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_MUNMAP_X64: i64 = 73;
+
+/// SYS_access on macOS x86_64 = 33
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_ACCESS_X64: i64 = 33;
+
+/// Raw fstat64 syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_fstat64(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_FSTAT64_X64 | 0x2000000, // macOS syscall class
+        in("rdi") fd as i64,
+        in("rsi") buf as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-pub unsafe fn raw_close(_fd: libc::c_int) -> libc::c_int {
-    -1
+/// Raw close syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_close(fd: libc::c_int) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_CLOSE_X64 | 0x2000000,
+        in("rdi") fd as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+/// Raw mmap syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
 pub unsafe fn raw_mmap(
-    _addr: *mut libc::c_void,
-    _len: libc::size_t,
-    _prot: libc::c_int,
-    _flags: libc::c_int,
-    _fd: libc::c_int,
-    _offset: libc::off_t,
+    addr: *mut libc::c_void,
+    len: libc::size_t,
+    prot: libc::c_int,
+    flags: libc::c_int,
+    fd: libc::c_int,
+    offset: libc::off_t,
 ) -> *mut libc::c_void {
-    std::ptr::null_mut()
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_MMAP_X64 | 0x2000000,
+        in("rdi") addr as i64,
+        in("rsi") len as i64,
+        in("rdx") prot as i64,
+        in("r10") flags as i64,
+        in("r8") fd as i64,
+        in("r9") offset,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    ret as *mut libc::c_void
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-pub unsafe fn raw_munmap(_addr: *mut libc::c_void, _len: libc::size_t) -> libc::c_int {
-    -1
+/// Raw munmap syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_munmap(addr: *mut libc::c_void, len: libc::size_t) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_MUNMAP_X64 | 0x2000000,
+        in("rdi") addr as i64,
+        in("rsi") len as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-pub unsafe fn raw_access(_path: *const libc::c_char, _mode: libc::c_int) -> libc::c_int {
-    -1
+/// Raw access syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_access(path: *const libc::c_char, mode: libc::c_int) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_ACCESS_X64 | 0x2000000,
+        in("rdi") path as i64,
+        in("rsi") mode as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+// =============================================================================
+// Linux fallback (redirects to linux_raw.rs)
+// =============================================================================
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_fstat64(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_fstat(fd, buf)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_close(fd: libc::c_int) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_close(fd)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_mmap(
+    addr: *mut libc::c_void,
+    len: libc::size_t,
+    prot: libc::c_int,
+    flags: libc::c_int,
+    fd: libc::c_int,
+    offset: libc::off_t,
+) -> *mut libc::c_void {
+    crate::syscalls::linux_raw::raw_mmap(addr, len, prot, flags, fd, offset)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_munmap(addr: *mut libc::c_void, len: libc::size_t) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_munmap(addr, len)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_access(path: *const libc::c_char, mode: libc::c_int) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_access(path, mode)
 }

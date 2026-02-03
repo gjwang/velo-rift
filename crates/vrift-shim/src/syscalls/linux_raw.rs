@@ -870,3 +870,94 @@ pub unsafe fn raw_rename(old: *const c_char, new: *const c_char) -> c_int {
         }
     }
 }
+
+// =============================================================================
+// Memory Mapping Operations (for BUG-007 cross-platform support)
+// =============================================================================
+
+/// Raw mmap syscall
+#[inline(always)]
+pub unsafe fn raw_mmap(
+    addr: *mut c_void,
+    len: size_t,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: off_t,
+) -> *mut c_void {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "syscall",
+            in("rax") 9i64, // SYS_mmap
+            in("rdi") addr,
+            in("rsi") len as i64,
+            in("rdx") prot as i64,
+            in("r10") flags as i64,
+            in("r8") fd as i64,
+            in("r9") offset as i64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+        ret as *mut c_void
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "svc #0",
+            in("x8") 222i64, // SYS_mmap
+            in("x0") addr,
+            in("x1") len as i64,
+            in("x2") prot as i64,
+            in("x3") flags as i64,
+            in("x4") fd as i64,
+            in("x5") offset as i64,
+            lateout("x0") ret,
+        );
+        ret as *mut c_void
+    }
+}
+
+/// Raw munmap syscall
+#[inline(always)]
+pub unsafe fn raw_munmap(addr: *mut c_void, len: size_t) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "syscall",
+            in("rax") 11i64, // SYS_munmap
+            in("rdi") addr,
+            in("rsi") len as i64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "svc #0",
+            in("x8") 215i64, // SYS_munmap
+            in("x0") addr,
+            in("x1") len as i64,
+            lateout("x0") ret,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
