@@ -99,6 +99,10 @@ const SYS_OPENAT: i64 = 463;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_FCNTL: i64 = 92;
 
+/// SYS_chmod = 15 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_CHMOD: i64 = 15;
+
 /// Raw stat64 syscall for macOS ARM64.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[inline(never)]
@@ -441,6 +445,27 @@ pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: libc::c_int) -> 
         in("x0") fd as i64,
         in("x1") cmd as i64,
         in("x2") arg as i64,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    if ret < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+/// Raw chmod syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_chmod(path: *const libc::c_char, mode: libc::mode_t) -> libc::c_int {
+    let ret: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        syscall = in(reg) SYS_CHMOD,
+        in("x0") path as i64,
+        in("x1") mode as i64,
         lateout("x0") ret,
         options(nostack)
     );
@@ -857,6 +882,32 @@ pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: libc::c_int) -> 
     }
 }
 
+/// SYS_chmod = 15 on macOS x86_64
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_CHMOD_X64: i64 = 15;
+
+/// Raw chmod syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_chmod(path: *const libc::c_char, mode: libc::mode_t) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_CHMOD_X64 | 0x2000000,
+        in("rdi") path as i64,
+        in("rsi") mode as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
 // =============================================================================
 // Linux fallback (redirects to linux_raw.rs)
 // =============================================================================
@@ -954,4 +1005,9 @@ pub unsafe fn raw_openat(
 #[cfg(target_os = "linux")]
 pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: libc::c_int) -> libc::c_int {
     crate::syscalls::linux_raw::raw_fcntl(fd, cmd, arg)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_chmod(path: *const libc::c_char, mode: libc::mode_t) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_chmod(path, mode)
 }

@@ -309,11 +309,21 @@ pub(crate) unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn chmod_shim(path: *const c_char, mode: libc::mode_t) -> c_int {
+    // BUG-007: Use raw syscall during early init OR when shim not fully ready
+    // to avoid dlsym recursion and TLS pthread deadlock
+    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        return crate::syscalls::macos_raw::raw_chmod(path, mode);
+    }
+
     let real = std::mem::transmute::<
         *mut libc::c_void,
         unsafe extern "C" fn(*const c_char, libc::mode_t) -> c_int,
     >(crate::reals::REAL_CHMOD.get());
-    passthrough_if_init!(real, path, mode);
     block_vfs_mutation(path).unwrap_or_else(|| real(path, mode))
 }
 

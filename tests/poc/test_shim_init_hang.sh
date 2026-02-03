@@ -18,9 +18,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Copy a simple binary to bypass SIP
-cp /bin/echo "$TEST_DIR/echo"
-cp /bin/chmod "$TEST_DIR/chmod"
+# Create test binaries from source (arm64e compatible)
+# Copying /bin/echo doesn't work due to arm64e pointer signing
+cat > "$TEST_DIR/echo.c" << 'EOF'
+#include <stdio.h>
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        printf("%s%s", argv[i], i < argc - 1 ? " " : "");
+    }
+    printf("\n");
+    return 0;
+}
+EOF
+cc -O2 -o "$TEST_DIR/echo" "$TEST_DIR/echo.c"
+rm -f "$TEST_DIR/echo.c"
+
+cat > "$TEST_DIR/chmod.c" << 'EOF'
+#include <sys/stat.h>
+#include <stdlib.h>
+int main(int argc, char **argv) {
+    if (argc < 3) return 1;
+    mode_t mode = strtol(argv[1], NULL, 8);
+    return chmod(argv[2], mode);
+}
+EOF
+cc -O2 -o "$TEST_DIR/chmod" "$TEST_DIR/chmod.c"
+rm -f "$TEST_DIR/chmod.c"
+
+# Sign for DYLD_INSERT_LIBRARIES
 codesign -s - -f "$TEST_DIR/echo" 2>/dev/null || true
 codesign -s - -f "$TEST_DIR/chmod" 2>/dev/null || true
 
@@ -41,9 +66,13 @@ fi
 
 echo "[1] Testing echo with shim (simplest case)..."
 # echo should complete immediately - no file operations
-# We use perl for a hard timeout because macOS lacks GNU timeout
-RESULT=$(DYLD_INSERT_LIBRARIES="$SHIM_PATH" DYLD_FORCE_FLAT_NAMESPACE=1 \
-    perl -e 'alarm 5; exec @ARGV' "$TEST_DIR/echo" "hello" 2>&1) || EXIT_CODE=$?
+# Use background process with timeout instead of perl alarm
+RESULT=$( (DYLD_INSERT_LIBRARIES="$SHIM_PATH" DYLD_FORCE_FLAT_NAMESPACE=1 \
+    "$TEST_DIR/echo" "hello" &
+    PID=$!
+    sleep 5 && kill -9 $PID 2>/dev/null &
+    wait $PID 2>/dev/null) )
+EXIT_CODE=$?
 
 if [[ "$RESULT" == "hello" ]]; then
     echo "✅ PASS: echo with shim works"
@@ -58,20 +87,19 @@ echo ""
 echo "[2] Testing chmod with shim (mutation syscall)..."
 echo "test" > "$TEST_DIR/testfile.txt"
 # chmod should complete - if it hangs, shim has initialization deadlock
-DYLD_INSERT_LIBRARIES="$SHIM_PATH" DYLD_FORCE_FLAT_NAMESPACE=1 \
-    perl -e 'alarm 3; exec @ARGV' "$TEST_DIR/chmod" 644 "$TEST_DIR/testfile.txt" 2>&1 || {
+(DYLD_INSERT_LIBRARIES="$SHIM_PATH" DYLD_FORCE_FLAT_NAMESPACE=1 \
+    "$TEST_DIR/chmod" 644 "$TEST_DIR/testfile.txt" &
+    PID=$!
+    (sleep 3 && kill -9 $PID 2>/dev/null) &
+    TIMEOUT_PID=$!
+    wait $PID 2>/dev/null
     EXIT_CODE=$?
-    if [[ $EXIT_CODE -eq 142 ]]; then
-        echo "❌ FAIL: chmod with shim HUNG (SIGALRM timeout)"
-        echo ""
-        echo "=== DIAGNOSIS ==="
-        echo "The shim initialization causes a deadlock when injected into chmod."
-        echo "This is a P0 bug in the shim's dyld interposition."
-        echo ""
-        echo "Likely causes:"
-        echo "  1. Dangerous syscall interposed (dlopen/dlsym/malloc during init)"
-        echo "  2. ShimState::get() triggers allocation during dyld bootstrap"
-        echo "  3. Recursion in constructor or interpose table setup"
+    kill $TIMEOUT_PID 2>/dev/null
+    exit $EXIT_CODE
+) || {
+    EXIT_CODE=$?
+    if [[ $EXIT_CODE -eq 137 ]]; then
+        echo "❌ FAIL: chmod with shim HUNG (killed by timeout)"
         exit 1
     else
         echo "chmod exited with code $EXIT_CODE (may be expected)"
@@ -85,11 +113,19 @@ echo "[3] Testing chmod with VFS_PREFIX set..."
 mkdir -p "$TEST_DIR/workspace/.vrift"
 echo "protected" > "$TEST_DIR/workspace/protected.txt"
 
-DYLD_INSERT_LIBRARIES="$SHIM_PATH" DYLD_FORCE_FLAT_NAMESPACE=1 \
+(DYLD_INSERT_LIBRARIES="$SHIM_PATH" DYLD_FORCE_FLAT_NAMESPACE=1 \
 VRIFT_VFS_PREFIX="$TEST_DIR/workspace" \
-    perl -e 'alarm 3; exec @ARGV' "$TEST_DIR/chmod" 644 "$TEST_DIR/workspace/protected.txt" 2>&1 || {
+    "$TEST_DIR/chmod" 644 "$TEST_DIR/workspace/protected.txt" &
+    PID=$!
+    (sleep 3 && kill -9 $PID 2>/dev/null) &
+    TIMEOUT_PID=$!
+    wait $PID 2>/dev/null
     EXIT_CODE=$?
-    if [[ $EXIT_CODE -eq 142 ]]; then
+    kill $TIMEOUT_PID 2>/dev/null
+    exit $EXIT_CODE
+) || {
+    EXIT_CODE=$?
+    if [[ $EXIT_CODE -eq 137 ]]; then
         echo "❌ FAIL: chmod with VFS_PREFIX HUNG"
         exit 1
     fi
@@ -100,3 +136,4 @@ echo "✅ PASS: chmod with VFS_PREFIX completed"
 echo ""
 echo "=== All shim initialization tests passed ==="
 exit 0
+
