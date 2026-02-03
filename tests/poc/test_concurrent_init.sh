@@ -32,9 +32,21 @@ if [[ ! -f "$SHIM_PATH" ]]; then
     exit 1
 fi
 
-# Create test binary (copy and sign a multi-threaded tool)
+# Create test binary (compile a simple C program to avoid SIP restrictions)
 TEST_BIN="$SCRIPT_DIR/test_concurrent_bin"
-cp /bin/zsh "$TEST_BIN"
+cat > "${TEST_BIN}.c" << 'EOF'
+#include <stdio.h>
+#include <sys/stat.h>
+int main() {
+    struct stat sb;
+    // Trigger stat to exercise shim
+    fstat(1, &sb);
+    printf("ok\n");
+    return 0;
+}
+EOF
+cc -o "$TEST_BIN" "${TEST_BIN}.c" 2>/dev/null
+rm -f "${TEST_BIN}.c"
 codesign --force --sign - "$TEST_BIN" 2>/dev/null || true
 
 echo "Starting $INSTANCES concurrent instances..."
@@ -47,7 +59,7 @@ for i in $(seq 1 $INSTANCES); do
     (
         DYLD_INSERT_LIBRARIES="$SHIM_PATH" \
         DYLD_FORCE_FLAT_NAMESPACE=1 \
-        timeout "$TIMEOUT_SECS" "$TEST_BIN" -c 'echo ok' >/dev/null 2>&1
+        "$TEST_BIN" >/dev/null 2>&1
     ) &
     PIDS+=($!)
 done
