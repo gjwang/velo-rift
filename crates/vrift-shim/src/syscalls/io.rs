@@ -11,11 +11,11 @@ use libc::c_void;
 #[cfg(target_os = "macos")]
 use libc::off_t;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::Mutex;
 
 // Symbols imported from reals.rs via crate::reals
 /// Global FD tracking table: fd -> (path, is_vfs_file)
-static FD_TABLE: RwLock<Option<HashMap<c_int, FdEntry>>> = RwLock::new(None);
+static FD_TABLE: Mutex<Option<HashMap<c_int, FdEntry>>> = Mutex::new(None);
 
 #[derive(Clone, Debug)]
 pub struct FdEntry {
@@ -23,35 +23,27 @@ pub struct FdEntry {
     pub is_vfs: bool,
 }
 
-/// Initialize FD table if not already done
-fn ensure_fd_table() -> bool {
-    let mut table = match FD_TABLE.write() {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    if table.is_none() {
-        *table = Some(HashMap::new());
-    }
-    true
-}
+// RFC-0051 / Pattern 2648: Using Mutex for FD_TABLE to avoid RwLock hazards during dyld bootstrap.
+// Mutation (track_fd) and Read (get_fd_entry) ratio is balanced, but safety is paramount.
 
 /// Track a new FD opened for a VFS path
 pub fn track_fd(fd: c_int, path: &str, is_vfs: bool) {
     if fd < 0 {
         return;
     }
-    if !ensure_fd_table() {
-        return;
-    }
-    if let Ok(mut table) = FD_TABLE.write() {
-        if let Some(ref mut map) = *table {
-            map.insert(
-                fd,
-                FdEntry {
-                    path: path.to_string(),
-                    is_vfs,
-                },
-            );
+
+    // Pattern 2648: Allocate BEFORE acquiring lock to avoid recursing through malloc -> fstat -> FD_TABLE
+    let entry = FdEntry {
+        path: path.to_string(),
+        is_vfs,
+    };
+
+    if let Ok(mut table_guard) = FD_TABLE.lock() {
+        if table_guard.is_none() {
+            *table_guard = Some(HashMap::new());
+        }
+        if let Some(ref mut map) = *table_guard {
+            map.insert(fd, entry);
         }
     }
 }
@@ -61,7 +53,7 @@ pub fn untrack_fd(fd: c_int) {
     if fd < 0 {
         return;
     }
-    if let Ok(mut table) = FD_TABLE.write() {
+    if let Ok(mut table) = FD_TABLE.lock() {
         if let Some(ref mut map) = *table {
             map.remove(&fd);
         }
@@ -73,7 +65,7 @@ pub fn get_fd_entry(fd: c_int) -> Option<FdEntry> {
     if fd < 0 {
         return None;
     }
-    if let Ok(table) = FD_TABLE.read() {
+    if let Ok(table) = FD_TABLE.lock() {
         if let Some(ref map) = *table {
             return map.get(&fd).cloned();
         }

@@ -233,11 +233,26 @@ pub unsafe extern "C" fn fstatat_shim(
     buf: *mut libc_stat,
     flags: c_int,
 ) -> c_int {
+    // BUG-007 / RFC-0051: Use raw syscall during early init to avoid dlsym recursion.
+    // Also check if SHIM_STATE is null to avoid TLS deadlock hazards.
+    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        return crate::syscalls::macos_raw::raw_fstatat64(dirfd, path, buf, flags);
+    }
+
+    let _guard = match ShimGuard::enter() {
+        Some(g) => g,
+        None => return crate::syscalls::macos_raw::raw_fstatat64(dirfd, path, buf, flags),
+    };
+
     let real = std::mem::transmute::<
         *mut libc::c_void,
         unsafe extern "C" fn(c_int, *const c_char, *mut libc_stat, c_int) -> c_int,
     >(REAL_FSTATAT.get());
-    passthrough_if_init!(real, dirfd, path, buf, flags);
 
     if dirfd == libc::AT_FDCWD || (!path.is_null() && *path == b'/' as i8) {
         if let Ok(path_str) = CStr::from_ptr(path).to_str() {

@@ -139,6 +139,10 @@ const SYS_FCHMOD: i64 = 124;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_FCHMODAT: i64 = 468;
 
+/// SYS_fstatat64 = 466 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_FSTATAT64: i64 = 466;
+
 /// Raw stat64 syscall for macOS ARM64.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[inline(never)]
@@ -733,6 +737,34 @@ pub unsafe fn raw_fchmodat(
     }
 }
 
+/// Raw fstatat64 syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_fstatat64(
+    dirfd: libc::c_int,
+    path: *const libc::c_char,
+    buf: *mut libc::stat,
+    flags: libc::c_int,
+) -> libc::c_int {
+    let ret: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        syscall = in(reg) SYS_FSTATAT64,
+        in("x0") dirfd as i64,
+        in("x1") path as i64,
+        in("x2") buf as i64,
+        in("x3") flags as i64,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    if ret < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
 // =============================================================================
 // macOS x86_64 implementations
 // =============================================================================
@@ -1193,6 +1225,10 @@ const SYS_FCHMOD_X64: i64 = 124;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const SYS_FCHMODAT_X64: i64 = 468;
 
+/// SYS_fstatat64 on macOS x86_64 = 466
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const SYS_FSTATAT64_X64: i64 = 466;
+
 /// Raw unlink syscall for macOS x86_64.
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 #[inline(never)]
@@ -1393,6 +1429,35 @@ pub unsafe fn raw_fchmodat(
     }
 }
 
+/// Raw fstatat64 syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_fstatat64(
+    dirfd: libc::c_int,
+    path: *const libc::c_char,
+    buf: *mut libc::stat,
+    flags: libc::c_int,
+) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_FSTATAT64_X64 | 0x2000000,
+        in("rdi") dirfd as i64,
+        in("rsi") path as i64,
+        in("rdx") buf as i64,
+        in("r10") flags as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
 // =============================================================================
 // Linux fallback (redirects to linux_raw.rs)
 // =============================================================================
@@ -1515,4 +1580,14 @@ pub unsafe fn raw_mkdir(path: *const libc::c_char, mode: libc::mode_t) -> libc::
 #[cfg(target_os = "linux")]
 pub unsafe fn raw_truncate(path: *const libc::c_char, length: libc::off_t) -> libc::c_int {
     crate::syscalls::linux_raw::raw_truncate(path, length)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn raw_fstatat64(
+    dirfd: libc::c_int,
+    path: *const libc::c_char,
+    buf: *mut libc::stat,
+    flags: libc::c_int,
+) -> libc::c_int {
+    crate::syscalls::linux_raw::raw_fstatat(dirfd, path, buf, flags)
 }
