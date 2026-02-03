@@ -757,14 +757,14 @@ mod linux_shims {
         dirfd: c_int,
         path: *const c_char,
         mode: c_int,
-        _flags: c_int,
+        flags: c_int,
     ) -> c_int {
-        // Simplified: use raw_access with AT_FDCWD behavior
         let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
-        if init_state >= 2 || dirfd == libc::AT_FDCWD {
-            return crate::syscalls::linux_raw::raw_access(path, mode);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_faccessat(dirfd, path, mode, flags);
         }
-        crate::syscalls::linux_raw::raw_access(path, mode)
+        // Metadata virtualization (TODO: RFC-0044)
+        crate::syscalls::linux_raw::raw_faccessat(dirfd, path, mode, flags)
     }
 
     #[no_mangle]
@@ -911,6 +911,30 @@ mod linux_shims {
             return res;
         }
         crate::syscalls::linux_raw::raw_link(oldpath, newpath)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn linkat(
+        olddirfd: c_int,
+        old: *const c_char,
+        newdirfd: c_int,
+        new: *const c_char,
+        flags: c_int,
+    ) -> c_int {
+        // Double-guard: check INITIALIZING first
+        let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+        if init_state >= 2 {
+            return crate::syscalls::linux_raw::raw_linkat(olddirfd, old, newdirfd, new, flags);
+        }
+
+        // Mutation perimeter check
+        if let Some(res) = crate::syscalls::misc::block_vfs_mutation(old) {
+            return res;
+        }
+        if let Some(res) = crate::syscalls::misc::block_vfs_mutation(new) {
+            return res;
+        }
+        crate::syscalls::linux_raw::raw_linkat(olddirfd, old, newdirfd, new, flags)
     }
 }
 

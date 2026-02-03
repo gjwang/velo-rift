@@ -5,13 +5,13 @@ echo "--- Phase 2: Persistence & Session Test ---"
 
 TEST_DIR="/tmp/vrift_persistent_test_$$"
 mkdir -p "$TEST_DIR"
+VRIFT_BIN_ABS="$(pwd)/target/release/vrift"
 cd "$TEST_DIR"
-VRIFT_BIN="/Users/antigravity/rust_source/vrift_qa/target/release/vrift"
 
 # 1. Initialize project
 echo "[1/4] Initializing project in $TEST_DIR..."
 # 'vrift init' outputs shell script, we ignore stdout but check side effects
-$VRIFT_BIN init > /dev/null
+"$VRIFT_BIN_ABS" init > /dev/null
 
 # 2. Verify physical files
 echo "[2/4] Verifying .vrift structure..."
@@ -32,7 +32,7 @@ fi
 
 # 3. Verify status output
 echo "[3/4] Checking 'vrift status -s'..."
-$VRIFT_BIN status -s | tee status_s.log
+"$VRIFT_BIN_ABS" status -s | tee status_s.log
 if grep -q "Session: ● \[Solid\] Active" status_s.log; then
     echo "✅ Session reported as Active and Solid."
 else
@@ -42,8 +42,8 @@ fi
 
 # 4. Verify persistence after wake
 echo "[4/4] Testing persistence after wake..."
-$VRIFT_BIN wake > /dev/null
-$VRIFT_BIN status -s > status_wake.log
+"$VRIFT_BIN_ABS" wake > /dev/null
+"$VRIFT_BIN_ABS" status -s > status_wake.log
 if grep -q "Active" status_wake.log; then
      echo "❌ Session still reported as Active after wake."
      exit 1
@@ -52,6 +52,6 @@ else
 fi
 
 # Cleanup
-cd /Users/antigravity/rust_source/vrift_qa
+cd - > /dev/null
 # rm -rf "$TEST_DIR"
 echo "--- Test PASSED ---"

@@ -118,20 +118,30 @@ pub async fn cmd_shell(project_dir: &Path) -> Result<()> {
     let new_path = format!("{}/.vrift/bin:{}", project_root_str, current_path);
 
     // Spawn subshell with VFS environment
-    let status = Command::new(&shell)
-        .current_dir(&project_root)
+    let mut cmd = Command::new(&shell);
+    cmd.current_dir(&project_root)
         .env("VRIFT_PROJECT_ROOT", &*project_root_str)
         .env("VRIFT_INCEPTION", "1")
         .env(
             "VRIFT_MANIFEST",
             format!("{}/.vrift/manifest.lmdb", project_root_str),
         )
-        .env("PATH", new_path)
-        .env(
+        .env("PATH", new_path);
+
+    #[cfg(target_os = "macos")]
+    {
+        cmd.env(
             "DYLD_INSERT_LIBRARIES",
             shim_path.to_string_lossy().as_ref(),
         )
-        .env("DYLD_FORCE_FLAT_NAMESPACE", "1")
+        .env("DYLD_FORCE_FLAT_NAMESPACE", "1");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        cmd.env("LD_PRELOAD", shim_path.to_string_lossy().as_ref());
+    }
+
+    let status = cmd
         .env("PS1", format!("(vrift {}) $PS1", TOTEM_SPIN))
         .status()?;
 
@@ -223,11 +233,18 @@ pub async fn cmd_inception(project_dir: &Path) -> Result<()> {
     } else {
         println!("export PATH=\"{}/.vrift/bin:$PATH\"", project_root_str);
     }
-    println!(
-        "export DYLD_INSERT_LIBRARIES=\"{}\"",
-        shim_path.to_string_lossy()
-    );
-    println!("export DYLD_FORCE_FLAT_NAMESPACE=1");
+    #[cfg(target_os = "macos")]
+    {
+        println!(
+            "export DYLD_INSERT_LIBRARIES=\"{}\"",
+            shim_path.to_string_lossy()
+        );
+        println!("export DYLD_FORCE_FLAT_NAMESPACE=1");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        println!("export LD_PRELOAD=\"{}\"", shim_path.to_string_lossy());
+    }
     println!();
     println!("# Update prompt with totem");
     println!("export _VRIFT_OLD_PS1=\"$PS1\"");
@@ -283,8 +300,15 @@ pub fn cmd_wake() -> Result<()> {
     println!("unset VRIFT_PROJECT_ROOT");
     println!("unset VRIFT_INCEPTION");
     println!("unset VRIFT_MANIFEST");
-    println!("unset DYLD_INSERT_LIBRARIES");
-    println!("unset DYLD_FORCE_FLAT_NAMESPACE");
+    #[cfg(target_os = "macos")]
+    {
+        println!("unset DYLD_INSERT_LIBRARIES");
+        println!("unset DYLD_FORCE_FLAT_NAMESPACE");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        println!("unset LD_PRELOAD");
+    }
     println!();
     println!("# Restore original PATH (remove .vrift/bin)");
     println!("export PATH=$(echo \"$PATH\" | sed 's|[^:]*/.vrift/bin:||g')");
@@ -461,8 +485,14 @@ fn get_vfs_stats(vrift_dir: &Path) -> (String, String) {
 }
 
 fn find_shim_library(project_root: &Path) -> Result<std::path::PathBuf> {
+    let shim_name = if cfg!(target_os = "macos") {
+        "libvrift_shim.dylib"
+    } else {
+        "libvrift_shim.so"
+    };
+
     // Check local .vrift directory first
-    let local_shim = project_root.join(".vrift/libvrift_shim.dylib");
+    let local_shim = project_root.join(".vrift").join(shim_name);
     if local_shim.exists() {
         return Ok(local_shim);
     }
@@ -471,13 +501,13 @@ fn find_shim_library(project_root: &Path) -> Result<std::path::PathBuf> {
     if let Ok(exe_path) = env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             // Same directory as vrift binary
-            let sibling = exe_dir.join("libvrift_shim.dylib");
+            let sibling = exe_dir.join(shim_name);
             if sibling.exists() {
                 return Ok(sibling);
             }
 
             // ../lib/ relative to bin/
-            let lib_dir = exe_dir.parent().map(|p| p.join("lib/libvrift_shim.dylib"));
+            let lib_dir = exe_dir.parent().map(|p| p.join("lib").join(shim_name));
             if let Some(lib_path) = lib_dir {
                 if lib_path.exists() {
                     return Ok(lib_path);
@@ -487,18 +517,19 @@ fn find_shim_library(project_root: &Path) -> Result<std::path::PathBuf> {
     }
 
     // Check cargo target directory (development mode)
-    let target_debug = Path::new("target/debug/libvrift_shim.dylib");
+    let target_debug = Path::new("target/debug").join(shim_name);
     if target_debug.exists() {
         return target_debug.canonicalize().context("resolve target path");
     }
 
-    let target_release = Path::new("target/release/libvrift_shim.dylib");
+    let target_release = Path::new("target/release").join(shim_name);
     if target_release.exists() {
         return target_release.canonicalize().context("resolve target path");
     }
 
     anyhow::bail!(
-        "Could not find libvrift_shim.dylib. Please run 'cargo build -p vrift-shim' first."
+        "Could not find {}. Please run 'cargo build -p vrift-shim' first.",
+        shim_name
     )
 }
 

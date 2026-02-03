@@ -9,7 +9,7 @@ fi
 
 echo "--- Phase 2: Service Management Test (macOS) ---"
 
-VRIFT_BIN="/Users/antigravity/rust_source/vrift_qa/target/release/vrift"
+VRIFT_BIN="./target/release/vrift"
 PLIST="$HOME/Library/LaunchAgents/sh.velo.vriftd.plist"
 
 # 1. Install service

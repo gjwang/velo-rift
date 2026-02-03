@@ -572,7 +572,11 @@ run_full_ci() {
             ;;
         *) 
             log_info "Running custom test path: $tier"
-            run_python_tests "$venv_path" "$tier"
+            if [[ "$tier" == ./* ]]; then
+                eval "$tier"
+            else
+                run_python_tests "$venv_path" "$tier"
+            fi
             return
             ;;
     esac

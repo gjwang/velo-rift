@@ -592,6 +592,153 @@ pub unsafe fn raw_link(old: *const c_char, new: *const c_char) -> c_int {
     }
 }
 
+/// Raw linkat syscall
+#[inline(always)]
+pub unsafe fn raw_linkat(
+    olddirfd: c_int,
+    old: *const c_char,
+    newdirfd: c_int,
+    new: *const c_char,
+    flags: c_int,
+) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "syscall",
+            in("rax") 265i64, // SYS_linkat
+            in("rdi") olddirfd as i64,
+            in("rsi") old,
+            in("rdx") newdirfd as i64,
+            in("r10") new,
+            in("r8") flags as i64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "svc #0",
+            in("x8") 37i64, // SYS_linkat
+            in("x0") olddirfd as i64,
+            in("x1") old,
+            in("x2") newdirfd as i64,
+            in("x3") new,
+            in("x4") flags as i64,
+            lateout("x0") ret,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
+
+/// Raw renameat syscall
+#[inline(always)]
+pub unsafe fn raw_renameat(
+    olddirfd: c_int,
+    old: *const c_char,
+    newdirfd: c_int,
+    new: *const c_char,
+) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "syscall",
+            in("rax") 264i64, // SYS_renameat
+            in("rdi") olddirfd as i64,
+            in("rsi") old,
+            in("rdx") newdirfd as i64,
+            in("r10") new,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "svc #0",
+            in("x8") 38i64, // SYS_renameat
+            in("x0") olddirfd as i64,
+            in("x1") old,
+            in("x2") newdirfd as i64,
+            in("x3") new,
+            in("x4") 0,
+            lateout("x0") ret,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
+
+/// Raw symlink syscall
+#[inline(always)]
+pub unsafe fn raw_symlink(old: *const c_char, new: *const c_char) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "syscall",
+            in("rax") 88i64, // SYS_symlink
+            in("rdi") old,
+            in("rsi") new,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // AArch64 uses symlinkat
+        let ret: i64;
+        std::arch::asm!(
+            "svc #0",
+            in("x8") 36i64, // SYS_symlinkat
+            in("x0") old,
+            in("x1") -100i64, // AT_FDCWD
+            in("x2") new,
+            lateout("x0") ret,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
+
 /// Raw symlinkat syscall
 #[inline(always)]
 pub unsafe fn raw_symlinkat(p1: *const c_char, dirfd: c_int, p2: *const c_char) -> c_int {
@@ -1052,6 +1199,51 @@ pub unsafe fn raw_access(path: *const c_char, mode: c_int) -> c_int {
     }
 }
 
+/// Raw faccessat syscall
+#[inline(always)]
+pub unsafe fn raw_faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "syscall",
+            in("rax") 269i64, // SYS_faccessat
+            in("rdi") dirfd as i64,
+            in("rsi") path,
+            in("rdx") mode as i64,
+            in("r10") flags as i64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "svc #0",
+            in("x8") 48i64, // SYS_faccessat
+            in("x0") dirfd as i64,
+            in("x1") path,
+            in("x2") mode as i64,
+            in("x3") flags as i64,
+            lateout("x0") ret,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}
+
 /// Raw rename syscall
 #[inline(always)]
 pub unsafe fn raw_rename(old: *const c_char, new: *const c_char) -> c_int {
@@ -1305,56 +1497,6 @@ pub unsafe fn raw_chdir(path: *const c_char) -> c_int {
             "svc #0",
             in("x8") 49i64, // SYS_chdir
             in("x0") path,
-            lateout("x0") ret,
-        );
-        if ret < 0 {
-            set_errno_from_ret(ret);
-            -1
-        } else {
-            ret as c_int
-        }
-    }
-}
-
-/// Raw renameat syscall
-#[inline(always)]
-pub unsafe fn raw_renameat(
-    olddirfd: c_int,
-    oldpath: *const c_char,
-    newdirfd: c_int,
-    newpath: *const c_char,
-) -> c_int {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let ret: i64;
-        std::arch::asm!(
-            "syscall",
-            in("rax") 264i64, // SYS_renameat
-            in("rdi") olddirfd as i64,
-            in("rsi") oldpath,
-            in("rdx") newdirfd as i64,
-            in("r10") newpath,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-        );
-        if ret < 0 {
-            set_errno_from_ret(ret);
-            -1
-        } else {
-            ret as c_int
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        let ret: i64;
-        std::arch::asm!(
-            "svc #0",
-            in("x8") 38i64, // SYS_renameat
-            in("x0") olddirfd as i64,
-            in("x1") oldpath,
-            in("x2") newdirfd as i64,
-            in("x3") newpath,
             lateout("x0") ret,
         );
         if ret < 0 {
