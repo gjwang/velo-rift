@@ -63,8 +63,7 @@ int vrift_stat(const char *path, struct stat *buf) {
     }
     
     // Zero-IPC hot path: pure memory access
-    uint64_t hash = fnv1a_hash(path);         // 20ns
-    VDirEntry *entry = vdir_lookup(hash);      // 30ns
+    VDirEntry *entry = vdir_lookup(path);      // 50ns (Internal hashing/indexing)
     if (!entry) return -ENOENT;
     
     fill_stat_buffer(buf, entry);              // 10ns
@@ -159,10 +158,9 @@ L3: Disk CAS (Cold Storage)
 Application: stat("/project/src/main.rs", &buf)
     ↓ (100ns syscall intercept)
 Client Library:
-    1. Hash path → FNV1a         (20ns)
-    2. Lookup in local VDir mmap  (30ns)
-    3. Fill stat buffer           (10ns)
-    4. Return to app              (10ns)
+    1. High-Speed Lookup in local VDir mmap  (50ns)
+    2. Fill stat buffer           (10ns)
+    3. Return to app              (10ns)
     ↓
 Total: 170ns ✅ 10x faster than real FS (1,675ns)
 

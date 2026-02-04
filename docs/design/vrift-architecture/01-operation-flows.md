@@ -12,8 +12,7 @@ This document details the step-by-step execution flow of key operations in vrift
 
 1.  **Client**: `stat("src/main.rs")`
 2.  **InceptionLayer**: Intercepts syscall.
-3.  **InceptionLayer**: Computes hash of path.
-4.  **InceptionLayer**: Lookups hash in VDir (Shared Memory).
+3.  **InceptionLayer**: Queries VDir (Shared Memory Index).
     *   **Hit**: Returns `struct stat` from memory. (Latency: ~50ns)
     *   **Miss**: Falls back to real filesystem. (Latency: ~2µs)
 
