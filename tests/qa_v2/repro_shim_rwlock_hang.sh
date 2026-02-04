@@ -17,9 +17,9 @@ VRIFT_BIN="$PROJECT_ROOT/target/release/vrift"
 SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
 MINI_READ="$PROJECT_ROOT/tests/qa_v2/mini_read"
 
-# Setup work dir
+# Setup work dir (ignore errors from VFS-protected files in previous run)
 WORK_DIR="/tmp/vrift_repro_hang"
-rm -rf "$WORK_DIR"
+rm -rf "$WORK_DIR" 2>/dev/null || true
 mkdir -p "$WORK_DIR/project/src"
 echo "Repro Content" > "$WORK_DIR/project/src/hello.txt"
 
@@ -70,4 +70,7 @@ else
 fi
 
 echo "✅ Test Finished: No bootstrap deadlock detected."
+
+# Cleanup (ignore errors from VFS-protected files)
+rm -rf "$WORK_DIR" 2>/dev/null || true
 exit 0
