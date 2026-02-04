@@ -57,7 +57,7 @@ rm "$WORK_DIR/project/src/template.bin"
 
 # 2. Ingest
 echo "⚡ Ingesting project (Solid Mode)..."
-export VRIFT_CAS_ROOT="$WORK_DIR/cas"
+export VR_THE_SOURCE="$WORK_DIR/cas"
 $VRIFT_BIN init "$WORK_DIR/project"
 $VRIFT_BIN ingest "$WORK_DIR/project" --mode solid
 
@@ -79,7 +79,7 @@ echo "✅ Value Confirmed: High-Density Deduplication worked."
 
 # 4. Prove Transparent Access
 echo "🔍 Verifying Transparent Access to 100 files..."
-FULL_VFS_ENV="$VFS_ENV VRIFT_MANIFEST=$WORK_DIR/project/.vrift/manifest.lmdb VRIFT_CAS_ROOT=$WORK_DIR/cas VRIFT_VFS_PREFIX=$WORK_DIR/project"
+FULL_VFS_ENV="$VFS_ENV VRIFT_MANIFEST=$WORK_DIR/project/.vrift/manifest.lmdb VR_THE_SOURCE=$WORK_DIR/cas VRIFT_VFS_PREFIX=$WORK_DIR/project"
 
 # We check a random file (e.g. 42) to see if it contains our marker
 if env $FULL_VFS_ENV "$MINI_READ" "$WORK_DIR/project/src/file_42.bin" 2>&1 | grep -q "VELO_RIFT_TEST_MARKER"; then

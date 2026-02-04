@@ -138,10 +138,9 @@ export VR_THE_SOURCE="/fast-ssd/vrift-cas"
 export VRIFT_THREADS=16
 ```
 
-> [!NOTE]
-> **Migration**: Legacy code may use `VRIFT_CAS_ROOT`. This is deprecated.
-> All components should read `VR_THE_SOURCE` as the canonical variable.
-> For backward compatibility, components MAY fall back to `VRIFT_CAS_ROOT` if `VR_THE_SOURCE` is unset.
+> [!WARNING]
+> **Breaking Change**: `VRIFT_CAS_ROOT` is no longer supported.
+> All scripts and configurations must use `VR_THE_SOURCE`.
 
 ---
 

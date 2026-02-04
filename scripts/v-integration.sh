@@ -46,7 +46,7 @@ MANIFEST="$TEST_DIR/vrift.manifest"
 
 safe_rm "$TEST_DIR"
 mkdir -p "$CAS_DIR" "$DATA_DIR"
-export VRIFT_CAS_ROOT="$CAS_DIR"
+export VR_THE_SOURCE="$CAS_DIR"
 
 # Create test data
 echo "Hello Velo Rift" > "$DATA_DIR/file1.txt"
@@ -207,7 +207,7 @@ if [ "$OS" == "Linux" ]; then
             echo "Hello FUSE Sim" > "$SIM_SOURCE/testfile.txt"
             
             # Ingest with --prefix /vrift (critical for VFS path mapping)
-            export VRIFT_CAS_ROOT="$SIM_CAS"
+            export VR_THE_SOURCE="$SIM_CAS"
             vrift ingest "$SIM_SOURCE" --prefix /vrift > "$SIM_DIR/ingest.log" 2>&1
             
             # Start daemon for this workspace

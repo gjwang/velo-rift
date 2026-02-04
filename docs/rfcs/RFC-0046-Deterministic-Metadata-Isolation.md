@@ -25,12 +25,12 @@ Every Velo Rift project MUST utilize a hidden directory `.vrift/` at the project
     - `shadow/`: A local staging area for newly written files.
 
 ### 2. Global CAS Root Exclusion
-The global CAS directory (defined by `VRIFT_CAS_ROOT`) must be treated as a "System-Level Forbidden Zone" for the Shim.
+The global CAS directory (defined by `VR_THE_SOURCE`) must be treated as a "System-Level Forbidden Zone" for the Shim.
 
-**Safety Invariant**: The Shim MUST NOT intercept any syscall where the resolved path is within the `VRIFT_CAS_ROOT`.
+**Safety Invariant**: The Shim MUST NOT intercept any syscall where the resolved path is within the `VR_THE_SOURCE`.
 
 - **Rationale**: When `vriftd` or `vrift ingest` writes to the CAS, these operations must be direct. If intercepted, they would trigger another IPC to the daemon, creating an infinite loop.
-- **Enforcement**: Upon initialization, the Shim reads `VRIFT_CAS_ROOT` and adds it to its internal path-exclusion list.
+- **Enforcement**: Upon initialization, the Shim reads `VR_THE_SOURCE` and adds it to its internal path-exclusion list.
 
 ### 3. Write-Shadowing Mechanism
 To support multi-project shared build artifacts (e.g., shared `target/` in CAS):
@@ -40,7 +40,7 @@ To support multi-project shared build artifacts (e.g., shared `target/` in CAS):
 3. **Async Promotion**:
     - Upon `close()`, the Shim notifies `vriftd`.
     - `vriftd` (running with `VRIFT_ENABLED=0`) hashes the shadow file.
-    - `vriftd` moves the file to the global `VRIFT_CAS_ROOT`.
+    - `vriftd` moves the file to the global `VR_THE_SOURCE`.
     - `vriftd` updates the LMDB manifest to point the virtual path to the new hash.
 
 ### 3. Recursion Prevention (The Interlock)
@@ -48,7 +48,7 @@ To ensure system stability, the following "Interlock" rules are established:
 
 | Component | Responsibility |
 | :--- | :--- |
-| **Shim** | Detects virtual paths. Hard-excludes `.vrift/` and `VRIFT_CAS_ROOT`. |
+| **Shim** | Detects virtual paths. Hard-excludes `.vrift/` and `VR_THE_SOURCE`. |
 | **Daemon** | Runs with Velo Rift disabled (`VRIFT_ENABLED=0`) to avoid self-interception. |
 | **IPC** | Uses explicit file descriptors (sockets) rather than path-based coordination to avoid interception loops. |
 
@@ -56,7 +56,7 @@ To ensure system stability, the following "Interlock" rules are established:
 
 ### Phase 1: Metadata & CAS Sanitization
 - Relocate all manifests and logs into `.vrift/`.
-- Update `lib.rs` to include the `/.vrift/` and `VRIFT_CAS_ROOT` exclusion rules in `psfs_applicable`.
+- Update `lib.rs` to include the `/.vrift/` and `VR_THE_SOURCE` exclusion rules in `psfs_applicable`.
 
 ### Phase 2: Write-Shadowing (Target: Phase 7/9)
 - Implement `Redirected-O_WRONLY` support.

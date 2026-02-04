@@ -102,7 +102,7 @@ codesign -f -s - bench 2>/dev/null || true
 # 2. Ingest into VFS
 echo ""
 echo "🚀 Step 2: Ingesting to VFS (vrift ingest)..."
-export VRIFT_CAS_ROOT="$(realpath "$CAS_ROOT")"
+export VR_THE_SOURCE="$(realpath "$CAS_ROOT")"
 # Store manifest in PHYSICAL_ROOT so shim mmap path aligns
 mkdir -p "$PHYSICAL_ROOT/.vrift"
 "$VRIFT_BIN" ingest "$PHYSICAL_ROOT" --output "$PHYSICAL_ROOT/.vrift/manifest.lmdb"

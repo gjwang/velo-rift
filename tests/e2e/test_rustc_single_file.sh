@@ -86,7 +86,7 @@ cd "$TEST_WORK"
 
 # Set environment for shim
 export VRIFT_MANIFEST="$MANIFEST_PATH"
-export VRIFT_CAS_ROOT="$CAS_ROOT"
+export VR_THE_SOURCE="$CAS_ROOT"
 export VRIFT_VFS_PREFIX="/vfs"
 export VRIFT_DEBUG=1
 

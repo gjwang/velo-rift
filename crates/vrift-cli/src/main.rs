@@ -1232,7 +1232,7 @@ fn cmd_run(
 
     // Set Velo environment variables
     cmd.env("VRIFT_MANIFEST", &manifest_abs);
-    cmd.env("VRIFT_CAS_ROOT", &cas_abs);
+    cmd.env("VR_THE_SOURCE", &cas_abs);
 
     // Set platform-specific library preload
     #[cfg(target_os = "macos")]

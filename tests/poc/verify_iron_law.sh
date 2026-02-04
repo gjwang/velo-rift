@@ -43,8 +43,8 @@ echo "another file with different content" > "$TEST_DIR/source/file2.txt"
 dd if=/dev/urandom of="$TEST_DIR/source/binary.bin" bs=1024 count=1 2>/dev/null
 
 echo "[INGEST] Creating CAS and ingesting test files..."
-# Use VRIFT_CAS_ROOT which is the CLI's env var for CAS location
-export VRIFT_CAS_ROOT="$TEST_DIR/cas"
+# Use VR_THE_SOURCE which is the CLI's env var for CAS location
+export VR_THE_SOURCE="$TEST_DIR/cas"
 $VRIFT ingest "$TEST_DIR/source" --prefix "test" 2>&1 | grep -v "^2026" || true
 
 # Find blobs in CAS (RFC-0039 layout: blake3/ab/cd/hash_size.ext)

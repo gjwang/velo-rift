@@ -13,7 +13,7 @@ mkdir -p "$TEST_DIR/source"
 echo "manifest content" > "$TEST_DIR/source/foo.txt"
 
 # 1. Ingest with an explicit prefix
-export VRIFT_CAS_ROOT="$TEST_DIR/cas"
+export VR_THE_SOURCE="$TEST_DIR/cas"
 echo "--- Ingesting with prefix /myvirt ---"
 "$VELO_BIN" ingest "$TEST_DIR/source" --prefix /myvirt
 

@@ -45,7 +45,7 @@ echo "=== Repro Shell: Shim Init Race / Early Call ==="
 
 # 1. Ingest
 echo "secret content" > "$TEST_DIR/source/file.txt"
-export VRIFT_CAS_ROOT="$TEST_DIR/cas"
+export VR_THE_SOURCE="$TEST_DIR/cas"
 "$VELO_BIN" ingest "$TEST_DIR/source" --prefix "" -o "$TEST_DIR/source/vrift.manifest" > "$TEST_DIR/ingest.log" 2>&1
 
 # 2. Start daemon with isolated socket

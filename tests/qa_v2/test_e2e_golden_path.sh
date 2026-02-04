@@ -47,7 +47,7 @@ echo "Nested Data" > "$SRC_DATA/subdir/nested.txt"
 # 2. Service Lifecycle (Phase A)
 echo "🚀 [Phase A] Background Service Installation..."
 pkill vriftd || true
-# Socket might be in VRIFT_CAS_ROOT or default /tmp
+# Socket might be in VR_THE_SOURCE or default /tmp
 rm -f /tmp/vrift.sock || true
 
 # Try service install, but fallback to manual start if it fails (common in Docker)
@@ -55,7 +55,7 @@ if ! $VRIFT_BIN --the-source-root "$CAS_ROOT" service install 2>/dev/null; then
     echo "⚠️  Service install failed (possibly no systemd). Falling back to manual start..."
     # Start vriftd in background
     vriftd_bin="$(dirname "$VRIFT_BIN")/vriftd"
-    VRIFT_CAS_ROOT="$CAS_ROOT" "$vriftd_bin" start > /tmp/vriftd.log 2>&1 &
+    VR_THE_SOURCE="$CAS_ROOT" "$vriftd_bin" start > /tmp/vriftd.log 2>&1 &
     sleep 2
 fi
 
@@ -84,7 +84,7 @@ echo "🌀 [Phase C] VFS Inception & Mutation Audit..."
 MINI_READ="$PROJECT_ROOT/tests/qa_v2/mini_read"
 MINI_MKDIR="$PROJECT_ROOT/tests/qa_v2/mini_mkdir"
 
-VFS_ENV="$VFS_ENV_BASE VRIFT_MANIFEST=$WORK_DIR/.vrift/manifest.lmdb VRIFT_CAS_ROOT=$CAS_ROOT VRIFT_PROJECT_ROOT=$WORK_DIR VRIFT_VFS_PREFIX=$WORK_DIR VRIFT_DEBUG=1"
+VFS_ENV="$VFS_ENV_BASE VRIFT_MANIFEST=$WORK_DIR/.vrift/manifest.lmdb VR_THE_SOURCE=$CAS_ROOT VRIFT_PROJECT_ROOT=$WORK_DIR VRIFT_VFS_PREFIX=$WORK_DIR VRIFT_DEBUG=1"
 
 echo "   Testing Virtual Read..."
 # Using mini_read to bypass SIP issues

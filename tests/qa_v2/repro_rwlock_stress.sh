@@ -31,7 +31,7 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/project/src"
 echo "Target" > "$WORK_DIR/project/src/target.txt"
 
-export VRIFT_CAS_ROOT="$WORK_DIR/cas"
+export VR_THE_SOURCE="$WORK_DIR/cas"
 "$VRIFT_BIN" init "$WORK_DIR/project" >/dev/null 2>&1
 "$VRIFT_BIN" ingest "$WORK_DIR/project" --mode solid >/dev/null 2>&1
 

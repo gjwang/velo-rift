@@ -42,7 +42,7 @@ done
 
 # Ingest with --prefix "" (like test_shim_basic.sh)
 echo "[2/4] Ingesting to VFS..."
-export VRIFT_CAS_ROOT="$CAS_ROOT"
+export VR_THE_SOURCE="$CAS_ROOT"
 "$VRIFT_BIN" ingest "$SOURCE_DIR" --prefix "" -o "$SOURCE_DIR/vrift.manifest" > /dev/null 2>&1
 
 # Start daemon (like test_shim_basic.sh)
@@ -50,7 +50,7 @@ echo "[3/4] Starting vriftd..."
 pkill vriftd 2>/dev/null || true
 sleep 1
 
-export VRIFT_CAS_ROOT="$CAS_ROOT"
+export VR_THE_SOURCE="$CAS_ROOT"
 export RUST_LOG=info
 "$VRIFTD_BIN" start > "$TEST_DIR/daemon.log" 2>&1 &
 VRIFTD_PID=$!
@@ -145,7 +145,7 @@ cd "$SOURCE_DIR"
 echo "Test 2 (VFS with shim):"
 export DYLD_INSERT_LIBRARIES="$SHIM_PATH"
 export DYLD_FORCE_FLAT_NAMESPACE=1
-export VRIFT_CAS_ROOT="$CAS_ROOT"
+export VR_THE_SOURCE="$CAS_ROOT"
 export VRIFT_MANIFEST="$SOURCE_DIR/vrift.manifest"
 export VRIFT_VFS_PREFIX="/vrift"
 export VRIFT_DEBUG=1

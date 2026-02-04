@@ -65,19 +65,19 @@ echo -n "hello world" > "$TEST_DIR/source/testfile.txt"
 unset VRIFT_PROJECT_ROOT
 unset VRIFT_INCEPTION
 unset VRIFT_SOCKET_PATH
-unset VRIFT_CAS_ROOT
+unset VR_THE_SOURCE
 unset VRIFT_MANIFEST
 unset VRIFT_VFS_PREFIX
 
 # 1. Ingest
 echo "Ingesting source..."
-export VRIFT_CAS_ROOT="$TEST_DIR/cas"
+export VR_THE_SOURCE="$TEST_DIR/cas"
 # Use --prefix "" for correct /testfile.txt mapping
 "$VELO_BIN" ingest "$TEST_DIR/source" --prefix "" -o "$TEST_DIR/source/vrift.manifest" > "$TEST_DIR/ingest.log" 2>&1
 
 # 2. Start daemon
 echo "Starting daemon..."
-export VRIFT_CAS_ROOT="$TEST_DIR/cas"
+export VR_THE_SOURCE="$TEST_DIR/cas"
 export RUST_LOG=info
 
 "$VRIFTD_BIN" start > "$TEST_DIR/daemon.log" 2>&1 &
@@ -139,7 +139,7 @@ export "$PRELOAD_VAR"="$SHIM_PATH"
 if [ "$OS_TYPE" == "Darwin" ]; then
     export DYLD_FORCE_FLAT_NAMESPACE=1
 fi
-export VRIFT_CAS_ROOT="$TEST_DIR/cas"
+export VR_THE_SOURCE="$TEST_DIR/cas"
 export VRIFT_MANIFEST="$TEST_DIR/source/vrift.manifest"
 export VRIFT_VFS_PREFIX="/vrift"
 export VRIFT_DEBUG=1

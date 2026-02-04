@@ -80,7 +80,7 @@ echo "⚡ Initializing Project..."
 cd "$WORK_DIR/project"
 "$VRIFT_BIN" init . >/dev/null 2>&1
 export VRIFT_MANIFEST="$WORK_DIR/project/.vrift/manifest.lmdb"
-export VRIFT_CAS_ROOT="$WORK_DIR/project/.vrift/cas"
+export VR_THE_SOURCE="$WORK_DIR/project/.vrift/cas"
 
 # Shim Environment
 FULL_VFS_ENV="$VFS_ENV VRIFT_MANIFEST=$VRIFT_MANIFEST VRIFT_VFS_PREFIX=$WORK_DIR/project"

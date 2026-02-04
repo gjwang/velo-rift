@@ -5,9 +5,9 @@ TEST_DIR="/tmp/vrift-p8-$(date +%s)"
 mkdir -p "$TEST_DIR/project/subdir"
 echo "data" > "$TEST_DIR/project/file.txt"
 
-export VRIFT_CAS_ROOT="$TEST_DIR/the_source"
+export VR_THE_SOURCE="$TEST_DIR/the_source"
 export VRIFT_VFS_PREFIX="/vrift"
-mkdir -p "$VRIFT_CAS_ROOT"
+mkdir -p "$VR_THE_SOURCE"
 
 # 1. Ingest
 echo "📦 Ingesting project..."

@@ -44,7 +44,7 @@ echo "Original Content" > "$PHYSICAL_ROOT/original.txt" || true
 
 # 3. Ingest into VRift
 echo ""
-export VRIFT_CAS_ROOT="$(realpath "$CAS_ROOT")"
+export VR_THE_SOURCE="$(realpath "$CAS_ROOT")"
 "$VELO_BIN" ingest "$PHYSICAL_ROOT" --output "$TEST_DIR/.vrift/manifest.lmdb"
 
 CAS_FILE=$(find "$CAS_ROOT" -type f | grep -v "\.lock" | head -n 1)

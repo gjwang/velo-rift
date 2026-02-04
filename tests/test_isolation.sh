@@ -21,8 +21,8 @@ if [ -d "$TEST_ROOT" ]; then
 fi
 mkdir -p "$TEST_ROOT/project_a" "$TEST_ROOT/project_b"
 
-export VRIFT_CAS_ROOT="$TEST_ROOT/the_source"
-mkdir -p "$VRIFT_CAS_ROOT"
+export VR_THE_SOURCE="$TEST_ROOT/the_source"
+mkdir -p "$VR_THE_SOURCE"
 
 # Build binaries
 cargo build --workspace --release

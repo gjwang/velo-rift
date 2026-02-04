@@ -37,7 +37,7 @@ echo "=== Test: stat Virtual Metadata (Runtime) ==="
 
 # 1. Ingest
 echo "Ingesting source..."
-export VRIFT_CAS_ROOT="$TEST_DIR/cas"
+export VR_THE_SOURCE="$TEST_DIR/cas"
 echo -n "test content" > "$TEST_DIR/source/test_file.txt"
 # Use --prefix "" for correct /test_file.txt mapping
 "$VELO_BIN" ingest "$TEST_DIR/source" --prefix "" -o "$TEST_DIR/source/vrift.manifest" > "$TEST_DIR/ingest.log" 2>&1
