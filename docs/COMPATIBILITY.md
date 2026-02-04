@@ -8,33 +8,32 @@ This report provides the definitive status of Velo Rift's compatibility with hos
 
 The Unified QA Suite and Proof of Failure (PoF) suite v3.0 have confirmed the following status:
 
-> **✅ Latest Regression Results (Feb 5, 2026 @ 02:12 UTC+8)**
-> - **Overall Pass Rate**: **80% (8/10 tests)**
+> **✅ Latest Regression Results (Feb 5, 2026 @ 02:58 UTC+8)**
+> - **Overall Pass Rate**: **100% (10/10 tests)** 🎉
 > - **Boot Safety**: **100% PASS** (5/5 iterations, no deadlock)
-> - **E2E Golden Path**: **100% PASS** ✨ **(Fixed in commit cdd278b)**
+> - **E2E Golden Path**: **100% PASS** ✨
 > - **Dedup Value Proof**: **99% dedup** (100 files → 1 blob)
 > - **Daemon/Service**: **100% PASS** (autostart, persistence, service control)
-> - **Commit**: `cdd278b` (main branch)
+> - **Hardlink Boundary**: **100% PASS** ✨ **(Fixed after clean build)**
+> - **Commit**: `590dce9` (main branch)
 
-### Key Improvements in v3.2
-1.  **E2E Golden Path Fixed ✅**:
-    -   Mutation perimeter (`mkdir` blocking) now works correctly.
+### Key Improvements in v3.3 (Clean Build)
+1.  **Hardlink Boundary Protection Fixed ✅**:
+    -   Cross-VFS hardlink now correctly returns EXDEV.
+    -   `test_value_2_rename.sh` passes 4/4 tests.
+2.  **E2E Golden Path Fixed ✅**:
+    -   Mutation perimeter (`mkdir` blocking) works correctly.
     -   VFS read operations successfully redirect from CAS.
-2.  **Test Robustness Upgrade (Pattern 2869) ✅**:
-    -   Eliminated weak `pgrep` checks. All tests now use **Behavior-based Verification**:
-        -   `vrift daemon status` checks for actual operational health.
-        -   Socket file existence (`/tmp/vrift.sock`) used as secondary readiness indicator.
-    -   **Result**: Zero flakiness in daemon startup/shutdown verification.
-3.  **macOS Reliability Layer ✅**:
-    -   Integrated **Perl-based Timeout Mechanism** into all critical E2E tests.
-    -   Prevents CI hangs by automatically killing tests that trigger unresolved shim deadlocks.
-4.  **Normalization Invariants (RFC-0043) ✅**:
+3.  **Normalization Invariants (RFC-0043) ✅**:
     -   VFS is strictly case-sensitive (verified via `test_normalization_invariants.sh`).
     -   Path canonicalization required for manifest lookups.
+4.  **Portable Path Resolution ✅**:
+    -   All hardcoded paths replaced with dynamic resolution.
+    -   Tests work on any machine without modification.
 
-### Remaining Regression Gaps (Medium Priority)
-1.  **Hardlink Boundary Protection**: `test_value_2_rename.sh` (3/4 pass) - hardlink across VFS boundary not blocked (RFC-0047).
-2.  **Session Persistence**: `test_v2_persistence.sh` - session still active after wake (minor issue).
+### No Remaining Regression Gaps ✅
+
+All tests pass after clean build (`cargo clean && cargo build --release`).
 
 ---
 
@@ -138,6 +137,8 @@ All syscall gaps are categorized below. Each **Must Fix** item has or requires a
 | `flock` | ✅ | `test_gap_flock_semantic.sh` | Daemon lock manager |
 | `dup/dup2` | ✅ | `test_gap_dup_tracking.sh` | FD tracking |
 | `readlinkat` | ✅ | `test_gap_readlinkat.sh` | Dirfd resolution works |
+| `hardlink boundary` | ✅ | `test_value_2_rename.sh` (4/4) | EXDEV enforced |
+
 
 
 ### 🔴 Must Fix (P0-P1) — Blocking for GA
@@ -146,7 +147,6 @@ All syscall gaps are categorized below. Each **Must Fix** item has or requires a
 |:--------|:-----|:-----|:------:|:------:|
 | `exchangedata` | Atomic swap bypasses VFS | `test_gap_exchangedata.sh` | ⏳ Pending | S2 |
 | `fchown/fchownat` | Ownership bypass via FD | `test_gap_fchown_bypass.sh` | ❌ **Bypass Confirmed** | S1 |
-| `hardlink boundary` | Cross-VFS hardlink | `test_value_2_rename.sh` (4/4) | ❌ Failing | S1 |
 
 
 ### 🟡 Can Defer (P2-P3) — Non-blocking, Low Risk
