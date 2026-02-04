@@ -103,14 +103,17 @@ codesign -f -s - bench 2>/dev/null || true
 echo ""
 echo "🚀 Step 2: Ingesting to VFS (vrift ingest)..."
 export VRIFT_CAS_ROOT="$(realpath "$CAS_ROOT")"
-"$VRIFT_BIN" ingest "$PHYSICAL_ROOT" --output "$TEST_DIR/.vrift/manifest.lmdb"
+# Store manifest in PHYSICAL_ROOT so shim mmap path aligns
+mkdir -p "$PHYSICAL_ROOT/.vrift"
+"$VRIFT_BIN" ingest "$PHYSICAL_ROOT" --output "$PHYSICAL_ROOT/.vrift/manifest.lmdb"
 
 # 3. Start vriftd
 echo "🔧 Step 3: Starting vriftd..."
 pkill -9 vriftd 2>/dev/null || true
 sleep 0.5
 
-export VRIFT_MANIFEST="$TEST_DIR/.vrift/manifest.lmdb"
+# NOTE: VRIFT_MANIFEST determines where shim looks for mmap
+export VRIFT_MANIFEST="$PHYSICAL_ROOT/.vrift/manifest.lmdb"
 export VRIFT_VFS_PREFIX="$PHYSICAL_ROOT"
 "$VRIFTD_BIN" > "$TEST_DIR/daemon.log" 2>&1 &
 DAEMON_PID=$!
@@ -149,8 +152,29 @@ cd "$PHYSICAL_ROOT"
 echo ""
 echo "=== Test 2: VFS (with shim, mmap stat cache) ==="
 
+# Create warmup binary (system stat may bypass shim due to SIP)
+cat > warmup.c << 'EOF'
+#include <sys/stat.h>
+#include <stdio.h>
+int main() {
+    struct stat sb;
+    if (lstat("node_modules", &sb) == 0) {
+        printf("Warmup: stat OK, entries triggered\n");
+    }
+    return 0;
+}
+EOF
+cc -O2 -o warmup warmup.c
+codesign -f -s - warmup 2>/dev/null || true
+
 export DYLD_INSERT_LIBRARIES="$SHIM_PATH"
 export DYLD_FORCE_FLAT_NAMESPACE=1
+
+# Warmup: trigger workspace registration and mmap export
+echo "[Warmup: triggering mmap export...]"
+./warmup
+sleep 1  # Give daemon time to export mmap
+
 ../bench
 
 unset DYLD_INSERT_LIBRARIES
