@@ -307,6 +307,10 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
                 vpath: info.vpath.clone(),
                 temp_path: info.temp_path.clone(),
             });
+
+            // M4: Clear dirty status after reingest is queued
+            // Note: actual commit happens async, but dirty is cleared to resume reads from manifest
+            crate::state::DIRTY_TRACKER.clear_dirty(&info.vpath);
         }
 
         res

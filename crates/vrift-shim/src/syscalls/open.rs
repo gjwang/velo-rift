@@ -75,6 +75,10 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
 
     if is_write {
         vfs_log!("open write request for '{}'", vpath.absolute);
+
+        // M4: Mark path as dirty in DirtyTracker (enables stat redirect to staging)
+        DIRTY_TRACKER.mark_dirty(&vpath.manifest_key);
+
         let mut attempts = 0;
         let mut fd = -1;
         let mut temp_path_string = String::new();
