@@ -8,27 +8,33 @@ This report provides the definitive status of Velo Rift's compatibility with hos
 
 The Unified QA Suite and Proof of Failure (PoF) suite v3.0 have confirmed the following status:
 
-> **✅ Latest Regression Results (Feb 5, 2026 @ 01:30 UTC+8)**
-> - **Boot Safety**: **100% PASS** (Pattern 2930 complete - all dlsym hazards eliminated)
-> - **Build System**: **100% PASS** (Full workspace + Shim cdylib ✓)
-> - **Commit**: `5214d634` (refactor: complete Pattern 2930)
+> **✅ Latest Regression Results (Feb 5, 2026 @ 02:12 UTC+8)**
+> - **Overall Pass Rate**: **80% (8/10 tests)**
+> - **Boot Safety**: **100% PASS** (5/5 iterations, no deadlock)
+> - **E2E Golden Path**: **100% PASS** ✨ **(Fixed in commit cdd278b)**
+> - **Dedup Value Proof**: **99% dedup** (100 files → 1 blob)
+> - **Daemon/Service**: **100% PASS** (autostart, persistence, service control)
+> - **Commit**: `cdd278b` (main branch)
 
-### Key Improvements in v3.1
-1.  **Test Robustness Upgrade (Pattern 2869) ✅**:
+### Key Improvements in v3.2
+1.  **E2E Golden Path Fixed ✅**:
+    -   Mutation perimeter (`mkdir` blocking) now works correctly.
+    -   VFS read operations successfully redirect from CAS.
+2.  **Test Robustness Upgrade (Pattern 2869) ✅**:
     -   Eliminated weak `pgrep` checks. All tests now use **Behavior-based Verification**:
         -   `vrift daemon status` checks for actual operational health.
         -   Socket file existence (`/tmp/vrift.sock`) used as secondary readiness indicator.
     -   **Result**: Zero flakiness in daemon startup/shutdown verification.
-2.  **macOS Reliability Layer ✅**:
+3.  **macOS Reliability Layer ✅**:
     -   Integrated **Perl-based Timeout Mechanism** into all critical E2E tests.
-    -   Prevents CI hangs by automatically killing tests that trigger unresolved shim deadlocks (e.g., in `rename` or `gc` scenarios).
-3.  **Standalone Mutation Protection ✅**:
-    -   Mutation perimeter (EROFS/EPERM) now functions even without a running daemon using prefix-based standalone detection.
+    -   Prevents CI hangs by automatically killing tests that trigger unresolved shim deadlocks.
+4.  **Normalization Invariants (RFC-0043) ✅**:
+    -   VFS is strictly case-sensitive (verified via `test_normalization_invariants.sh`).
+    -   Path canonicalization required for manifest lookups.
 
-### Remaining Regression Gaps (High Priority)
-1.  **Cross-Domain Rename Deadlock (Pattern 2868)**: `test_value_2_rename.sh` fails/timeouts due to a hang in `mv` when shim is injected.
-2.  **Standalone EXDEV Discrepancy**: Standard mutation shims return `EPERM` while `rename` requires `EXDEV` for fallback copy behaviors.
-3.  **GC/Phantom Demo Timeouts**: High-load scenarios occasionally trigger IPC backpressure leading to timeouts.
+### Remaining Regression Gaps (Medium Priority)
+1.  **Hardlink Boundary Protection**: `test_value_2_rename.sh` (3/4 pass) - hardlink across VFS boundary not blocked (RFC-0047).
+2.  **Session Persistence**: `test_v2_persistence.sh` - session still active after wake (minor issue).
 
 ---
 
