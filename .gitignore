@@ -91,3 +91,11 @@ tests/qa_v2/mini_read
 tests/qa_v2/mini_mkdir
 tests/qa_v2/repro_rwlock_stress
 tests/qa_v2/repro_rwlock_stress.dSYM
+
+# Compiled POC test binaries
+tests/poc/test_*_gap
+!tests/poc/test_*_gap.c
+!tests/poc/test_*_gap.sh
+
+# Test working directories
+test_cow_work/
