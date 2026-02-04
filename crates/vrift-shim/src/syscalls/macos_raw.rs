@@ -931,6 +931,171 @@ pub unsafe fn raw_fstatat64(
     ret as libc::c_int
 }
 
+/// SYS_linkat = 469 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_LINKAT: i64 = 469;
+
+/// SYS_chflags = 34 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_CHFLAGS: i64 = 34;
+
+/// SYS_setxattr = 236 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_SETXATTR: i64 = 236;
+
+/// SYS_removexattr = 238 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_REMOVEXATTR: i64 = 238;
+
+/// SYS_utimes = 138 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_UTIMES: i64 = 138;
+
+/// Raw linkat syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_linkat(
+    olddirfd: libc::c_int,
+    oldpath: *const libc::c_char,
+    newdirfd: libc::c_int,
+    newpath: *const libc::c_char,
+    flags: libc::c_int,
+) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_LINKAT,
+        in("x0") olddirfd as i64,
+        in("x1") oldpath as i64,
+        in("x2") newdirfd as i64,
+        in("x3") newpath as i64,
+        in("x4") flags as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
+/// Raw chflags syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_chflags(path: *const libc::c_char, flags: libc::c_uint) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_CHFLAGS,
+        in("x0") path as i64,
+        in("x1") flags as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
+/// Raw setxattr syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_setxattr(
+    path: *const libc::c_char,
+    name: *const libc::c_char,
+    value: *const libc::c_void,
+    size: libc::size_t,
+    position: u32,
+    options: libc::c_int,
+) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_SETXATTR,
+        in("x0") path as i64,
+        in("x1") name as i64,
+        in("x2") value as i64,
+        in("x3") size as i64,
+        in("x4") position as i64,
+        in("x5") options as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
+/// Raw removexattr syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_removexattr(
+    path: *const libc::c_char,
+    name: *const libc::c_char,
+    options: libc::c_int,
+) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_REMOVEXATTR,
+        in("x0") path as i64,
+        in("x1") name as i64,
+        in("x2") options as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
+/// Raw utimes syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_utimes(path: *const libc::c_char, times: *const libc::timeval) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_UTIMES,
+        in("x0") path as i64,
+        in("x1") times as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
 // =============================================================================
 // macOS x86_64 implementations
 // =============================================================================

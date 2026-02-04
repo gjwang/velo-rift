@@ -222,22 +222,17 @@ pub unsafe extern "C" fn linkat_shim(
     new: *const c_char,
     flags: c_int,
 ) -> c_int {
-    #[cfg(target_os = "macos")]
-    {
-        let real = std::mem::transmute::<
-            *mut libc::c_void,
-            unsafe extern "C" fn(c_int, *const c_char, c_int, *const c_char, c_int) -> c_int,
-        >(crate::reals::REAL_LINKAT.get());
-        passthrough_if_init!(real, oldfd, old, newfd, new, flags);
-        block_vfs_mutation(old)
-            .or_else(|| block_vfs_mutation(new))
-            .unwrap_or_else(|| real(oldfd, old, newfd, new, flags))
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state != 0 || crate::state::SHIM_STATE.load(Ordering::Acquire).is_null() {
+        if let Some(err) = quick_block_vfs_mutation(old).or_else(|| quick_block_vfs_mutation(new)) {
+            return err;
+        }
+        return crate::syscalls::macos_raw::raw_linkat(oldfd, old, newfd, new, flags);
     }
-    #[cfg(target_os = "linux")]
-    {
-        // For Linux, we don't have linkat shim yet, return passthrough
-        -1
-    }
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    block_vfs_mutation(old)
+        .or_else(|| block_vfs_mutation(new))
+        .unwrap_or_else(|| crate::syscalls::macos_raw::raw_linkat(oldfd, old, newfd, new, flags))
 }
 
 // ============================================================================
@@ -694,12 +689,10 @@ pub unsafe extern "C" fn chflags_shim(path: *const c_char, flags: libc::c_uint) 
         if let Some(err) = quick_block_vfs_mutation(path) {
             return err;
         }
+        return crate::syscalls::macos_raw::raw_chflags(path, flags);
     }
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(*const c_char, libc::c_uint) -> c_int,
-    >(crate::reals::REAL_CHFLAGS.get());
-    block_vfs_mutation(path).unwrap_or_else(|| real(path, flags))
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::macos_raw::raw_chflags(path, flags))
 }
 
 // --- xattr ---
@@ -723,19 +716,14 @@ pub unsafe extern "C" fn setxattr_shim(
         if let Some(err) = quick_block_vfs_mutation(path) {
             return err;
         }
+        return crate::syscalls::macos_raw::raw_setxattr(
+            path, name, value, size, position, options,
+        );
     }
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(
-            *const c_char,
-            *const c_char,
-            *const c_void,
-            libc::size_t,
-            u32,
-            c_int,
-        ) -> c_int,
-    >(crate::reals::REAL_SETXATTR.get());
-    block_vfs_mutation(path).unwrap_or_else(|| real(path, name, value, size, position, options))
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    block_vfs_mutation(path).unwrap_or_else(|| {
+        crate::syscalls::macos_raw::raw_setxattr(path, name, value, size, position, options)
+    })
 }
 
 #[no_mangle]
@@ -754,12 +742,11 @@ pub unsafe extern "C" fn removexattr_shim(
         if let Some(err) = quick_block_vfs_mutation(path) {
             return err;
         }
+        return crate::syscalls::macos_raw::raw_removexattr(path, name, options);
     }
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int,
-    >(crate::reals::REAL_REMOVEXATTR.get());
-    block_vfs_mutation(path).unwrap_or_else(|| real(path, name, options))
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    block_vfs_mutation(path)
+        .unwrap_or_else(|| crate::syscalls::macos_raw::raw_removexattr(path, name, options))
 }
 
 // ============================================================================
@@ -779,12 +766,10 @@ pub unsafe extern "C" fn utimes_shim(path: *const c_char, times: *const libc::ti
         if let Some(err) = quick_block_vfs_mutation(path) {
             return err;
         }
+        return crate::syscalls::macos_raw::raw_utimes(path, times);
     }
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(*const c_char, *const libc::timeval) -> c_int,
-    >(crate::reals::REAL_UTIMES.get());
-    block_vfs_mutation(path).unwrap_or_else(|| real(path, times))
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::macos_raw::raw_utimes(path, times))
 }
 
 /// utimensat_shim: Block timestamp modifications on VFS files (at variant)
