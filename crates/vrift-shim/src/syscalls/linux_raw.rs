@@ -994,11 +994,11 @@ pub unsafe fn raw_utimes(path: *const c_char, times: *const libc::timeval) -> c_
         let ts = [
             libc::timespec {
                 tv_sec: times_array[0].tv_sec,
-                tv_nsec: times_array[0].tv_usec as i64 * 1000,
+                tv_nsec: times_array[0].tv_usec * 1000,
             },
             libc::timespec {
                 tv_sec: times_array[1].tv_sec,
-                tv_nsec: times_array[1].tv_usec as i64 * 1000,
+                tv_nsec: times_array[1].tv_usec * 1000,
             },
         ];
         raw_utimensat(libc::AT_FDCWD, path, ts.as_ptr(), 0)
