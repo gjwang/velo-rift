@@ -677,21 +677,43 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
 
     let mmap_path_cstr = CString::new(mmap_path.to_string_lossy().as_ref()).unwrap_or_default();
 
+    #[cfg(target_os = "macos")]
     let fd =
         unsafe { crate::syscalls::macos_raw::raw_open(mmap_path_cstr.as_ptr(), libc::O_RDONLY, 0) };
+    #[cfg(target_os = "linux")]
+    let fd = unsafe {
+        crate::syscalls::linux_raw::raw_openat(
+            libc::AT_FDCWD,
+            mmap_path_cstr.as_ptr(),
+            libc::O_RDONLY,
+            0,
+        )
+    };
     if fd < 0 {
         return (ptr::null(), 0);
     }
 
     // Get file size via fstat
     let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { crate::syscalls::macos_raw::raw_fstat64(fd, &mut stat_buf) } != 0 {
-        unsafe { crate::syscalls::macos_raw::raw_close(fd) };
+    #[cfg(target_os = "macos")]
+    let fstat_result = unsafe { crate::syscalls::macos_raw::raw_fstat64(fd, &mut stat_buf) };
+    #[cfg(target_os = "linux")]
+    let fstat_result = unsafe { crate::syscalls::linux_raw::raw_fstat(fd, &mut stat_buf) };
+    if fstat_result != 0 {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            crate::syscalls::macos_raw::raw_close(fd)
+        };
+        #[cfg(target_os = "linux")]
+        unsafe {
+            crate::syscalls::linux_raw::raw_close(fd)
+        };
         return (ptr::null(), 0);
     }
     let size = stat_buf.st_size as usize;
 
     // mmap the file read-only
+    #[cfg(target_os = "macos")]
     let ptr = unsafe {
         crate::syscalls::macos_raw::raw_mmap(
             ptr::null_mut(),
@@ -702,7 +724,25 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
             0,
         )
     };
-    unsafe { crate::syscalls::macos_raw::raw_close(fd) };
+    #[cfg(target_os = "linux")]
+    let ptr = unsafe {
+        crate::syscalls::linux_raw::raw_mmap(
+            ptr::null_mut(),
+            size,
+            libc::PROT_READ,
+            libc::MAP_PRIVATE,
+            fd,
+            0,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        crate::syscalls::macos_raw::raw_close(fd)
+    };
+    #[cfg(target_os = "linux")]
+    unsafe {
+        crate::syscalls::linux_raw::raw_close(fd)
+    };
 
     if ptr == libc::MAP_FAILED {
         return (ptr::null(), 0);

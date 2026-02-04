@@ -26,6 +26,9 @@ use libc::{c_char, c_int, c_long, mode_t};
 #[cfg(target_os = "macos")]
 use libc::{c_void, dirent, pid_t, size_t, ssize_t, timespec, timeval, DIR};
 
+#[cfg(target_os = "linux")]
+use libc::{size_t, ssize_t};
+
 #[cfg(target_os = "macos")]
 #[repr(C)]
 pub struct Interpose {
