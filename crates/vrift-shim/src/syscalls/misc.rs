@@ -269,25 +269,40 @@ pub unsafe extern "C" fn link_shim(old: *const c_char, new: *const c_char) -> c_
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn linkat_shim(
-    oldfd: c_int,
-    old: *const c_char,
-    newfd: c_int,
-    new: *const c_char,
+    olddirfd: c_int,
+    oldpath: *const c_char,
+    newdirfd: c_int,
+    path: *const c_char,
     flags: c_int,
 ) -> c_int {
     let init_state = INITIALIZING.load(Ordering::Relaxed);
     if init_state != 0 || crate::state::SHIM_STATE.load(Ordering::Acquire).is_null() {
-        if let Some(err) = quick_block_vfs_mutation(old).or_else(|| quick_block_vfs_mutation(new)) {
+        if let Some(err) =
+            quick_block_vfs_mutation(oldpath).or_else(|| quick_block_vfs_mutation(path))
+        {
             return err;
         }
-        return crate::syscalls::macos_raw::raw_linkat(oldfd, old, newfd, new, flags);
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_linkat(olddirfd, oldpath, newdirfd, path, flags);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_linkat(olddirfd, oldpath, newdirfd, path, flags);
     }
-    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-    block_vfs_mutation(old)
-        .or_else(|| block_vfs_mutation(new))
-        .unwrap_or_else(|| crate::syscalls::macos_raw::raw_linkat(oldfd, old, newfd, new, flags))
+    if let Some(res) = link_impl(oldpath, path) {
+        return res;
+    }
+    block_vfs_mutation(oldpath)
+        .or_else(|| block_vfs_mutation(path))
+        .unwrap_or_else(|| {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_linkat(
+                olddirfd, oldpath, newdirfd, path, flags,
+            );
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_linkat(
+                olddirfd, oldpath, newdirfd, path, flags,
+            );
+        })
 }
 
 // ============================================================================
