@@ -106,17 +106,32 @@ static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
 // Linux interception is handled in interpose.rs using Rust shims to ensure
 // reliable symbol export. macOS shimming uses this C bridge to handle variadic
 // ABI.
+#include <fcntl.h>
+#include <stdarg.h>
+
 #if defined(__APPLE__)
-int c_open_bridge(const char *path, int flags, mode_t mode) {
-  // RFC-0050: State 2 (Early-Init) or 3 (Inside-Init) must use raw syscalls.
-  // State 1 (Ready) transitions to Rust. State 0 (Done) is normal operation.
+int c_open_bridge(const char *path, int flags, ...) {
+  mode_t mode = 0;
+  if (flags & O_CREAT) {
+    va_list args;
+    va_start(args, flags);
+    mode = (mode_t)va_arg(args, int);
+    va_end(args);
+  }
   if (INITIALIZING == 2 || INITIALIZING == 3) {
     return (int)raw_syscall(SYS_OPEN, (long)path, (long)flags, (long)mode, 0);
   }
   return velo_open_impl(path, flags, mode);
 }
 
-int c_openat_bridge(int dirfd, const char *path, int flags, mode_t mode) {
+int c_openat_bridge(int dirfd, const char *path, int flags, ...) {
+  mode_t mode = 0;
+  if (flags & O_CREAT) {
+    va_list args;
+    va_start(args, flags);
+    mode = (mode_t)va_arg(args, int);
+    va_end(args);
+  }
   if (INITIALIZING == 2 || INITIALIZING == 3) {
     return (int)raw_syscall(SYS_OPENAT, (long)dirfd, (long)path, (long)flags,
                             (long)mode);
@@ -124,6 +139,29 @@ int c_openat_bridge(int dirfd, const char *path, int flags, mode_t mode) {
   return velo_openat_impl(dirfd, path, flags, mode);
 }
 #endif
+
+#define SYS_RENAME 128
+#define SYS_RENAMEAT 444
+
+extern int velo_rename_impl(const char *old, const char *new);
+extern int velo_renameat_impl(int oldfd, const char *old, int newfd,
+                              const char *new);
+
+#if defined(__APPLE__)
+int c_rename_bridge(const char *old, const char *new) {
+  if (INITIALIZING == 2 || INITIALIZING == 3) {
+    return (int)raw_syscall(SYS_RENAME, (long)old, (long)new, 0, 0);
+  }
+  return velo_rename_impl(old, new);
+}
+
+int c_renameat_bridge(int oldfd, const char *old, int newfd, const char *new) {
+  if (INITIALIZING == 2 || INITIALIZING == 3) {
+    return (int)raw_syscall(SYS_RENAMEAT, (long)oldfd, (long)old, (long)newfd,
+                            (long)new);
+  }
+  return velo_renameat_impl(oldfd, old, newfd, new);
+}
 
 /* --- fcntl variadic bridge --- */
 
@@ -133,4 +171,5 @@ extern int velo_fcntl_impl(int fd, int cmd, long arg);
 int fcntl_shim_c_impl(int fd, int cmd, long arg) {
   return velo_fcntl_impl(fd, cmd, arg);
 }
+#endif
 #endif

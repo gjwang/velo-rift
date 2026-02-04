@@ -27,32 +27,44 @@ unsafe fn rename_impl(old: *const c_char, new: *const c_char) -> Option<c_int> {
         return Some(-1);
     }
 
+    // Both in VFS territory -> Virtual Rename via Daemon IPC
+    if old_in_vfs && new_in_vfs {
+        if let (Some(v1), Some(v2)) = (state.resolve_path(old_str), state.resolve_path(new_str)) {
+            // RFC-0047: Only use Virtual Rename for managed files.
+            // For local files in VFS territory, let raw_rename handle it.
+            if state.query_manifest_ipc(&v1).is_some() {
+                if state
+                    .manifest_rename(&v1.manifest_key, &v2.manifest_key)
+                    .is_ok()
+                {
+                    return Some(0);
+                }
+                crate::set_errno(libc::EPERM);
+                return Some(-1);
+            }
+        }
+        return None; // Fallback to raw syscall for local files
+    }
+
     None // Let real syscall handle non-VFS renames
 }
 
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn rename_shim(old: *const c_char, new: *const c_char) -> c_int {
-    // BUG-007: Use raw syscall during early init OR when shim not fully ready
-    // to avoid dlsym recursion and TLS pthread deadlock
-    let init_state = INITIALIZING.load(Ordering::Relaxed);
-    if init_state >= 2
-        || crate::state::SHIM_STATE
-            .load(std::sync::atomic::Ordering::Acquire)
-            .is_null()
-    {
-        // Check VFS mutation perimeter even in raw syscall path
-        if let Some(err) = quick_block_vfs_mutation(old).or_else(|| quick_block_vfs_mutation(new)) {
-            return err;
-        }
-        return crate::syscalls::macos_raw::raw_rename(old, new);
+    extern "C" {
+        fn c_rename_bridge(old: *const c_char, new: *const c_char) -> c_int;
     }
+    c_rename_bridge(old, new)
+}
 
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(*const c_char, *const c_char) -> c_int,
-    >(crate::reals::REAL_RENAME.get());
-    rename_impl(old, new).unwrap_or_else(|| real(old, new))
+#[no_mangle]
+pub unsafe extern "C" fn velo_rename_impl(old: *const c_char, new: *const c_char) -> c_int {
+    // RFC-0047 logic + fallback to raw
+    if let Some(res) = rename_impl(old, new) {
+        return res;
+    }
+    crate::syscalls::macos_raw::raw_rename(old, new)
 }
 
 /// Linux-specific rename shim. Returns -2 if passthrough to real syscall is needed.
@@ -70,44 +82,31 @@ pub unsafe extern "C" fn renameat_shim(
     newfd: c_int,
     new: *const c_char,
 ) -> c_int {
-    #[cfg(target_os = "macos")]
-    {
-        // BUG-007: Use raw syscall during early init OR when shim not fully ready
-        // to avoid dlsym recursion and TLS pthread deadlock
-        let init_state = INITIALIZING.load(Ordering::Relaxed);
-        if init_state >= 2
-            || crate::state::SHIM_STATE
-                .load(std::sync::atomic::Ordering::Acquire)
-                .is_null()
-        {
-            // Check VFS mutation perimeter even in raw syscall path
-            if let Some(err) =
-                quick_block_vfs_mutation(old).or_else(|| quick_block_vfs_mutation(new))
-            {
-                return err;
-            }
-            return crate::syscalls::macos_raw::raw_renameat(oldfd, old, newfd, new);
-        }
-
-        let real = std::mem::transmute::<
-            *mut libc::c_void,
-            unsafe extern "C" fn(c_int, *const c_char, c_int, *const c_char) -> c_int,
-        >(crate::reals::REAL_RENAMEAT.get());
-
-        // Resolve relative paths using getcwd for AT_FDCWD case
-        if oldfd == libc::AT_FDCWD && newfd == libc::AT_FDCWD {
-            if let Some(result) = renameat_impl(old, new) {
-                return result;
-            }
-        }
-        real(oldfd, old, newfd, new)
+    extern "C" {
+        fn c_renameat_bridge(
+            oldfd: c_int,
+            old: *const c_char,
+            newfd: c_int,
+            new: *const c_char,
+        ) -> c_int;
     }
-    #[cfg(target_os = "linux")]
-    {
-        // For Linux, we don't have renameat shim yet, return passthrough
-        // TODO: Implement renameat for Linux
-        -1
+    c_renameat_bridge(oldfd, old, newfd, new)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn velo_renameat_impl(
+    oldfd: c_int,
+    old: *const c_char,
+    newfd: c_int,
+    new: *const c_char,
+) -> c_int {
+    // Resolve relative paths using getcwd for AT_FDCWD case
+    if oldfd == libc::AT_FDCWD && newfd == libc::AT_FDCWD {
+        if let Some(result) = renameat_impl(old, new) {
+            return result;
+        }
     }
+    crate::syscalls::macos_raw::raw_renameat(oldfd, old, newfd, new)
 }
 
 /// renameat path resolution helper - resolves relative paths to absolute
@@ -232,42 +231,39 @@ pub unsafe extern "C" fn linkat_shim(
 // ============================================================================
 
 #[no_mangle]
+#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn unlink_shim(path: *const c_char) -> c_int {
-    #[cfg(target_os = "macos")]
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
     {
-        // BUG-007: Use raw syscall when shim not fully ready to avoid TLS deadlock
-        let init_state = INITIALIZING.load(Ordering::Relaxed);
-        if init_state >= 2
-            || crate::state::SHIM_STATE
-                .load(std::sync::atomic::Ordering::Acquire)
-                .is_null()
-        {
-            if let Some(err) = quick_block_vfs_mutation(path) {
-                return err;
-            }
-            return crate::syscalls::macos_raw::raw_unlink(path);
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
         }
-        let real = std::mem::transmute::<
-            *mut libc::c_void,
-            unsafe extern "C" fn(*const c_char) -> c_int,
-        >(crate::reals::REAL_UNLINK.get());
-        block_vfs_mutation(path).unwrap_or_else(|| real(path))
+        return crate::syscalls::macos_raw::raw_unlink(path);
     }
-    #[cfg(target_os = "linux")]
+
+    // Pattern 2878: Always prefer raw syscall to avoid dlsym recursion in flat namespace
+    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::macos_raw::raw_unlink(path))
+}
+
+#[no_mangle]
+#[cfg(target_os = "linux")]
+pub unsafe extern "C" fn unlink_shim(path: *const c_char) -> c_int {
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
     {
-        let init_state = INITIALIZING.load(Ordering::Relaxed);
-        if init_state >= 2
-            || crate::state::SHIM_STATE
-                .load(std::sync::atomic::Ordering::Acquire)
-                .is_null()
-        {
-            if let Some(err) = quick_block_vfs_mutation(path) {
-                return err;
-            }
-            return crate::syscalls::linux_raw::raw_unlink(path);
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
         }
-        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_rmdir(path))
+        return crate::syscalls::linux_raw::raw_unlink(path);
     }
+    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_unlink(path))
 }
 
 #[no_mangle]
@@ -380,41 +376,39 @@ pub unsafe extern "C" fn symlinkat_shim(
 }
 
 #[no_mangle]
+#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
-    #[cfg(target_os = "macos")]
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
     {
-        let init_state = INITIALIZING.load(Ordering::Relaxed);
-        if init_state >= 2
-            || crate::state::SHIM_STATE
-                .load(std::sync::atomic::Ordering::Acquire)
-                .is_null()
-        {
-            if let Some(err) = quick_block_vfs_mutation(path) {
-                return err;
-            }
-            return crate::syscalls::macos_raw::raw_rmdir(path);
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
         }
-        let real = std::mem::transmute::<
-            *mut libc::c_void,
-            unsafe extern "C" fn(*const c_char) -> c_int,
-        >(crate::reals::REAL_RMDIR.get());
-        block_vfs_mutation(path).unwrap_or_else(|| real(path))
+        return crate::syscalls::macos_raw::raw_rmdir(path);
     }
-    #[cfg(target_os = "linux")]
+
+    // Pattern 2878: Use raw syscall to avoid dlsym recursion
+    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::macos_raw::raw_rmdir(path))
+}
+
+#[no_mangle]
+#[cfg(target_os = "linux")]
+pub unsafe extern "C" fn rmdir_shim(path: *const c_char) -> c_int {
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
     {
-        let init_state = INITIALIZING.load(Ordering::Relaxed);
-        if init_state >= 2
-            || crate::state::SHIM_STATE
-                .load(std::sync::atomic::Ordering::Acquire)
-                .is_null()
-        {
-            if let Some(err) = quick_block_vfs_mutation(path) {
-                return err;
-            }
-            return crate::syscalls::linux_raw::raw_rmdir(path);
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
         }
-        block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_rmdir(path))
+        return crate::syscalls::linux_raw::raw_rmdir(path);
     }
+    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_rmdir(path))
 }
 
 #[no_mangle]
@@ -431,11 +425,9 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
         }
         return crate::syscalls::macos_raw::raw_mkdir(path, mode);
     }
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(*const c_char, libc::mode_t) -> c_int,
-    >(crate::reals::REAL_MKDIR.get());
-    block_vfs_mutation(path).unwrap_or_else(|| real(path, mode))
+
+    // Pattern 2878: Use raw syscall to avoid dlsym recursion
+    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::macos_raw::raw_mkdir(path, mode))
 }
 
 #[no_mangle]
@@ -468,30 +460,43 @@ pub(crate) unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
     // First try: Full shim state check (daemon connected)
     if let Some(_guard) = ShimGuard::enter() {
         if let Some(state) = ShimState::get() {
-            if state.psfs_applicable(path_str) {
-                crate::set_errno(libc::EPERM);
-                return Some(-1);
+            if let Some(vpath) = state.resolve_path(path_str) {
+                // RFC-0047: ONLY block mutation if path is actually managed by the manifest
+                // (i.e., it's a virtual file). Allow mutations on local files in VFS territory.
+                if state.query_manifest_ipc(&vpath).is_some() {
+                    crate::set_errno(libc::EPERM);
+                    return Some(-1);
+                }
             }
             return None;
         }
     }
 
-    // Fallback: Standalone VFS prefix check (no daemon needed)
-    // This ensures mutation perimeter works even in tests without full daemon
-    // CRITICAL: Use libc::getenv() directly to avoid TLS hang (Pattern 2648)
-    // std::env::var() triggers Rust runtime TLS which hangs during shim init
+    if quick_is_in_vfs(path) {
+        crate::set_errno(libc::EPERM);
+        return Some(-1);
+    }
+    None
+}
+
+#[inline]
+pub(crate) unsafe fn quick_is_in_vfs(path: *const c_char) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    let path_str = if let Ok(s) = CStr::from_ptr(path).to_str() {
+        s
+    } else {
+        return false;
+    };
     let env_name = b"VRIFT_VFS_PREFIX\0";
     let vfs_prefix_ptr = libc::getenv(env_name.as_ptr() as *const c_char);
     if !vfs_prefix_ptr.is_null() {
         if let Ok(vfs_prefix) = CStr::from_ptr(vfs_prefix_ptr).to_str() {
-            if path_str.starts_with(vfs_prefix) {
-                crate::set_errno(libc::EPERM);
-                return Some(-1);
-            }
+            return path_str.starts_with(vfs_prefix);
         }
     }
-
-    None
+    false
 }
 
 /// Lightweight VFS check for raw syscall path - avoids TLS/ShimGuard

@@ -1294,19 +1294,19 @@ impl ShimState {
         }
     }
 
-    /// RFC-0047: Create directory entry in manifest
-    #[allow(clippy::unnecessary_cast)] // mode_t is u16 on macOS, u32 on Linux
-    pub(crate) fn manifest_mkdir(&self, path: &str, mode: libc::mode_t) -> Result<(), ()> {
-        if unsafe { sync_ipc_manifest_mkdir(&self.socket_path, path, mode as u32) } {
+    /// RFC-0047: Rename/move entry in manifest
+    pub(crate) fn manifest_rename(&self, old: &str, new: &str) -> Result<(), ()> {
+        if unsafe { sync_ipc_manifest_rename(&self.socket_path, old, new) } {
             Ok(())
         } else {
             Err(())
         }
     }
 
-    /// RFC-0047: Rename manifest entry
-    pub(crate) fn manifest_rename(&self, old_path: &str, new_path: &str) -> Result<(), ()> {
-        if unsafe { sync_ipc_manifest_rename(&self.socket_path, old_path, new_path) } {
+    /// RFC-0047: Create directory entry in manifest
+    #[allow(clippy::unnecessary_cast)] // mode_t is u16 on macOS, u32 on Linux
+    pub(crate) fn manifest_mkdir(&self, path: &str, mode: libc::mode_t) -> Result<(), ()> {
+        if unsafe { sync_ipc_manifest_mkdir(&self.socket_path, path, mode as u32) } {
             Ok(())
         } else {
             Err(())
