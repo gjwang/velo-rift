@@ -11,7 +11,8 @@
 # Usage: source compile_test_binaries.sh $TEST_DIR/bin
 #        This creates: $TEST_DIR/bin/echo, $TEST_DIR/bin/chmod, etc.
 
-set -e
+# Avoid set -e here to prevent polluting calls that source this file
+# set -e
 
 if [ -z "$1" ]; then
     echo "Usage: $0 <output_dir>"
@@ -80,9 +81,14 @@ cc -O2 -o "$BIN_DIR/chmod" "$SRC_DIR/chmod.c"
 cat > "$SRC_DIR/rm.c" << 'EOF'
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 int main(int argc, char **argv) {
     int force = 0, i = 1;
-    if (argc > 1 && argv[1][0] == '-' && argv[1][1] == 'f') { force = 1; i = 2; }
+    // Skip common flags like -f, -rf, -r
+    while (i < argc && argv[i][0] == '-') {
+        if (strstr(argv[i], "f")) force = 1;
+        i++;
+    }
     for (; i < argc; i++) {
         if (unlink(argv[i]) < 0 && !force) { perror(argv[i]); return 1; }
     }
@@ -145,9 +151,16 @@ cat > "$SRC_DIR/mkdir.c" << 'EOF'
 #include <string.h>
 int main(int argc, char **argv) {
     int i = 1;
-    if (argc > 1 && strcmp(argv[1], "-p") == 0) i = 2;
+    // Skip common flags like -p
+    while (i < argc && argv[i][0] == '-') i++;
     for (; i < argc; i++) {
-        if (mkdir(argv[i], 0755) < 0) { perror(argv[i]); return 1; }
+        if (mkdir(argv[i], 0755) < 0) {
+            // In a real mkdir -p, this wouldn't be an error if it exists
+            // But for simple test wrapper, we just try to be a bit more robust
+            struct stat st;
+            if (stat(argv[i], &st) == 0 && S_ISDIR(st.st_mode)) continue;
+            perror(argv[i]); return 1;
+        }
     }
     return 0;
 }
