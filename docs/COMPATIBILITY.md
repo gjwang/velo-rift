@@ -154,7 +154,8 @@ All syscall gaps are categorized below. Each **Must Fix** item has or requires a
 | Syscall | Risk | Test (POC) | Status | Notes |
 |:--------|:-----|:-----------|:------:|:------|
 | `futimens/futimes` | Modify times via FD | `test_futimens_gap.c` ✅ | ⏳ | Proven bypass, low impact |
-| `sendfile` | Copy data bypass | `test_sendfile_gap.c` ✅ | ⏳ | Prove:///Users/antigravity/rust_sourcn bypass, rare use |
+| `sendfile` | Copy data bypass | `test_sendfile_gap.c` ✅ | ⏳ | Proven bypass, rare use |
+
 | `copy_file_range` | Copy data bypass (Linux) | `test_copy_file_range_gap.c` ✅ | ⏳ | Linux only |
 | `creat` | Legacy file creation | TBD | ⏳ | Rare, can use open |
 | `getattrlist/setattrlist` | macOS metadata | TBD | ⏳ | Advanced, rare |
