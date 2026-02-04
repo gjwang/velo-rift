@@ -42,5 +42,6 @@ This report details critical architectural deviations and stability regressions 
 ---
 
 ## 🧪 Verification Artifacts
-- **Test Script**: [v-inception-stress.sh](file:///Users/antigravity/rust_source/vrift_qa/tests/qa_v2/v-inception-stress.sh)
+- **Test Script**: `tests/qa_v2/v-inception-stress.sh`
 - **Diagnostic Logs**: Available at `/tmp/vrift_endgame_stress/vriftd.log`
+
