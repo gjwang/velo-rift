@@ -92,7 +92,7 @@ Server receives hundreds of IPC messages per second.
 
 ## Summary of the "Memory-First" Flow
 
-1.  **Compiler**: Writes `.o` to `/dev/shm/pool` (via Shim).
+1.  **Compiler**: Writes `.o` to `/dev/shm/pool` (via InceptionLayer).
 2.  **Server**: Sees data instantly. Computes Hash.
 3.  **Dedup**: Finds duplicate. Frees SHM chunk.
 4.  **Result**: 

@@ -52,8 +52,8 @@ To prevent deadlocks during syscall interception, vrift follows **Provably-Side-
 **Implementation pattern**:
 ```c
 int vrift_stat(const char *path, struct stat *buf) {
-    // RFC-0044: Skip if shim not initialized (malloc not ready)
-    if (!SHIM_STATE_INITIALIZED) {
+    // RFC-0044: Skip if InceptionLayer not initialized (malloc not ready)
+    if (!INCEPTION_LAYER_STATE_INITIALIZED) {
         return real_stat(path, buf);  // Early init safety
     }
     
@@ -90,16 +90,16 @@ int vrift_stat(const char *path, struct stat *buf) {
 
 **Non-Responsibilities**:
 - ❌ No direct IO for project files
-- ❌ No direct interaction with Shims (Clients)
+- ❌ No direct interaction with InceptionLayers (Clients)
 
 ### 2. vdir_d (Project Micro-Daemon)
 
 **Responsibilities**:
 - **Per-Project Isolation**: One process per project root
 - **Local VDir Management**: Sole writer of the project's Virtual Directory
-- **Streaming Ingestion**: Consumes RingBuffer data from Shims
+- **Streaming Ingestion**: Consumes RingBuffer data from InceptionLayers
 - **Hash & Dedup**: Computes hashes and promotes data to CAS
-- **Lifecycle**: Auto-spawned by shim, auto-exit on idle
+- **Lifecycle**: Auto-spawned by InceptionLayer, auto-exit on idle
 
 ### 3. InceptionLayer (The Transparent Runtime)
 
