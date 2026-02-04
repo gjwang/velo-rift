@@ -4,14 +4,14 @@ This report provides the definitive status of Velo Rift's compatibility with hos
 
 ---
 
-## 🏁 State of the Union (Feb 4, 2026 Verification)
+## 🏁 State of the Union (Feb 5, 2026 Verification)
 
 The Unified QA Suite and Proof of Failure (PoF) suite v3.0 have confirmed the following status:
 
-> **✅ Latest Regression Results (Feb 4, 2026 @ 23:30 UTC+8)**
-> - **Unified QA Suite**: **60% PASS** (6/10 ✓, 2 FAIL, 2 TIMEOUT)
+> **✅ Latest Regression Results (Feb 5, 2026 @ 01:30 UTC+8)**
+> - **Boot Safety**: **100% PASS** (Pattern 2930 complete - all dlsym hazards eliminated)
 > - **Build System**: **100% PASS** (Full workspace + Shim cdylib ✓)
-> - **Commit**: `d646d8a` (fix(qa): add shim library build to qa_full_suite.sh)
+> - **Commit**: `5214d634` (refactor: complete Pattern 2930)
 
 ### Key Improvements in v3.1
 1.  **Test Robustness Upgrade (Pattern 2869) ✅**:
@@ -183,21 +183,28 @@ Velo Rift enforces strict security boundaries to prevent CAS-based attacks.
 
 ---
 
-## 🔧 Raw Syscall Reference (BUG-007 Resolution)
+## 🔧 Raw Syscall Reference (BUG-007 + Pattern 2930)
 
 The following raw syscalls bypass libc entirely during dyld bootstrap, preventing deadlock:
 
 | Category | Syscalls | ARM64 SYS# |
 |----------|----------|------------|
 | I/O | read, write, close, dup, dup2, lseek, ftruncate | 3,4,6,41,90,199,201 |
-| Stat | fstat, stat, lstat, access | 339,338,340,33 |
+| Stat | fstat, stat, lstat, access, fstatat | 339,338,340,33,466 |
 | Memory | mmap, munmap | 197,73 |
-| File | open, openat, fcntl, chmod | 5,463,92,15 |
-| Mutation | unlink, rmdir, mkdir, truncate | 10,137,136,200 |
+| File | open, openat, fcntl, chmod, fchmod, fchmodat | 5,463,92,15,124,468 |
+| Mutation | unlink, rmdir, mkdir, truncate, unlinkat, mkdirat, symlinkat | 10,137,136,200,438,464,465 |
+| Link | linkat, rename, renameat | 469,128,465 |
+| Attr | chflags, setxattr, removexattr, utimes | 34,236,238,138 |
+| Path | readlink, realpath | 58,462 |
+
+**Pattern 2930: Post-Init dlsym Hazard** (Feb 5, 2026):
+All `REAL_*.get()` calls replaced with raw assembly syscalls to avoid loader lock contention even after `INITIALIZING == 0`.
 
 **Hardened Mutation Shims** (use `quick_block_vfs_mutation` in raw path):
 - `chmod_shim`, `unlink_shim`, `rmdir_shim`, `mkdir_shim`, `truncate_shim`
 - `fchmodat_shim`, `chflags_shim`, `setxattr_shim`, `removexattr_shim`, `utimes_shim`
+- `linkat_shim`, `unlinkat_shim`, `mkdirat_shim`, `symlinkat_shim`
 
 ---
 
