@@ -5,7 +5,7 @@ use crate::ProjectConfig;
 use anyhow::Result;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 use vrift_ipc::{VeloRequest, VeloResponse, VnodeEntry};
 
@@ -188,17 +188,9 @@ impl CommandHandler {
         }
     }
 
-    /// Ingest temp file to CAS
-    async fn ingest_to_cas(
-        &self,
-        _temp: &PathBuf,
-        cas_path: &PathBuf,
-        content: &[u8],
-    ) -> Result<()> {
-        // Ensure parent directory exists
-        if let Some(parent) = cas_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    /// Ingest temp file to CAS using reflink with automatic fallback
+    async fn ingest_to_cas(&self, temp: &Path, cas_path: &Path, _content: &[u8]) -> Result<()> {
+        use vrift_cas::reflink::ingest_with_fallback;
 
         // Skip if already exists (content-addressed)
         if cas_path.exists() {
@@ -206,31 +198,25 @@ impl CommandHandler {
             return Ok(());
         }
 
-        // Try reflink first (zero-copy)
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::io::AsRawFd;
-            let src = fs::File::open(temp)?;
-            let dst = fs::File::create(cas_path)?;
-
-            let result = unsafe {
-                libc::ioctl(
-                    dst.as_raw_fd(),
-                    0x40049409, // FICLONE
-                    src.as_raw_fd(),
-                )
-            };
-
-            if result == 0 {
-                debug!("Used reflink for CAS ingestion");
-                return Ok(());
+        // Use reflink module with automatic fallback chain:
+        // 1. reflink (zero-copy CoW)
+        // 2. hardlink (same inode)
+        // 3. copy (full data copy)
+        match ingest_with_fallback(temp, cas_path) {
+            Ok(method) => {
+                debug!(
+                    src = %temp.display(),
+                    dst = %cas_path.display(),
+                    method = %method,
+                    "CAS ingestion complete"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                error!(error = %e, "CAS ingestion failed");
+                Err(anyhow::anyhow!("Ingestion failed: {}", e))
             }
         }
-
-        // Fallback: write content
-        fs::write(cas_path, content)?;
-        debug!(path = %cas_path.display(), "Wrote CAS blob");
-        Ok(())
     }
 }
 

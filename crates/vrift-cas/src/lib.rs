@@ -26,6 +26,7 @@ mod io_backend;
 pub mod link_strategy;
 pub mod parallel_ingest;
 pub mod protection;
+pub mod reflink;
 pub mod streaming_pipeline;
 pub mod zero_copy_ingest;
 
