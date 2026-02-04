@@ -635,3 +635,29 @@ pub unsafe extern "C" fn openat64(
 ) -> c_int {
     crate::syscalls::open::velo_openat_impl(dirfd, path, flags, mode)
 }
+
+// Linux chmod interception - blocks VFS mutations
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn chmod(path: *const c_char, mode: mode_t) -> c_int {
+    // Check VFS prefix to block mutations on VFS-managed files
+    if let Some(err) = crate::syscalls::misc::quick_block_vfs_mutation(path) {
+        return err;
+    }
+    crate::syscalls::linux_raw::raw_chmod(path, mode)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn fchmodat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: mode_t,
+    flags: c_int,
+) -> c_int {
+    // Check VFS prefix to block mutations on VFS-managed files
+    if let Some(err) = crate::syscalls::misc::quick_block_vfs_mutation(path) {
+        return err;
+    }
+    crate::syscalls::linux_raw::raw_fchmodat(dirfd, path, mode, flags)
+}
