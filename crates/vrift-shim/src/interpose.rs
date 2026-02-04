@@ -703,11 +703,24 @@ pub unsafe extern "C" fn fchmodat(
     crate::syscalls::linux_raw::raw_fchmodat(dirfd, path, mode, flags)
 }
 
-// NOTE: unlink/unlinkat/rename/renameat exports removed to allow VFS internal moves.
-// The VFS system uses copy+unlink fallback for moves, and blocking unlink prevents
-// the fallback from completing. For proper mutation blocking, these would need
-// daemon communication to update the manifest, which is not yet implemented.
-// See: test_value_2_rename.sh requires internal VFS moves to work.
+// Linux unlink/rm interception - blocks VFS mutations
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
+    if let Some(err) = crate::syscalls::misc::quick_block_vfs_mutation(path) {
+        return err;
+    }
+    crate::syscalls::linux_raw::raw_unlink(path)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
+    if let Some(err) = crate::syscalls::misc::quick_block_vfs_mutation(path) {
+        return err;
+    }
+    crate::syscalls::linux_raw::raw_unlinkat(dirfd, path, flags)
+}
 
 // Linux utimensat/touch interception
 #[cfg(target_os = "linux")]
