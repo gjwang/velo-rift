@@ -5,9 +5,7 @@
 
 #[cfg(target_os = "macos")]
 use crate::state::ShimGuard;
-use libc::c_int;
-use libc::c_void;
-use libc::off_t;
+use libc::{c_int, c_void, off_t, size_t, ssize_t};
 use std::sync::atomic::AtomicUsize;
 
 /// Global counter for open FDs to monitor saturation (RFC-0051)
@@ -214,11 +212,7 @@ pub unsafe extern "C" fn ftruncate_shim(fd: c_int, length: off_t) -> c_int {
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn write_shim(
-    fd: c_int,
-    buf: *const c_void,
-    count: libc::size_t,
-) -> libc::ssize_t {
+pub unsafe extern "C" fn write_shim(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
     #[cfg(target_os = "macos")]
     return crate::syscalls::macos_raw::raw_write(fd, buf, count);
     #[cfg(target_os = "linux")]
@@ -226,11 +220,7 @@ pub unsafe extern "C" fn write_shim(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn read_shim(
-    fd: c_int,
-    buf: *mut c_void,
-    count: libc::size_t,
-) -> libc::ssize_t {
+pub unsafe extern "C" fn read_shim(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
     #[cfg(target_os = "macos")]
     return crate::syscalls::macos_raw::raw_read(fd, buf, count);
     #[cfg(target_os = "linux")]
