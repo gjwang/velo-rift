@@ -6,9 +6,7 @@
 #[cfg(target_os = "macos")]
 use crate::state::ShimGuard;
 use libc::c_int;
-#[cfg(target_os = "macos")]
 use libc::c_void;
-#[cfg(target_os = "macos")]
 use libc::off_t;
 use std::sync::atomic::AtomicUsize;
 
@@ -202,11 +200,13 @@ pub unsafe extern "C" fn lseek_shim(fd: c_int, offset: off_t, whence: c_int) -> 
 // ftruncate shim - truncate VFS file's CoW copy
 // ============================================================================
 
-#[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn ftruncate_shim(fd: c_int, length: off_t) -> c_int {
     // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-    crate::syscalls::macos_raw::raw_ftruncate(fd, length)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_ftruncate(fd, length);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_ftruncate(fd, length);
 }
 
 // ============================================================================
@@ -240,20 +240,32 @@ pub unsafe extern "C" fn read_shim(
 pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     use crate::state::{EventType, ShimGuard, ShimState};
 
-    // BUG-007 / RFC-0051: Use raw syscall to completely bypass libc/dlsym during critical phases.
     let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
     if init_state != 0 || crate::state::CIRCUIT_TRIPPED.load(std::sync::atomic::Ordering::Relaxed) {
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_close(fd);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_close(fd);
     }
 
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
-        None => return crate::syscalls::macos_raw::raw_close(fd),
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_close(fd);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_close(fd);
+        }
     };
 
     let state = match ShimState::get() {
         Some(s) => s,
-        None => return crate::syscalls::macos_raw::raw_close(fd),
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_close(fd);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_close(fd);
+        }
     };
 
     // RFC-0051: Monitor FD usage on close (to reset warning thresholds)
@@ -275,7 +287,10 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     vfs_record!(EventType::Close, file_id, fd);
 
     // Final close of the file
+    #[cfg(target_os = "macos")]
     let res = crate::syscalls::macos_raw::raw_close(fd);
+    #[cfg(target_os = "linux")]
+    let res = crate::syscalls::linux_raw::raw_close(fd);
 
     // Offload IPC task to Worker (asynchronous)
     if let Some(info) = cow_info {
@@ -302,6 +317,9 @@ pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     } else {
         // Not a COW file, but might be a VFS read-only file or non-VFS file
         untrack_fd(fd);
-        crate::syscalls::macos_raw::raw_close(fd)
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_close(fd);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_close(fd);
     }
 }

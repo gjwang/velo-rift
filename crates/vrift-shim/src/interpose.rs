@@ -768,14 +768,31 @@ pub unsafe extern "C" fn fchownat(
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
-pub unsafe extern "C" fn truncate(path: *const c_char, length: off_t) -> c_int {
+pub unsafe extern "C" fn truncate(path: *const c_char, length: libc::off_t) -> c_int {
     crate::syscalls::misc::truncate_shim(path, length)
 }
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
-pub unsafe extern "C" fn ftruncate(fd: c_int, length: off_t) -> c_int {
+pub unsafe extern "C" fn ftruncate(fd: c_int, length: libc::off_t) -> c_int {
     crate::syscalls::io::ftruncate_shim(fd, length)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int {
+    crate::syscalls::misc::rename_shim_linux(old, new)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn renameat(
+    oldfd: c_int,
+    old: *const c_char,
+    newfd: c_int,
+    new: *const c_char,
+) -> c_int {
+    crate::syscalls::misc::renameat_shim_linux(oldfd, old, newfd, new)
 }
 
 #[cfg(target_os = "linux")]

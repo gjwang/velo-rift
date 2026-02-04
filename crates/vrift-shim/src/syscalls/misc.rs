@@ -78,7 +78,24 @@ pub unsafe extern "C" fn velo_rename_impl(old: *const c_char, new: *const c_char
 #[cfg(target_os = "linux")]
 #[no_mangle]
 pub unsafe extern "C" fn rename_shim_linux(old: *const c_char, new: *const c_char) -> c_int {
-    rename_impl(old, new).unwrap_or(-2) // -2 is a magic value to signal passthrough
+    if let Some(res) = rename_impl(old, new) {
+        return res;
+    }
+    crate::syscalls::linux_raw::raw_rename(old, new)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn renameat_shim_linux(
+    oldfd: c_int,
+    old: *const c_char,
+    newfd: c_int,
+    new: *const c_char,
+) -> c_int {
+    if let Some(res) = renameat_impl(old, new) {
+        return res;
+    }
+    crate::syscalls::linux_raw::raw_renameat(oldfd, old, newfd, new)
 }
 
 #[no_mangle]
@@ -873,7 +890,6 @@ pub unsafe extern "C" fn exchangedata_shim(
 // --- truncate ---
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn truncate_shim(path: *const c_char, length: libc::off_t) -> c_int {
     let init_state = INITIALIZING.load(Ordering::Relaxed);
     if init_state != 0
@@ -884,11 +900,18 @@ pub unsafe extern "C" fn truncate_shim(path: *const c_char, length: libc::off_t)
         if let Some(err) = quick_block_vfs_mutation(path) {
             return err;
         }
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_truncate(path, length);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_truncate(path, length);
     }
     // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-    block_vfs_mutation(path)
-        .unwrap_or_else(|| crate::syscalls::macos_raw::raw_truncate(path, length))
+    #[cfg(target_os = "macos")]
+    return block_vfs_mutation(path)
+        .unwrap_or_else(|| crate::syscalls::macos_raw::raw_truncate(path, length));
+    #[cfg(target_os = "linux")]
+    return block_vfs_mutation(path)
+        .unwrap_or_else(|| crate::syscalls::linux_raw::raw_truncate(path, length));
 }
 
 // --- chflags (macOS only) ---
@@ -985,7 +1008,12 @@ pub unsafe extern "C" fn utimes_shim(path: *const c_char, times: *const libc::ti
         return crate::syscalls::macos_raw::raw_utimes(path, times);
     }
     // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::macos_raw::raw_utimes(path, times))
+    #[cfg(target_os = "macos")]
+    return block_vfs_mutation(path)
+        .unwrap_or_else(|| crate::syscalls::macos_raw::raw_utimes(path, times));
+    #[cfg(target_os = "linux")]
+    return block_vfs_mutation(path)
+        .unwrap_or_else(|| crate::syscalls::linux_raw::raw_utimes(path, times));
 }
 
 /// utimensat_shim: Block timestamp modifications on VFS files (at variant)
@@ -1022,8 +1050,19 @@ pub unsafe extern "C" fn utimensat_shim(
     }
     #[cfg(target_os = "linux")]
     {
-        // For Linux, we don't have utimensat shim yet, return passthrough
-        -1
+        let init_state = INITIALIZING.load(Ordering::Relaxed);
+        if init_state != 0
+            || crate::state::SHIM_STATE
+                .load(std::sync::atomic::Ordering::Acquire)
+                .is_null()
+        {
+            if let Some(err) = quick_block_vfs_mutation(path) {
+                return err;
+            }
+            return crate::syscalls::linux_raw::raw_utimensat(dirfd, path, times, flags);
+        }
+        block_vfs_mutation(path)
+            .unwrap_or_else(|| crate::syscalls::linux_raw::raw_utimensat(dirfd, path, times, flags))
     }
 }
 #[no_mangle]
