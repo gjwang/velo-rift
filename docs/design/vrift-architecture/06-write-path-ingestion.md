@@ -1,117 +1,91 @@
-# vrift Write Path: The Global Shared Memory Data Plane
+# vrift Write Path: Staging Area & Zero-Copy Ingestion
 
-## Overview: The "Memory-First" Architecture
+## 1. The Strategy: "Native Staging, Atomic Handover"
 
-**The Challenge**: How to handle hundreds of concurrent writes (e.g., `make -j 128`) entirely in memory without hitting disk IO limitations?
+Instead of complex Shared Memory RingBuffers, we leverage the OS's native filesystem capabilities for the Write Path.
 
-**The Solution**: **Staging Area + Atomic Handover**.
-Instead of streaming data through memory buffers, we use the OS's native filesystem as a high-performance staging area.
-
-**Mechanism**:
-1.  **Staging**: InceptionLayer writes to a private temporary file (e.g., `.vrift/staging/pid_123/obj.o`).
-2.  **Handover**: On `close()`, InceptionLayer passes the path to `vdir_d` via UDS.
-3.  **Ingest**: `vdir_d` promotes the file to CAS using **Zero-Copy ReFLINK** (CloneFile/cp --reflink) or Hardlink.
-
-**Key Metrics**:
-- **Throughput**: Native FS speed (Page Cache backed).
-- **Memory**: Managed by OS (No OOM risk).
-- **Concurrency**: Lock-free (Private staging files).
+**Core Philosophy**: 
+*   **Write**: Use the OS Page Cache (Native Speed).
+*   **Ingest**: Use File System Metadata Operations (Zero-Copy).
+*   **Consistency**: Explicit "Dirty" marking during the modification window.
 
 ---
 
-## Phase 1: Client-Side Write (The Shared Memory Producer)
+## 2. Phase 1: Client-Side Staging (InceptionLayer)
 
-### Step 1.1: `open()` - Allocating the Slab
+### Step 1: Open & Mark Dirty
+When Client calls `open("main.o", O_WRONLY)`:
+1.  **Mark Dirty**: InceptionLayer flips a `DIRTY` bit for "main.o" in the Shared Memory Index.
+    *   *Effect*: Any subsequent `stat/read` from *any* process will be forced to check the Staging Area (Real Path).
+2.  **Redirect**: The FD returned to the client actually points to a privately owned temporary file:
+    *   Path: `.vrift/staging/<pid>/<fd>_<timestamp>.tmp`
 
-```c
-// Global Pool: /dev/shm/vrift_data_pool (e.g., 4GB)
-// Mapped into every Client's address space.
+### Step 2: Native Write
+*   **Mechanism**: Client calls standard `write()`.
+*   **Performance**: Data goes into OS Page Cache. No IPC overhead. No buffer management overhead.
 
-int vrift_open_write(const char *path, bool is_small) {
-    if (is_small) {
-        // Mode A: Shared Memory (The "Hyper-Loop")
-        // 1. Atomically allocate a chunk from Global Pool
-        //    (Bump pointer or Free List)
-        ShmChunk *chunk = shm_alloc(ESTIMATED_SIZE);
-        return create_virtual_fd(chunk);
-    } else {
-        // Mode B: Native Passthrough (Linkers/Large Mmap)
-        return real_open(path, ...);
+### Step 3: Close & Commit
+When Client calls `close()`:
+1.  **Flush**: `fsync()` (Optional, usually we rely on OS lazy writeback).
+2.  **Handover**: InceptionLayer sends a **UDS Message** to `vdir_d`:
+    ```rust
+    CMD_COMMIT {
+        virtual_path: "main.o",
+        staging_path: ".vrift/staging/123/456.tmp",
+        size: 10240,
+        mtime: ...
     }
-}
-```
-
-### Step 1.2: `write()` - Zero-Copy Ingestion
-
-```c
-ssize_t vrift_write(int vfd, void *buf, size_t len) {
-    // 1. Direct Memcpy to Shared Memory
-    //    Client writes directly to Server's visible memory!
-    memcpy(vfd->chunk_ptr + offset, buf, len);
-    
-    // 2. No Kernel transition, no Disk I/O.
-    return len;
-}
-```
-
-### Step 1.3: `close()` - The Non-Blocking Handover
-
-```c
-int vrift_close(int vfd) {
-    // 1. Send "Pointer" to Server (IPC)
-    //    "I wrote 50KB at Offset 0xABCD in the Pool."
-    ipc_send_commit_msg(vfd->chunk_offset, vfd->length, hash(path));
-    
-    // 2. Return instantly.
-    return 0;
-}
-```
-
-*Efficiency*: Data moved from Client to Server with **Zero Copies** (Same physical RAM pages).
+    ```
+3.  **Wait**: InceptionLayer waits for `ACK` from `vdir_d`.
 
 ---
 
-## Phase 2: Server-Side Ingestion (The Memory Processor)
+## 3. Phase 2: Server-Side Ingestion (`vdir_d`)
 
-Server receives hundreds of IPC messages per second.
+Upon receiving `CMD_COMMIT`:
 
-1.  **Direct Memory Access**: Server reads the data at `Pool + Offset`.
-2.  **Parallel Hashing**: Thread pool computes Hash of the memory chunk.
-3.  **Dedup Check (The "Disk Eraser")**:
-    *   If Hash exists in CAS: **Discard data**. Mark chunk as free.
-    *   **Result**: The file **NEVER** touched the disk. Pure memory lifecycle.
-4.  **Persistence (Lazy)**:
-    *   If Hash is NEW: Async write Shm Chunk -> Disk CAS.
-    *   (Optional): Spill to disk only if Pool > 80% usage.
+### Step 1: Ingestion (Zero-Copy)
+`vdir_d` promotes the Staging File to the Content-Addressable Storage (CAS).
+
+*   **Method A: ReFLINK (Cow)**
+    `ioctl(FICLONERANGE, src=staging, dst=cas/hash)`
+    *   *Cost*: O(1) Metadata update. No data copy.
+*   **Method B: Hardlink**
+    `link(src=staging, dst=cas/hash)`
+    *   *Cost*: O(1).
+*   **Method C: Rename (If Single Reference)**
+    `rename(src=staging, dst=cas/hash)`
+
+### Step 2: Index Update & Clean
+1.  **Update Index**: Updates the VDir Entry for "main.o" to point to the new CAS Hash.
+2.  **Clear Dirty**: Clears the `DIRTY` bit.
+    *   *Effect*: Future `stat/read` will hit the fast VDir Index again.
+3.  **Ack**: Replies `OK` to InceptionLayer.
 
 ---
 
-## Phase 3: Handling Overflow (The Safety Valve)
+## 4. Consistency Model (The "Dirty Bit" Guarantee)
 
-**What if 4GB Pool is full?**
-1.  **Backpressure**: `shm_alloc` returns NULL.
-2.  **Fallback**: Client automatically switches to **Mode C (Local Staging File)**.
-    *   Degrades gracefully from "In-Memory" to "Buffered Disk".
+**Constraint**: Modifications must be visible immediately to other processes.
+
+| State | Reader Behavior |
+| :--- | :--- |
+| **Clean** | Read from VDir Index / Shared Memory (Fast). |
+| **Dirty** (Writing) | **Must** read from `.vrift/staging/...` (Real Path). |
+
+*   **Crash Safety**: If InceptionLayer crashes while `DIRTY`:
+    *   The `DIRTY` bit remains.
+    *   `vdir_d` (Watchdog) detects the crash (Socket HUP).
+    *   `vdir_d` rolls back the State (reverts to previous Hash) and clears `DIRTY`.
+    *   The partial Staging File is garbage collected.
 
 ---
 
-## Summary of the "Memory-First" Flow
+## 5. Performance Characteristics
 
-## Summary of the "Staging" Flow
-
-1.  **Compiler**: Writes `.o` to `.vrift/staging/...` (Native Speed).
-2.  **Handover**: `close()` -> UDS Commit.
-3.  **Server**: `link()` / `reflink()` to CAS. Zero Data Copy.
-4.  **Dedup**: If duplicate, unlink staging file.
-    - **Disk Writes**: 0 bytes.
-    - **Latency**: Microseconds.
-    - **Throughput**: Bus speed.
-
-| Feature | RingBuffer (Local) | Shared Memory Data Plane (Final) |
-| :--- | :--- | :--- |
-| **Data Locality** | Local Process | **Global (Start in Shm)** 🏆 |
-| **Handover** | Copy/Flush to Disk | **Zero-Copy Pointer Pass** 🏆 |
-| **Concurrent IO** | Limited by threads | **Unlimited (Lock-free)** |
-| **Dedup Savings** | Saves Disk Space | **Saves Disk IO Bandwidth** 🏆 |
-
-This answers "How to support hundreds of files almost all in memory".
+*   **Throughput**: Limited only by Disk Bandwidth (or Memory Bandwidth if fits in Page Cache).
+*   **Latency**: 
+    *   `open`: ~3µs (Local syscall).
+    *   `write`: ~10ns (Page Cache).
+    *   `close`: ~20µs (UDS Handover).
+*   **Memory Overhead**: Minimal (OS Managed).
