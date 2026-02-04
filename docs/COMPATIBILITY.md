@@ -137,22 +137,24 @@ All syscall gaps are categorized below. Each **Must Fix** item has or requires a
 | `mmap` (CoW) | ✅ | `test_gap_mmap_shared.sh` | CoW-aware tracking |
 | `flock` | ✅ | `test_gap_flock_semantic.sh` | Daemon lock manager |
 | `dup/dup2` | ✅ | `test_gap_dup_tracking.sh` | FD tracking |
+| `readlinkat` | ✅ | `test_gap_readlinkat.sh` | Dirfd resolution works |
+
 
 ### 🔴 Must Fix (P0-P1) — Blocking for GA
 
 | Syscall | Risk | Test | Status | Sprint |
 |:--------|:-----|:-----|:------:|:------:|
-| `exchangedata` | Atomic swap bypasses VFS | TBD | ⏳ Pending | S2 |
-| `fchown/fchownat` | Ownership bypass via FD | TBD | ⏳ Pending | S2 |
-| `readlinkat` | Symlink read via dirfd | TBD | ⏳ Pending | S2 |
+| `exchangedata` | Atomic swap bypasses VFS | `test_gap_exchangedata.sh` | ⏳ Pending | S2 |
+| `fchown/fchownat` | Ownership bypass via FD | `test_gap_fchown_bypass.sh` | ❌ **Bypass Confirmed** | S1 |
 | `hardlink boundary` | Cross-VFS hardlink | `test_value_2_rename.sh` (4/4) | ❌ Failing | S1 |
+
 
 ### 🟡 Can Defer (P2-P3) — Non-blocking, Low Risk
 
 | Syscall | Risk | Test (POC) | Status | Notes |
 |:--------|:-----|:-----------|:------:|:------|
 | `futimens/futimes` | Modify times via FD | `test_futimens_gap.c` ✅ | ⏳ | Proven bypass, low impact |
-| `sendfile` | Copy data bypass | `test_sendfile_gap.c` ✅ | ⏳ | Proven bypass, rare use |
+| `sendfile` | Copy data bypass | `test_sendfile_gap.c` ✅ | ⏳ | Prove:///Users/antigravity/rust_sourcn bypass, rare use |
 | `copy_file_range` | Copy data bypass (Linux) | `test_copy_file_range_gap.c` ✅ | ⏳ | Linux only |
 | `creat` | Legacy file creation | TBD | ⏳ | Rare, can use open |
 | `getattrlist/setattrlist` | macOS metadata | TBD | ⏳ | Advanced, rare |

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 
-PROJECT_ROOT="/Users/antigravity/rust_source/velo-rift"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHIM_BIN="$PROJECT_ROOT/target/debug/libvrift_shim.dylib"
 TEST_DIR="$PROJECT_ROOT/test_resilience_work"
 
