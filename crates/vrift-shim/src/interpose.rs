@@ -295,7 +295,7 @@ pub static IT_RENAME: Interpose = Interpose {
     old_func: real_rename as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_RENAMEAT: Interpose = Interpose {
     new_func: c_renameat_bridge as _,
@@ -397,14 +397,14 @@ pub static IT_CHDIR: Interpose = Interpose {
     old_func: real_chdir as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_UNLINK: Interpose = Interpose {
     new_func: unlink_shim as _,
     old_func: real_unlink as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_RMDIR: Interpose = Interpose {
     new_func: rmdir_shim as _,
@@ -495,28 +495,28 @@ pub static IT_FACCESSAT: Interpose = Interpose {
     old_func: real_faccessat as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_CHMOD: Interpose = Interpose {
     new_func: chmod_shim as _,
     old_func: real_chmod as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_FCHMODAT: Interpose = Interpose {
     new_func: fchmodat_shim as _,
     old_func: real_fchmodat as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_TRUNCATE: Interpose = Interpose {
     new_func: truncate_shim as _,
     old_func: real_truncate as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_CHFLAGS: Interpose = Interpose {
     new_func: chflags_shim as _,
@@ -579,7 +579,7 @@ pub static IT_FTRUNCATE: Interpose = Interpose {
     old_func: real_ftruncate as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_UNLINKAT: Interpose = Interpose {
     new_func: unlinkat_shim as _,
@@ -600,7 +600,7 @@ pub static IT_SYMLINKAT: Interpose = Interpose {
     old_func: real_symlinkat as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_FCHMOD: Interpose = Interpose {
     new_func: fchmod_shim as _,
