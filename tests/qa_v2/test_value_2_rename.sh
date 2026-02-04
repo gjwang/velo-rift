@@ -122,8 +122,9 @@ echo "   Action: mv ../external/data.bin ./inbound.bin"
 # Note: Since we use local mv with shim, and project is same device,
 # verify shim allows it or forces copy. 
 # Shim returns EXDEV for cross-boundary, forcing mv to copy.
-if ! run_with_timeout $TIMEOUT_SEC env $FULL_VFS_ENV "$MY_MV" "$WORK_DIR/external/data.bin" "$WORK_DIR/project/inbound.bin" 2>/dev/null; then
-    RET=$?
+run_with_timeout $TIMEOUT_SEC env $FULL_VFS_ENV "$MY_MV" "$WORK_DIR/external/data.bin" "$WORK_DIR/project/inbound.bin"
+RET=$?
+if [ $RET -ne 0 ]; then
     if [ $RET -eq 142 ]; then
         echo -e "   ${RED}❌ TIMEOUT: Inbound move hung after ${TIMEOUT_SEC}s.${NC}"
     else
@@ -152,8 +153,9 @@ fi
 echo -e "\n${BLUE}🧪 Test 2: Virtual Rename (Internal -> Internal)${NC}"
 echo "   Action: mv ./inbound.bin ./renamed.bin"
 START_TIME=$(date +%s)
-if ! run_with_timeout $TIMEOUT_SEC env $FULL_VFS_ENV "$MY_MV" "$WORK_DIR/project/inbound.bin" "$WORK_DIR/project/renamed.bin" 2>/dev/null; then
-    RET=$?
+run_with_timeout $TIMEOUT_SEC env $FULL_VFS_ENV "$MY_MV" "$WORK_DIR/project/inbound.bin" "$WORK_DIR/project/renamed.bin"
+RET=$?
+if [ $RET -ne 0 ]; then
     if [ $RET -eq 142 ]; then
         echo -e "   ${RED}❌ TIMEOUT: Virtual rename hung after ${TIMEOUT_SEC}s.${NC}"
     else
@@ -175,8 +177,9 @@ fi
 # 3. Outbound Move (Cross-Domain Out)
 echo -e "\n${BLUE}🧪 Test 3: Outbound Move (VFS -> External)${NC}"
 echo "   Action: mv ./renamed.bin ../external/outbound.bin"
-if ! run_with_timeout $TIMEOUT_SEC env $FULL_VFS_ENV "$MY_MV" "$WORK_DIR/project/renamed.bin" "$WORK_DIR/external/outbound.bin" 2>/dev/null; then
-    RET=$?
+run_with_timeout $TIMEOUT_SEC env $FULL_VFS_ENV "$MY_MV" "$WORK_DIR/project/renamed.bin" "$WORK_DIR/external/outbound.bin"
+RET=$?
+if [ $RET -ne 0 ]; then
     if [ $RET -eq 142 ]; then
         echo -e "   ${RED}❌ TIMEOUT: Outbound move hung after ${TIMEOUT_SEC}s.${NC}"
     else

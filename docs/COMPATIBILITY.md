@@ -4,46 +4,31 @@ This report provides the definitive status of Velo Rift's compatibility with hos
 
 ---
 
-## 🏁 Final State of the Union (Feb 3, 2026 Verification)
+## 🏁 State of the Union (Feb 4, 2026 Verification)
 
-The deep forensic audit and Proof of Failure (PoF) suite v2.0 have confirmed the following status:
+The Unified QA Suite and Proof of Failure (PoF) suite v3.0 have confirmed the following status:
 
-> **✅ Latest Regression Results (Feb 3, 2026 @ 15:20 UTC+8)**
-> - **GitHub CI: 100% PASS** (Build ✓, Clippy ✓, Tier 1-4 ✓, All Unit Tests ✓)
-> - **Docker CI (Linux): 100% PASS** (E2E 5/5 ✓, POC Tests 7/7 ✓)
-> - Commit: `03833f2` (c_void import fix, needless_return fix)
+> **✅ Latest Regression Results (Feb 4, 2026 @ 23:30 UTC+8)**
+> - **Unified QA Suite**: **60% PASS** (6/10 ✓, 2 FAIL, 2 TIMEOUT)
+> - **Build System**: **100% PASS** (Full workspace + Shim cdylib ✓)
+> - **Commit**: `d646d8a` (fix(qa): add shim library build to qa_full_suite.sh)
 
-1.  **Compiler Syscall Completion (20/20 ✅ PASS)**:
-    -   100% of syscalls required for GCC, Clang, and mainstream linkers (stat, open, mmap, dlopen, etc.) are successfully intercepted.
-    -   Velo Rift is confirmed to be **100% Drop-In Compatible** for basic C/C++ compilation on macOS ARM64.
-2.  **Shim Stabilization (BUG-007 RESOLVED ✅)**:
-    -   `munmap` and `dlsym` are now fully intercepted and stable.
-    -   **Variadic ABI Hazard Resolved**: Assembly stubs correctly handle `open` and `fcntl` stack-passed arguments on macOS ARM64.
-    -   **DYLD Initialization Deadlock Resolved**: `pthread_key_t` TLS provides bootstrap safety, `INITIALIZING` AtomicBool forces early-boot passthrough.
-    -   **TLS Hang Fix (Pattern 2648/2649)**: Fixed process hang during dyld bootstrap:
-        -   Replaced `std::env::var()` with `libc::getenv()` (TLS-free)
-        -   Added `passthrough_if_init!` macro for consistent INITIALIZING state checks
-        -   Corrected state check logic: `INITIALIZING >= 2` (not `!= 0`) - states 0/1 are TLS-safe
-    -   **Raw Syscall Coverage (BUG-007 Resolution)**:
-        -   20+ raw syscall functions in `macos_raw.rs` (ARM64 + x86_64 + Linux fallback)
-        -   Bootstrap-critical syscalls bypass libc entirely during dyld init
-        -   Mutation shims use `quick_block_vfs_mutation()` for VFS check even in raw path
-    -   **Verified Stable Tests**:
-        -   `test_bug007_bootstrap.sh` ✅
-        -   `test_concurrent_init.sh` ✅
-        -   `test_init_state.sh` ✅
-        -   `test_issue1_recursion_deadlock.sh` ✅
-        -   `test_issue2_tls_bootstrap_hang.sh` ✅
-3.  **VFS Permission Perimeter (FIXED ✅)**:
-    -   `test_gap_mutation_perimeter.sh` ✅ PASS
-    -   `test_gap_permission_bypass.sh` ✅ PASS
-4.  **Linux VFS Activation Verified (100% CI Pass)**:
-    -   **Core VFS**: `open`, `stat`, `read`, `write`, `mmap`, and mutation shims verified on Linux x86_64/aarch64.
-    -   **GitHub CI Status**: Tier 0-4 全部通过 (Format ✓, Build ✓, Clippy ✓, E2E ✓, Benchmarks ✓)
-    -   **Docker CI Status**: Full regression including E2E (5/5) and POC tests (7/7) passing.
-    -   **Key Fixes Applied**: `c_void` import for `linux_shims` module, `needless_return` Clippy fix.
-5.  **Vulnerability Perimeter Locked**:
-    -   All critical gaps (Path Normalization, FD Leakage, State Leakage) have been quantified and captured in the PoF suite for automated regression tracking.
+### Key Improvements in v3.1
+1.  **Test Robustness Upgrade (Pattern 2869) ✅**:
+    -   Eliminated weak `pgrep` checks. All tests now use **Behavior-based Verification**:
+        -   `vrift daemon status` checks for actual operational health.
+        -   Socket file existence (`/tmp/vrift.sock`) used as secondary readiness indicator.
+    -   **Result**: Zero flakiness in daemon startup/shutdown verification.
+2.  **macOS Reliability Layer ✅**:
+    -   Integrated **Perl-based Timeout Mechanism** into all critical E2E tests.
+    -   Prevents CI hangs by automatically killing tests that trigger unresolved shim deadlocks (e.g., in `rename` or `gc` scenarios).
+3.  **Standalone Mutation Protection ✅**:
+    -   Mutation perimeter (EROFS/EPERM) now functions even without a running daemon using prefix-based standalone detection.
+
+### Remaining Regression Gaps (High Priority)
+1.  **Cross-Domain Rename Deadlock (Pattern 2868)**: `test_value_2_rename.sh` fails/timeouts due to a hang in `mv` when shim is injected.
+2.  **Standalone EXDEV Discrepancy**: Standard mutation shims return `EPERM` while `rename` requires `EXDEV` for fallback copy behaviors.
+3.  **GC/Phantom Demo Timeouts**: High-load scenarios occasionally trigger IPC backpressure leading to timeouts.
 
 ---
 
@@ -95,7 +80,7 @@ All syscalls relevant to VFS virtualization. Status indicates implementation sta
 | **`dlsym`** | Dynamic | ✅ | ✅ | ⏳ | `test_dlsym_*` | Symbol binding |
 | **`fcntl`** | Control | ✅ | ✅ | ✅ | `test_fcntl_*` | Flags tracking |
 | **`flock`** | Control | ✅ | ✅ | ✅ | `test_gap_flock_semantic` | Daemon Lock Manager |
-| **`rename`** | Mutation | ✅ | ✅ | ✅ | `test_gap_boundary_rename`, `test_rfc0047_rename_vfs` | VFS: EROFS guard |
+| **`rename`** | Mutation | 🔄 | ✅ | ✅ | `test_gap_boundary_rename`, `test_value_2_rename.sh` | **Regression Found**: Deadlock/Hang in cross-domain `mv` |
 | **`unlink`** | Mutation | ✅ | ✅ | ✅ | `test_fail_unlink_cas`, `test_rfc0047_unlink_vfs` | VFS: EROFS guard |
 | **`mkdir`** | Mutation | ✅ | ✅ | ✅ | `test_mkdir_recursive`, `test_rfc0047_mkdir_vfs` | VFS: EROFS guard |
 | **`rmdir`** | Mutation | ✅ | ✅ | ✅ | `test_rfc0047_rmdir_vfs` | VFS: EROFS guard |
@@ -277,13 +262,13 @@ These are "invisible" behaviors discovered during deep forensic audit that may c
 | **File I/O** | 80% | ⚠️ Gaps | `sendfile`, `copy_file_range`, `creat` **PENDING** |
 | **Directory Ops** | 100% | ✅ Full | None (Read-only traversal complete) |
 | **Namespace/Path** | 90% | ⚠️ Gaps | `readlinkat` **PENDING** |
-| **Mutation** | 70% | ❌ Vulnerable | `unlinkat`, `mkdirat`, `symlinkat`, `exchangedata` |
+| **Mutation** | 60% | ❌ Vulnerable | `rename` (Deadlock), `unlinkat`, `mkdirat`, `symlinkat` |
 | **Permissions** | 60% | ❌ Vulnerable | `fchmod`, `fchown`, `fchownat` |
 | **Time Ops** | 50% | ❌ Vulnerable | `futimens`, `futimes`, `utimensat` (partial) |
 | **Dynamic Loading**| 100% | ✅ Full | None |
 | **Memory Management**| 100% | ✅ Full | None |
 
-> **Overall macOS Coverage**: ~75% (45/60 key syscalls) - 15+ critical gaps found in QA Audit
+> **Overall macOS Coverage**: ~70% (42/60 key syscalls) - Regression found in `rename` flow.
 
 ---
 
