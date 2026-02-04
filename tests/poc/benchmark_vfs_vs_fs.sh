@@ -117,6 +117,8 @@ DAEMON_PID=$!
 
 cleanup() {
     kill $DAEMON_PID 2>/dev/null || true
+    # Clear uchg flag from CAS files before removal
+    chflags -R nouchg "$TEST_DIR" 2>/dev/null || true
     rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
