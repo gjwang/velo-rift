@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 use crate::state::ShimGuard;
+#[cfg(target_os = "macos")]
 use libc::{c_char, size_t, ssize_t};
 
 // Symbols imported from reals.rs via crate::reals

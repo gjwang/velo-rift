@@ -195,6 +195,7 @@ extern "C" {
     fn real_setrlimit(resource: c_int, rlp: *const libc::rlimit) -> c_int;
 }
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn c_open_bridge(path: *const c_char, flags: c_int, mode: mode_t) -> c_int;
     fn c_openat_bridge(dirfd: c_int, path: *const c_char, flags: c_int, mode: mode_t) -> c_int;
@@ -597,3 +598,107 @@ pub static IT_SETRLIMIT: Interpose = Interpose {
     new_func: setrlimit_shim as _,
     old_func: real_setrlimit as _,
 };
+
+// =============================================================================
+// Linux LD_PRELOAD Symbol Exports
+// =============================================================================
+// On Linux, LD_PRELOAD works by symbol interposition. We export functions
+// with the same names as libc functions to intercept them.
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+    crate::syscalls::open::open_shim_c_impl(path, flags, mode)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+    crate::syscalls::open::open_shim_c_impl(path, flags, mode)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn openat(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: mode_t,
+) -> c_int {
+    crate::syscalls::open::velo_openat_impl(dirfd, path, flags, mode)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn openat64(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: mode_t,
+) -> c_int {
+    crate::syscalls::open::velo_openat_impl(dirfd, path, flags, mode)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    crate::syscalls::stat::velo_stat_impl(path, buf)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn stat64(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    crate::syscalls::stat::velo_stat_impl(path, buf)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    crate::syscalls::stat::velo_lstat_impl(path, buf)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn lstat64(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    crate::syscalls::stat::velo_lstat_impl(path, buf)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut libc::stat) -> c_int {
+    crate::syscalls::stat::velo_fstat_impl(fd, buf)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn fstat64(fd: c_int, buf: *mut libc::stat) -> c_int {
+    crate::syscalls::stat::velo_fstat_impl(fd, buf)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn fstatat(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flags: c_int,
+) -> c_int {
+    crate::syscalls::stat::velo_fstatat_impl(dirfd, path, buf, flags)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn fstatat64(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flags: c_int,
+) -> c_int {
+    crate::syscalls::stat::velo_fstatat_impl(dirfd, path, buf, flags)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
+    crate::syscalls::misc::velo_access_impl(path, mode)
+}

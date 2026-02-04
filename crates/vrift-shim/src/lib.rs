@@ -77,6 +77,7 @@ pub unsafe extern "C" fn get_errno() -> libc::c_int {
 }
 
 // Re-export for linkage - interpose table (macOS) and unified impls (Linux)
+#[cfg(target_os = "macos")]
 pub use interpose::*;
 pub use state::LOGGER;
 // Note: syscalls module is used internally by interpose, not re-exported
