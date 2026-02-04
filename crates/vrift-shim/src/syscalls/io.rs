@@ -213,26 +213,28 @@ pub unsafe extern "C" fn ftruncate_shim(fd: c_int, length: off_t) -> c_int {
 // close shim - untrack and trigger COW reingest
 // ============================================================================
 
-#[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn write_shim(
     fd: c_int,
     buf: *const c_void,
     count: libc::size_t,
 ) -> libc::ssize_t {
-    // RFC-0051: Always use raw syscall for core I/O shims on macOS to avoid dlsym deadlocks
-    crate::syscalls::macos_raw::raw_write(fd, buf, count)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_write(fd, buf, count);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_write(fd, buf, count);
 }
 
-#[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn read_shim(
     fd: c_int,
     buf: *mut c_void,
     count: libc::size_t,
 ) -> libc::ssize_t {
-    // RFC-0051: Always use raw syscall for core I/O shims on macOS to avoid dlsym deadlocks
-    crate::syscalls::macos_raw::raw_read(fd, buf, count)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_read(fd, buf, count);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_read(fd, buf, count);
 }
 
 #[cfg(target_os = "macos")]
