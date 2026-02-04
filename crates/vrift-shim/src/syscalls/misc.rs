@@ -773,6 +773,8 @@ pub unsafe extern "C" fn utimes_shim(path: *const c_char, times: *const libc::ti
 }
 
 /// utimensat_shim: Block timestamp modifications on VFS files (at variant)
+/// Note: macOS doesn't have a direct utimensat syscall - it uses getattrlist/setattrlist
+/// For safety, we keep using the dlsym path here since this is not interposed at boot time
 #[allow(unused_variables)]
 pub unsafe extern "C" fn utimensat_shim(
     dirfd: c_int,
@@ -782,11 +784,24 @@ pub unsafe extern "C" fn utimensat_shim(
 ) -> c_int {
     #[cfg(target_os = "macos")]
     {
+        // Pattern 2930 exception: utimensat has no direct syscall on macOS
+        // Since this function is not in __interpose, the dlsym risk is low
         let real = std::mem::transmute::<
             *mut libc::c_void,
             unsafe extern "C" fn(c_int, *const c_char, *const libc::timespec, c_int) -> c_int,
         >(crate::reals::REAL_UTIMENSAT.get());
-        passthrough_if_init!(real, dirfd, path, times, flags);
+
+        let init_state = INITIALIZING.load(Ordering::Relaxed);
+        if init_state != 0
+            || crate::state::SHIM_STATE
+                .load(std::sync::atomic::Ordering::Acquire)
+                .is_null()
+        {
+            if let Some(err) = quick_block_vfs_mutation(path) {
+                return err;
+            }
+            return real(dirfd, path, times, flags);
+        }
         block_vfs_mutation(path).unwrap_or_else(|| real(dirfd, path, times, flags))
     }
     #[cfg(target_os = "linux")]
@@ -798,18 +813,9 @@ pub unsafe extern "C" fn utimensat_shim(
 #[no_mangle]
 pub unsafe extern "C" fn setrlimit_shim(resource: c_int, rlp: *const libc::rlimit) -> c_int {
     #[cfg(target_os = "macos")]
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(c_int, *const libc::rlimit) -> c_int,
-    >(crate::reals::REAL_SETRLIMIT.get());
+    let ret = crate::syscalls::macos_raw::raw_setrlimit(resource, rlp);
     #[cfg(target_os = "linux")]
-    let real = libc::setrlimit;
-
-    // Linux uses u32 for __rlimit_resource_t, macOS uses i32
-    #[cfg(target_os = "linux")]
-    let ret = real(resource as u32, rlp);
-    #[cfg(target_os = "macos")]
-    let ret = real(resource, rlp);
+    let ret = libc::setrlimit(resource as u32, rlp);
 
     // Linux uses u32 for RLIMIT_NOFILE constant
     #[cfg(target_os = "linux")]

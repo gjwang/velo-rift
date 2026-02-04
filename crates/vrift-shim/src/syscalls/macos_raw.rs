@@ -1096,6 +1096,116 @@ pub unsafe fn raw_utimes(path: *const libc::c_char, times: *const libc::timeval)
     ret as libc::c_int
 }
 
+/// SYS_fchdir = 13 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_FCHDIR: i64 = 13;
+
+/// SYS_getcwd is not a direct syscall on macOS - uses __getcwd = 304
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_GETCWD: i64 = 304;
+
+/// SYS_chdir = 12 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_CHDIR: i64 = 12;
+
+/// SYS_setrlimit = 195 on macOS
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_SETRLIMIT: i64 = 195;
+
+/// Raw fchdir syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_fchdir(fd: libc::c_int) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_FCHDIR,
+        in("x0") fd as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
+/// Raw __getcwd syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_getcwd(buf: *mut libc::c_char, size: libc::size_t) -> *mut libc::c_char {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_GETCWD,
+        in("x0") buf as i64,
+        in("x1") size as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return std::ptr::null_mut();
+    }
+    buf
+}
+
+/// Raw chdir syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_chdir(path: *const libc::c_char) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_CHDIR,
+        in("x0") path as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
+/// Raw setrlimit syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_setrlimit(resource: libc::c_int, rlp: *const libc::rlimit) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_SETRLIMIT,
+        in("x0") resource as i64,
+        in("x1") rlp as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
 // =============================================================================
 // macOS x86_64 implementations
 // =============================================================================

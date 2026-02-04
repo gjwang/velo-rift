@@ -173,18 +173,18 @@ pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn fchdir_shim(fd: c_int) -> c_int {
-    let real = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn(c_int) -> c_int>(
-        crate::reals::REAL_FCHDIR.get(),
-    );
+    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
+    if init_state != 0
+        || crate::state::SHIM_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        return crate::syscalls::macos_raw::raw_fchdir(fd);
+    }
 
-    passthrough_if_init!(real, fd);
-
-    // If fd points to a VFS directory, we could update virtual CWD here
-    // For now, just passthrough but track
     // TODO: Update virtual CWD tracking if fd is a VFS directory
-    // This requires the VFS CWD infrastructure from chdir_shim
-
-    real(fd)
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    crate::syscalls::macos_raw::raw_fchdir(fd)
 }
 
 // ============================================================================
@@ -194,16 +194,8 @@ pub unsafe extern "C" fn fchdir_shim(fd: c_int) -> c_int {
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn lseek_shim(fd: c_int, offset: off_t, whence: c_int) -> off_t {
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(c_int, off_t, c_int) -> off_t,
-    >(crate::reals::REAL_LSEEK.get());
-
-    passthrough_if_init!(real, fd, offset, whence);
-
-    // lseek works on the underlying file, which is correct for VFS
-    // (VFS files are extracted to temp, so lseek on the temp file is correct)
-    real(fd, offset, whence)
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    crate::syscalls::macos_raw::raw_lseek(fd, offset, whence)
 }
 
 // ============================================================================
@@ -213,15 +205,8 @@ pub unsafe extern "C" fn lseek_shim(fd: c_int, offset: off_t, whence: c_int) -> 
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn ftruncate_shim(fd: c_int, length: off_t) -> c_int {
-    let real = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn(c_int, off_t) -> c_int>(
-        crate::reals::REAL_FTRUNCATE.get(),
-    );
-
-    passthrough_if_init!(real, fd, length);
-
-    // ftruncate works on the underlying file (CoW copy)
-    // The Manifest update happens on close
-    real(fd, length)
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    crate::syscalls::macos_raw::raw_ftruncate(fd, length)
 }
 
 // ============================================================================

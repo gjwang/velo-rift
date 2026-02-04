@@ -174,21 +174,13 @@ pub unsafe extern "C" fn getcwd_shim(
     buf: *mut libc::c_char,
     size: libc::size_t,
 ) -> *mut libc::c_char {
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(*mut libc::c_char, libc::size_t) -> *mut libc::c_char,
-    >(crate::reals::REAL_GETCWD.get());
-    passthrough_if_init!(real, buf, size);
-    real(buf, size)
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    crate::syscalls::macos_raw::raw_getcwd(buf, size)
 }
 
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn chdir_shim(path: *const libc::c_char) -> c_int {
-    let real = std::mem::transmute::<
-        *mut libc::c_void,
-        unsafe extern "C" fn(*const libc::c_char) -> c_int,
-    >(crate::reals::REAL_CHDIR.get());
-    passthrough_if_init!(real, path);
-    real(path)
+    // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
+    crate::syscalls::macos_raw::raw_chdir(path)
 }
