@@ -35,85 +35,35 @@ struct RingBuffer {
 
 ## 3. Interaction Flow (The "Fast Loop")
 
-### Phase 1: Handshake (Connection)
-1.  **InceptionLayer**: Connects to `vdir_d` Unix Socket.
-    *   `SEND: { cmd: OPEN, path: "target/main.o" }`
-2.  **vdir_d**: 
-    *   Allocates a 4MB RingBuffer (Memfd).
-    *   `SEND: { status: OK, memfd: 123, capacity: 4MB }` (Passes FD via SCM_RIGHTS).
-3.  **InceptionLayer**: `mmap` the RingBuffer.
-    *   *Result*: Both processes have mapped the *same* physical RAM.
+### Phase 1: Channel Pooling (Startup)
+Instead of creating a RingBuffer per file (which requires a slow UDS Handshake), we use **Channel Pooling**.
 
-### Phase 2: Streaming Write (The Hot Path)
-**Producer (InceptionLayer) Algorithm**:
-```rust
-fn write(buf: &[u8]) {
-    while buf.len() > 0 {
-        // 1. Calculate available space
-        head = ring.write_head.load(Relaxed);
-        tail = ring.read_tail.load(Acquire); // Sync with consumer
-        available = capacity - (head - tail);
-        
-        if available == 0 {
-            // Buffer Full! Must wait (Backpressure)
-            futex_wait(&ring.read_tail, tail);
-            continue;
-        }
+1.  **Startup**: InceptionLayer connects to `vdir_d`.
+2.  **Pre-Allocation**: Explicitly negotiates N (e.g., 32) **Shared Channels**.
+    *   Each Channel = A dedicated RingBuffer (Memfd).
+    *   InceptionLayer maps them all.
+    *   InceptionLayer adds them to a local **Free Channel Pool**.
 
-        // 2. Write Data (memcpy)
-        chunk = min(buf.len(), available);
-        memcpy(&ring.data[head % capacity], buf, chunk);
-        
-        // 3. Commit Write (Release semantics)
-        // Consumer can NOT see data until this store completes
-        ring.write_head.store(head + chunk, Release);
-        
-        // 4. Signal Consumer (Lazy)
-        // Only wake if Consumer is sleeping or we crossed a threshold (e.g. 16KB)
-        if chunk > WAKE_THRESHOLD || waiting_flag {
-            futex_wake(&ring.write_head);
-        }
-        
-        buf = buf[chunk..];
-    }
-}
-```
+### Phase 2: Async Open (Zero Latency)
+**User Operation**: `open("main.o", O_WRONLY)`
 
-**Consumer (vdir_d) Algorithm**:
-```rust
-fn ingest_loop() {
-    loop {
-        // 1. Check for data
-        tail = ring.read_tail.load(Relaxed);
-        head = ring.write_head.load(Acquire); // Sync with Producer
-        
-        if head == tail {
-            if flag == EOF { break; }
-            // Empty! Sleep.
-            futex_wait(&ring.write_head, head);
-            continue;
-        }
-        
-        // 2. Process Data (Zero Copy Read)
-        data_slice = &ring.data[tail % capacity .. head % capacity];
-        
-        // PARALLEL JOB: Hashing + Compression
-        hasher.update(data_slice);
-        
-        // 3. Release Space
-        ring.read_tail.store(head, Release);
-        
-        // 4. Notify Producer (if it was blocked)
-        futex_wake(&ring.read_tail);
-    }
-}
-```
+1.  **Acquire**: InceptionLayer pops a free Channel (RingBuffer) from Local Pool.
+2.  **Assign**: InceptionLayer locally assigns `FD 4` -> `Channel #7`.
+3.  **Command**: Writes `OP_OPEN { path: "main.o", channel_id: 7 }` to the **Control Ring**.
+4.  **Return**: Returns `FD 4` immediately. **Zero Syscall**.
 
-### Phase 3: Completion (In-Band EOF)
-1.  **InceptionLayer**: Atomic Store `ring.flags = EOF` (Release).
-2.  **InceptionLayer**: `futex_wake(&ring.write_head)` (Only if Consumer sleeping).
-3.  **InceptionLayer**: Returns `0` instantly. **Zero Syscall** close.
-    *   *Note*: No Unix Socket `CLOSE` command is needed. The ring buffer state handles termination.
+### Phase 3: Streaming Write
+**User Operation**: `write(4, buf)`
+
+1.  **Lookup**: Map `FD 4` -> `Channel #7`.
+2.  **Stream**: `memcpy` data to RingBuffer #7 (Standard SPSC).
+
+### Phase 4: Completion (In-Band EOF)
+**User Operation**: `close(4)`
+
+1.  **EOF**: Atomic Store `channel[7].flags = EOF`.
+2.  **Release**: InceptionLayer returns `Channel #7` to Local Free Pool.
+3.  **Return**: Returns `0` instantly.
 
 ---
 
