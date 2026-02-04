@@ -10,24 +10,22 @@ This document details the step-by-step execution flow of key operations in vrift
 
 ### 1. Operation Classification (The All-Fast Architecture)
 
-*   **Data Plane**: `read`, `write`, `open`, `close`, `stat`.
-    *   **Mechanism**: Shared Memory / Channel Pooling.
-    *   **Cost**: **Zero IPC** / Zero Syscall. Nanosecond scale.
-*   **Control Plane (Setup)**: Initial Process Handshake.
-    *   **Mechanism**: Unix Domain Socket (UDS).
-    *   **Cost**: Once per process. Negligible.
+*   **Data Plane (Write)**: Local Staging File (Native FS).
+    *   **Cost**: Native Page Cache Throughput.
+*   **Control Plane (Commit)**: `close`.
+    *   **Mechanism**: UDS Path Handover.
+    *   **Cost**: One Syscall per file.
 
 ### 2. Detailed Flows
 
-#### 2.1 Async Open (`open`) - **FAST**
+#### 2.1 Staging Open (`open`)
 1.  **Client**: `open("main.o", O_WRONLY)`
-2.  **InceptionLayer**: Allocates free **RingBuffer Channel** from local pool.
-3.  **InceptionLayer**: Queues `OP_OPEN` command to `vdir_d` (Async).
-4.  **Return**: Returns FD mapping to Channel. **Zero Syscall**.
+2.  **InceptionLayer**: Redirects to `.vrift/staging/pid_xxx/fd_yyy.tmp`.
+3.  **Return**: Returns Real FD to temp file. **Zero IPC**.
 
-#### 2.2 Streaming Write (`write`)
+#### 2.2 Native Write (`write`)
 1.  **Client**: `write(fd, buf)`
-2.  **InceptionLayer**: `memcpy` to Channel RingBuffer.
+2.  **Kernel**: Writes to Page Cache (Local Staging File).
 2.  **InceptionLayer**: Intercepts syscall.
 3.  **InceptionLayer**: Queries VDir (Shared Memory Index).
     *   **Hit**: Returns `struct stat` from memory. (Latency: ~50ns)
@@ -66,9 +64,12 @@ This document details the step-by-step execution flow of key operations in vrift
 2.  **Client**: `write(fd, buf)`
     *   InceptionLayer buffers data in process memory.
 ### 2.3 `close(fd)`
-1.  **InceptionLayer**: Atomic Store `ring.flags = EOF`.
-2.  **InceptionLayer**: Queues `OP_CLOSE` command.
-3.  **Return**: Returns `0` instantly.
+1.  **InceptionLayer**: Sends UDS Command: `COMMIT { path: "main.o", staging_path: "..." }`.
+2.  **vdir_d**:
+    *   **Action**: `ioctl(FICLONERANGE)` or `link()` to promote staging file to CAS.
+    *   **Ack**: Returns status.
+3.  **InceptionLayer**: Unlinks staging file (cleanup).
+4.  **Return**: Returns `0`.
 
 ### Server Background Flow
 

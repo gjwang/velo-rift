@@ -4,13 +4,18 @@
 
 **The Challenge**: How to handle hundreds of concurrent writes (e.g., `make -j 128`) entirely in memory without hitting disk IO limitations?
 
-**The Solution**: **Per-Project Micro-Daemon (`vdir_d`)**.
-Each project gets a dedicated data plane. **InceptionLayer** streams data to their local `vdir_d` via Shared RingBuffer for maximum throughput + isolation.
+**The Solution**: **Staging Area + Atomic Handover**.
+Instead of streaming data through memory buffers, we use the OS's native filesystem as a high-performance staging area.
+
+**Mechanism**:
+1.  **Staging**: InceptionLayer writes to a private temporary file (e.g., `.vrift/staging/pid_123/obj.o`).
+2.  **Handover**: On `close()`, InceptionLayer passes the path to `vdir_d` via UDS.
+3.  **Ingest**: `vdir_d` promotes the file to CAS using **Zero-Copy ReFLINK** (CloneFile/cp --reflink) or Hardlink.
 
 **Key Metrics**:
-- **Concurrency**: Parallel streams handled by Daemon threads.
-- **Latency**: Streaming Pipeline (Write -> Hash -> Persist).
-- **Isolation**: Faults contained within `vdir_d`.
+- **Throughput**: Native FS speed (Page Cache backed).
+- **Memory**: Managed by OS (No OOM risk).
+- **Concurrency**: Lock-free (Private staging files).
 
 ---
 
@@ -92,10 +97,12 @@ Server receives hundreds of IPC messages per second.
 
 ## Summary of the "Memory-First" Flow
 
-1.  **Compiler**: Writes `.o` to `/dev/shm/pool` (via InceptionLayer).
-2.  **Server**: Sees data instantly. Computes Hash.
-3.  **Dedup**: Finds duplicate. Frees SHM chunk.
-4.  **Result**: 
+## Summary of the "Staging" Flow
+
+1.  **Compiler**: Writes `.o` to `.vrift/staging/...` (Native Speed).
+2.  **Handover**: `close()` -> UDS Commit.
+3.  **Server**: `link()` / `reflink()` to CAS. Zero Data Copy.
+4.  **Dedup**: If duplicate, unlink staging file.
     - **Disk Writes**: 0 bytes.
     - **Latency**: Microseconds.
     - **Throughput**: Bus speed.
