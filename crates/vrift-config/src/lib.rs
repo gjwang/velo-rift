@@ -143,6 +143,10 @@ pub struct IngestConfig {
     pub default_tier: String,
     /// Deduplication window in milliseconds (default: 200ms)
     pub dedup_window_ms: u64,
+    /// Batch size for high-frequency writes (default: 10)
+    pub batch_size: usize,
+    /// Batch timeout in milliseconds (default: 100ms)
+    pub batch_timeout_ms: u64,
     /// Patterns to ignore during ingest and live watch
     pub ignore_patterns: Vec<String>,
 }
@@ -153,6 +157,8 @@ impl Default for IngestConfig {
             threads: None,
             default_tier: "tier2".to_string(),
             dedup_window_ms: 200,
+            batch_size: 10,
+            batch_timeout_ms: 100,
             // Only system/junk files - user adds .git etc in config file
             ignore_patterns: vec![
                 ".vrift".to_string(),    // Vrift system directory (always needed)

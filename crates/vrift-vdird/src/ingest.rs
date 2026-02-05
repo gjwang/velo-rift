@@ -345,17 +345,82 @@ impl IngestHandler {
     }
 }
 
-/// Consumer task that processes ingest events
-pub async fn run_consumer(mut queue: IngestQueue, handler: IngestHandler) {
-    info!("Ingest consumer started");
+/// Consumer task that processes ingest events with batching and async CAS
+pub async fn run_consumer(mut queue: IngestQueue, handler: std::sync::Arc<IngestHandler>) {
+    use tokio::time::timeout;
+
+    // Extract config values in a scoped block to drop RwLockReadGuard before await
+    let (batch_size, batch_timeout) = {
+        let config = vrift_config::config();
+        (
+            config.ingest.batch_size,
+            Duration::from_millis(config.ingest.batch_timeout_ms),
+        )
+    };
+
+    info!(batch_size, batch_timeout_ms = ?batch_timeout, "Ingest consumer started with batching");
 
     // Mark consumer ready
     queue.transition(IngestState::ConsumerReady);
 
-    while let Some(event) = queue.next().await {
-        debug!(?event, "Processing ingest event");
-        handler.handle(event);
+    let mut batch: Vec<IngestEvent> = Vec::with_capacity(batch_size);
+
+    loop {
+        // Collect events up to batch_size or timeout
+        let deadline = Instant::now() + batch_timeout;
+
+        while batch.len() < batch_size {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            match timeout(remaining, queue.next()).await {
+                Ok(Some(event)) => {
+                    debug!(?event, "Queued ingest event for batch");
+                    batch.push(event);
+                }
+                Ok(None) => {
+                    // Channel closed, process remaining and exit
+                    if !batch.is_empty() {
+                        process_batch(&handler, std::mem::take(&mut batch)).await;
+                    }
+                    info!("Ingest consumer stopped (channel closed)");
+                    return;
+                }
+                Err(_) => {
+                    // Timeout, process current batch
+                    break;
+                }
+            }
+        }
+
+        // Process batch if not empty
+        if !batch.is_empty() {
+            let batch_len = batch.len();
+            debug!(batch_len, "Processing ingest batch");
+            process_batch(&handler, std::mem::take(&mut batch)).await;
+        }
+    }
+}
+
+/// Process a batch of ingest events with async CAS storage
+async fn process_batch(handler: &std::sync::Arc<IngestHandler>, events: Vec<IngestEvent>) {
+    use tokio::task::JoinSet;
+
+    let mut join_set: JoinSet<()> = JoinSet::new();
+
+    for event in events {
+        let handler = handler.clone();
+        join_set.spawn(async move {
+            // Use spawn_blocking for CPU/IO-bound CAS operations
+            let _ = tokio::task::spawn_blocking(move || {
+                handler.handle(event);
+            })
+            .await;
+        });
     }
 
-    info!("Ingest consumer stopped");
+    // Wait for all tasks in batch to complete
+    while join_set.join_next().await.is_some() {}
 }

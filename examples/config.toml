@@ -15,6 +15,10 @@ default_tier = "tier2"
 # Deduplication window in milliseconds (default: 200)
 # Lower = faster ingest, higher = less duplicate processing
 # dedup_window_ms = 200
+# Batch size for high-frequency writes (default: 10)
+# batch_size = 10
+# Batch timeout in milliseconds - max wait before processing batch (default: 100)
+# batch_timeout_ms = 100
 # Patterns to ignore during live ingest and file watching
 # Code hardcodes: .vrift, .DS_Store
 # Add project-specific patterns here:

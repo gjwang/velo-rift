@@ -132,7 +132,11 @@ pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
 
     // Phase 1: Start consumer FIRST (consumer-first pattern)
     let ingest_queue = ingest::IngestQueue::new(ingest_rx);
-    let handler = ingest::IngestHandler::new(config.project_root.clone(), manifest.clone(), cas);
+    let handler = std::sync::Arc::new(ingest::IngestHandler::new(
+        config.project_root.clone(),
+        manifest.clone(),
+        cas,
+    ));
     let consumer_handle = tokio::spawn(async move {
         ingest::run_consumer(ingest_queue, handler).await;
     });
