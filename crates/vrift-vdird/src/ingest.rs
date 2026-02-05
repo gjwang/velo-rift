@@ -189,6 +189,7 @@ impl IngestHandler {
 
     fn handle_file_changed(&self, path: &std::path::Path) {
         let rel_path = self.to_manifest_key(path);
+        let tier = self.classify_tier(&rel_path);
 
         // Store file content to CAS and get hash
         match self.cas.store_file(path) {
@@ -207,16 +208,13 @@ impl IngestHandler {
                             _pad: 0,
                         };
 
-                        // Insert into manifest
-                        self.manifest.insert(
-                            &rel_path,
-                            vnode,
-                            vrift_manifest::lmdb::AssetTier::Tier2Mutable,
-                        );
+                        // Insert into manifest with classified tier
+                        self.manifest.insert(&rel_path, vnode, tier);
 
                         info!(
                             path = %rel_path,
                             size = meta.size(),
+                            tier = ?tier,
                             hash = %vrift_cas::CasStore::hash_to_hex(&content_hash)[..8],
                             "Ingest: file stored to CAS and registered in manifest"
                         );
@@ -230,6 +228,28 @@ impl IngestHandler {
                 info!(path = %path.display(), error = %e, "Ingest: failed to store file to CAS");
             }
         }
+    }
+
+    /// Classify tier based on config patterns
+    fn classify_tier(&self, path: &str) -> vrift_manifest::lmdb::AssetTier {
+        let config = vrift_config::config();
+
+        // Check Tier1 patterns first (immutable dependencies)
+        for pattern in &config.tiers.tier1_patterns {
+            if path.contains(pattern.trim_end_matches('/')) {
+                return vrift_manifest::lmdb::AssetTier::Tier1Immutable;
+            }
+        }
+
+        // Check Tier2 patterns (mutable build outputs)
+        for pattern in &config.tiers.tier2_patterns {
+            if path.contains(pattern.trim_end_matches('/')) {
+                return vrift_manifest::lmdb::AssetTier::Tier2Mutable;
+            }
+        }
+
+        // Default to Tier2 for unclassified files
+        vrift_manifest::lmdb::AssetTier::Tier2Mutable
     }
 
     fn handle_dir_created(&self, path: &std::path::Path) {
