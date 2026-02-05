@@ -67,8 +67,9 @@ sleep 2
 trap "pkill vriftd || true" EXIT
 
 # 3. Run Verification
-FULL_VFS_ENV="VRIFT_MANIFEST=$MANIFEST VRIFT_VFS_PREFIX=/secondary_test $VFS_ENV"
-VFS_PATH="/secondary_test/managed.txt"
+# Use the ACTUAL source file path (in VRIFT_VFS_PREFIX territory) not the virtual prefix
+FULL_VFS_ENV="VRIFT_MANIFEST=$MANIFEST VRIFT_VFS_PREFIX=$WORK_DIR/vfs_source $VFS_ENV"
+VFS_PATH="$WORK_DIR/vfs_source/managed.txt"
 
 run_test() {
     local type="$1"
