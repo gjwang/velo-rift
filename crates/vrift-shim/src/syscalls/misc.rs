@@ -635,6 +635,8 @@ pub(crate) unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
                     crate::set_errno(libc::EPERM);
                     return Some(-1);
                 }
+                // RFC-0047: Local file in VFS territory -> ALLOW mutation!
+                return None;
             }
             // RFC-0052: Even if file not in manifest, still check VFS prefix below
         }

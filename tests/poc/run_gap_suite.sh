@@ -15,7 +15,12 @@ cc tests/poc/test_fchmod_gap.c -o tests/poc/test_fchmod_gap
 cc tests/poc/test_futimens_gap.c -o tests/poc/test_futimens_gap
 cc tests/poc/test_sendfile_gap.c -o tests/poc/test_sendfile_gap
 
-SHIM_SO="$(pwd)/target/debug/libvrift_shim.dylib"
+OS=$(uname -s)
+if [ "$OS" == "Darwin" ]; then
+    SHIM_SO="$(pwd)/target/release/libvrift_shim.dylib"
+else
+    SHIM_SO="$(pwd)/target/release/libvrift_shim.so"
+fi
 
 echo "Using VRIFT_VFS_PREFIX=$VRIFT_VFS_PREFIX"
 

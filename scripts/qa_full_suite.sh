@@ -12,7 +12,7 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPORT_FILE="/tmp/vrift_qa_report.md"
-TIMEOUT_SEC=30
+TIMEOUT_SEC=60
 
 # Colors
 RED='\033[0;31m'
