@@ -1,0 +1,1 @@
+scripts/test_resilience.sh: line 47: ./test_resilience_work/simple_open: No such file or directory

@@ -1,0 +1,16 @@
+[VFS][28848][INFO] open path='/vfs/test_loop.txt' -> resolved='/vfs/test_loop.txt' (VFS HIT)
+[VFS][28848][INFO] manifest lookup '/test_loop.txt': NOT FOUND -> passthrough (TRACKING FOR PERIMETER)
+open: No such file or directory
+[VFS][28848][INFO] open path='/vfs/test_loop.txt' -> resolved='/vfs/test_loop.txt' (VFS HIT)
+[VFS][28848][ERROR] DAEMON CONNECTION FAILED 2 TIMES. CIRCUIT BREAKER TRIPPED. FALLING BACK TO PASSTHROUGH.
+[VFS][28848][INFO] manifest lookup '/test_loop.txt': NOT FOUND -> passthrough (TRACKING FOR PERIMETER)
+open: No such file or directory
+[VFS][28848][INFO] open path='/vfs/test_loop.txt' -> resolved='/vfs/test_loop.txt' (VFS HIT)
+[VFS][28848][INFO] manifest lookup '/test_loop.txt': NOT FOUND -> passthrough (TRACKING FOR PERIMETER)
+open: No such file or directory
+[VFS][28848][INFO] open path='/vfs/test_loop.txt' -> resolved='/vfs/test_loop.txt' (VFS HIT)
+[VFS][28848][INFO] manifest lookup '/test_loop.txt': NOT FOUND -> passthrough (TRACKING FOR PERIMETER)
+open: No such file or directory
+[VFS][28848][INFO] open path='/vfs/test_loop.txt' -> resolved='/vfs/test_loop.txt' (VFS HIT)
+[VFS][28848][INFO] manifest lookup '/test_loop.txt': NOT FOUND -> passthrough (TRACKING FOR PERIMETER)
+open: No such file or directory
