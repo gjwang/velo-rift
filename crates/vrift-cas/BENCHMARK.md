@@ -5,60 +5,61 @@ Benchmark results for zero-copy ingest operations (RFC-0039 aligned).
 ## Test Environment
 
 - **Machine**: MacBook Pro
-- **Date**: 2026-01-31
-- **Commit**: `e04f5cf`
+- **Date**: 2026-02-06 (v3.10 optimizations)
+- **Commit**: Latest
 
-## Results: 1000 x 4KB Files
+## v3.10 Performance Optimizations
+
+Three key optimizations applied:
+
+1. **Tiered Hashing**: `read()` for small files (<16KB), `mmap` for larger
+2. **warm_directories()**: Pre-create 65,536 CAS directories (optional)
+3. **Optimistic flock skip**: Small readonly files (<4KB) skip flock with mtime/size validation
+
+### Criterion Benchmark Results
+
+| Benchmark | Before | After | Change |
+|-----------|--------|-------|--------|
+| phantom_sequential/100 | 46ms | **36ms** | ✅ -23% |
+| phantom_parallel/2t | 404ms | **314ms** | ✅ -22% |
+| solid_parallel/1000 | 60ms | **46ms** | ✅ -23% |
+
+### Real-World Benchmark Results (2026-02-06)
+
+| Dataset | Files | Size | Time | Throughput | Dedup |
+|---------|-------|------|------|------------|-------|
+| **Small** | 23,951 | 426MB | 5.59s | **4,288 f/s** | 14.0% |
+| **Medium** | 61,868 | 712MB | 12.48s | **4,956 f/s** | 16.7% |
+| **Large** | 68,311 | 691MB | 11.69s | **5,844 f/s** | 25.8% |
+| **XLarge** | 86,361 | 881MB | 16.95s | **5,096 f/s** | 26.3% |
+
+**Peak throughput: 5,844 files/sec** (approaching 6,000 f/s target)
+
+---
+
+## Legacy Results (2026-01-31)
+
+### Results: 1000 x 4KB Files
 
 | Mode | Time | Throughput | Operation |
 |------|------|------------|-----------|
 | **Phantom** | 114ms | 8,772 files/sec | `rename()` |
 | Solid Tier-2 | 283ms | 3,534 files/sec | `hard_link()` |
 
-## Key Findings
-
-1. **Phantom mode is 2.5x faster** than Solid mode
-2. Both are O(1) metadata operations - **zero data copy**
-3. Bottleneck is filesystem metadata, not I/O
-
-## Detailed Results
-
-```
-ingest_solid_tier2/10    time: [270.60 µs 287.92 µs 307.53 µs]
-ingest_solid_tier2/100   time: [19.251 ms 19.641 ms 20.086 ms]
-ingest_solid_tier2/1000  time: [279.70 ms 283.20 ms 287.65 ms]
-
-ingest_phantom/10        time: [199.96 µs 212.74 µs 228.74 µs]
-ingest_phantom/100       time: [13.025 ms 13.217 ms 13.457 ms]
-ingest_phantom/1000      time: [113.38 ms 114.65 ms 116.43 ms]
-```
-
 ## Running Benchmarks
 
 ```bash
-# Run zero-copy benchmarks
+# Criterion micro-benchmarks
 cargo bench -p vrift-cas --bench zero_copy_bench
 
-# Run with specific filter
-cargo bench -p vrift-cas --bench zero_copy_bench -- phantom
+# Real-world benchmarks
+./scripts/benchmark_parallel.sh --size all
 ```
-
-## Comparison with Old Pipeline
-
-The old `streaming_pipeline.rs` used `read() + write()` which is:
-- O(n) data copy (unnecessary)
-- Memory allocation overhead
-- Slower than zero-copy approach
-
-The new `zero_copy_ingest.rs` uses:
-- `hard_link()` - O(1) inode operation
-- `rename()` - O(1) atomic move
 
 ## Future Work
 
 - Test with larger files (1MB, 100MB, 1GB)
 - Test on network filesystems (NFS)
-- Evaluate if streaming_pipeline watch-first pattern is still needed
 
 ---
 

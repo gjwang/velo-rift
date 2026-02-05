@@ -519,6 +519,34 @@ impl CasStore {
     pub fn blob_path_for_hash(&self, hash: &Blake3Hash) -> Option<PathBuf> {
         self.find_blob_path(hash)
     }
+
+    /// Pre-create CAS directory structure to avoid per-file mkdir overhead.
+    ///
+    /// Creates the 3-level layout: blake3/{00..ff}/{00..ff}/
+    /// This is ~65,536 directories but creation is fast and only done once.
+    ///
+    /// Call this after creating a new CasStore for batch ingest workloads.
+    pub fn warm_directories(&self) -> Result<()> {
+        use rayon::prelude::*;
+
+        let blake3_root = self.root.join("blake3");
+        fs::create_dir_all(&blake3_root)?;
+
+        // Parallel directory creation using rayon
+        (0..=255u8).into_par_iter().try_for_each(|prefix1| {
+            let level1 = blake3_root.join(format!("{:02x}", prefix1));
+            fs::create_dir_all(&level1)?;
+
+            // Level 2: 00-ff (256 dirs per level1)
+            for prefix2 in 0..=255u8 {
+                let level2 = level1.join(format!("{:02x}", prefix2));
+                let _ = fs::create_dir_all(&level2);
+            }
+            Ok::<(), CasError>(())
+        })?;
+
+        Ok(())
+    }
 }
 
 // ============================================================================

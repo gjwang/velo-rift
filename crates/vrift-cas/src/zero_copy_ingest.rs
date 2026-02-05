@@ -21,7 +21,6 @@
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs as unix_fs;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use dashmap::DashSet;
@@ -134,8 +133,8 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
     // Acquire shared lock with retry (prevents blocking on busy files)
     let locked_file = lock_with_retry(file, FlockArg::LockShared)?;
 
-    // Stream hash (no full read) - deref Flock to get underlying File
-    let hash = stream_hash(&*locked_file)?;
+    // Tiered hash: read() for small files, mmap for larger
+    let hash = tiered_hash(&locked_file, size)?;
     let cas_target = cas_path(cas_root, &hash, size);
 
     // Create CAS directory if needed
@@ -193,8 +192,8 @@ pub fn ingest_solid_tier1_dedup(
     // Acquire shared lock with retry
     let locked_file = lock_with_retry(file, FlockArg::LockShared)?;
 
-    // Stream hash
-    let hash = stream_hash(&*locked_file)?;
+    // Tiered hash
+    let hash = tiered_hash(&locked_file, size)?;
     let hash_key = hex::encode(hash);
     let cas_target = cas_path(cas_root, &hash, size);
 
@@ -239,11 +238,15 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
     let metadata = file.metadata()?;
     let size = metadata.len();
 
-    // Acquire shared lock with retry (prevents blocking on busy files)
-    let locked_file = lock_with_retry(file, FlockArg::LockShared)?;
+    // P3 Optimization: Try optimistic hash (no flock) for small read-only files
+    let hash = if let Some(h) = optimistic_hash_with_validation(&file, &metadata)? {
+        h
+    } else {
+        // Standard path: acquire flock for larger or writable files
+        let locked_file = lock_with_retry(file, FlockArg::LockShared)?;
+        tiered_hash(&locked_file, size)?
+    };
 
-    // Stream hash - deref Flock to get underlying File
-    let hash = stream_hash(&*locked_file)?;
     let cas_target = cas_path(cas_root, &hash, size);
 
     // Create CAS directory if needed
@@ -296,8 +299,8 @@ pub fn ingest_solid_tier2_dedup(
     // Acquire shared lock with retry
     let locked_file = lock_with_retry(file, FlockArg::LockShared)?;
 
-    // Stream hash
-    let hash = stream_hash(&*locked_file)?;
+    // Tiered hash
+    let hash = tiered_hash(&locked_file, size)?;
     let hash_key = hex::encode(hash);
 
     // In-memory dedup: if hash already seen, skip filesystem write
@@ -344,8 +347,8 @@ pub fn ingest_phantom(source: &Path, cas_root: &Path) -> Result<IngestResult> {
     // Acquire shared lock with retry (prevents blocking on busy files)
     let locked_file = lock_with_retry(file, FlockArg::LockShared)?;
 
-    // Stream hash - deref Flock to get underlying File
-    let hash = stream_hash(&*locked_file)?;
+    // Tiered hash: read() for small files, mmap for larger
+    let hash = tiered_hash(&locked_file, size)?;
     let cas_target = cas_path(cas_root, &hash, size);
 
     // Drop lock guard before rename
@@ -406,6 +409,42 @@ pub fn ingest_phantom(source: &Path, cas_root: &Path) -> Result<IngestResult> {
 // Helper Functions
 // ============================================================================
 
+/// P3 Optimization: Skip flock for small, read-only files
+/// Small files are unlikely to be modified during ingest
+const SKIP_FLOCK_SIZE_THRESHOLD: u64 = 4096; // 4KB
+
+/// Optimistic hash without flock for small read-only files.
+///
+/// Validation: Compare mtime+size before and after hash to detect concurrent modification.
+/// If mtime/size changed during hash, this is a concurrent write and we should retry with flock.
+fn optimistic_hash_with_validation(
+    file: &File,
+    initial_metadata: &std::fs::Metadata,
+) -> Result<Option<Blake3Hash>> {
+    let size = initial_metadata.len();
+
+    // Only skip flock for small, read-only files
+    if size >= SKIP_FLOCK_SIZE_THRESHOLD || !initial_metadata.permissions().readonly() {
+        return Ok(None); // Caller should use flock path
+    }
+
+    // Hash without flock
+    let hash = tiered_hash(file, size)?;
+
+    // Validate: check if file was modified during hash
+    if let Ok(post_metadata) = file.metadata() {
+        let post_mtime = post_metadata.modified().ok();
+        let pre_mtime = initial_metadata.modified().ok();
+
+        if post_metadata.len() == size && post_mtime == pre_mtime {
+            return Ok(Some(hash)); // File unchanged, hash is valid
+        }
+    }
+
+    // File was modified, caller should retry with flock
+    Ok(None)
+}
+
 /// Lock retry configuration
 const MAX_LOCK_RETRIES: u32 = 5;
 const INITIAL_RETRY_DELAY_MS: u64 = 10;
@@ -458,12 +497,24 @@ fn lock_with_retry(mut file: File, lock_type: FlockArg) -> Result<Flock<File>> {
     unreachable!()
 }
 
-/// Stream hash using mmap (no full read into memory)
-fn stream_hash<F: AsRawFd>(file: &F) -> Result<Blake3Hash> {
-    // SAFETY: mmap requires a valid file descriptor
-    let mmap = unsafe { memmap2::Mmap::map(file)? };
-    let hash = blake3::hash(&mmap);
-    Ok(*hash.as_bytes())
+/// Tiered hashing strategy for optimal performance:
+/// - Small files (< 16KB): Direct read() avoids mmap setup overhead (~10µs)
+/// - Medium/Large files (>= 16KB): mmap for zero-copy access
+const SMALL_FILE_THRESHOLD: u64 = 16 * 1024; // 16KB
+
+fn tiered_hash(file: &File, size: u64) -> Result<Blake3Hash> {
+    if size < SMALL_FILE_THRESHOLD {
+        // Small file: direct read avoids mmap syscall overhead
+        let mut buf = vec![0u8; size as usize];
+        use std::io::Read;
+        (&*file).read_exact(&mut buf)?;
+        Ok(*blake3::hash(&buf).as_bytes())
+    } else {
+        // Medium/Large file: mmap for zero-copy
+        // SAFETY: mmap requires a valid file descriptor
+        let mmap = unsafe { memmap2::Mmap::map(file)? };
+        Ok(*blake3::hash(&mmap).as_bytes())
+    }
 }
 
 /// 3-level sharded CAS path: blake3/ab/cd/hash_size.bin
