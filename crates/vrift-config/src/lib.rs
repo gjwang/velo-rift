@@ -141,6 +141,8 @@ pub struct IngestConfig {
     pub threads: Option<usize>,
     /// Default tier: tier1, tier2, or auto
     pub default_tier: String,
+    /// Patterns to ignore during ingest and live watch
+    pub ignore_patterns: Vec<String>,
 }
 
 impl Default for IngestConfig {
@@ -148,6 +150,8 @@ impl Default for IngestConfig {
         Self {
             threads: None,
             default_tier: "tier2".to_string(),
+            // Only essential system directories - users can add more in config
+            ignore_patterns: vec![".vrift".to_string()],
         }
     }
 }

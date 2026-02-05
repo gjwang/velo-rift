@@ -2151,6 +2151,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vrift-cas",
+ "vrift-config",
  "vrift-ipc",
  "vrift-manifest",
 ]

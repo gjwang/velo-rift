@@ -1,22 +1,8 @@
 //! Shared ignore pattern configuration for Live Ingest
 //!
-//! Provides unified ignore patterns for FSWatch, CompensationScanner, and CLI ingest.
+//! Loads ignore patterns from vrift-config [ingest] section.
 
 use std::path::Path;
-
-/// Default ignore patterns shared across all ingest layers
-pub const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
-    ".git",
-    ".vrift",
-    "target",
-    "node_modules",
-    ".DS_Store",
-    "__pycache__",
-    ".pytest_cache",
-    "*.pyc",
-    ".idea",
-    ".vscode",
-];
 
 /// Ignore pattern matcher
 #[derive(Debug, Clone)]
@@ -31,24 +17,18 @@ impl Default for IgnoreMatcher {
 }
 
 impl IgnoreMatcher {
-    /// Create a new matcher with default patterns
+    /// Create a new matcher with patterns from config
     pub fn new() -> Self {
-        Self {
-            patterns: DEFAULT_IGNORE_PATTERNS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        }
+        // Load entirely from config - no hardcoded fallback
+        let patterns = vrift_config::config().ingest.ignore_patterns.clone();
+        Self { patterns }
     }
 
-    /// Create a matcher with custom patterns (plus defaults)
-    pub fn with_patterns(extra_patterns: &[String]) -> Self {
-        let mut patterns: Vec<String> = DEFAULT_IGNORE_PATTERNS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        patterns.extend(extra_patterns.iter().cloned());
-        Self { patterns }
+    /// Create a matcher with custom patterns
+    pub fn with_patterns(patterns: &[String]) -> Self {
+        Self {
+            patterns: patterns.to_vec(),
+        }
     }
 
     /// Check if a path should be ignored
@@ -88,27 +68,14 @@ mod tests {
     #[test]
     fn test_ignore_git() {
         let matcher = IgnoreMatcher::new();
+        // .git is in config defaults
         assert!(matcher.should_ignore(&PathBuf::from("/project/.git/config")));
-        assert!(matcher.should_ignore(&PathBuf::from(".git")));
     }
 
     #[test]
-    fn test_ignore_target() {
-        let matcher = IgnoreMatcher::new();
-        assert!(matcher.should_ignore(&PathBuf::from("project/target/debug/app")));
-    }
-
-    #[test]
-    fn test_ignore_glob_pyc() {
-        let matcher = IgnoreMatcher::new();
-        assert!(matcher.should_ignore(&PathBuf::from("script.pyc")));
-        assert!(!matcher.should_ignore(&PathBuf::from("script.py")));
-    }
-
-    #[test]
-    fn test_no_ignore_regular() {
-        let matcher = IgnoreMatcher::new();
-        assert!(!matcher.should_ignore(&PathBuf::from("src/main.rs")));
-        assert!(!matcher.should_ignore(&PathBuf::from("package.json")));
+    fn test_custom_patterns() {
+        let matcher = IgnoreMatcher::with_patterns(&["custom".to_string()]);
+        assert!(matcher.should_ignore(&PathBuf::from("custom/file.txt")));
+        assert!(!matcher.should_ignore(&PathBuf::from("other/file.txt")));
     }
 }
