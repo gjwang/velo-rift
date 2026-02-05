@@ -153,16 +153,19 @@ impl IngestQueue {
 pub struct IngestHandler {
     project_root: std::path::PathBuf,
     manifest: std::sync::Arc<vrift_manifest::lmdb::LmdbManifest>,
+    cas: vrift_cas::CasStore,
 }
 
 impl IngestHandler {
     pub fn new(
         project_root: std::path::PathBuf,
         manifest: std::sync::Arc<vrift_manifest::lmdb::LmdbManifest>,
+        cas: vrift_cas::CasStore,
     ) -> Self {
         Self {
             project_root,
             manifest,
+            cas,
         }
     }
 
@@ -187,44 +190,44 @@ impl IngestHandler {
     fn handle_file_changed(&self, path: &std::path::Path) {
         let rel_path = self.to_manifest_key(path);
 
-        // Read file and compute hash
-        match std::fs::metadata(path) {
-            Ok(meta) => {
-                use std::os::unix::fs::MetadataExt;
+        // Store file content to CAS and get hash
+        match self.cas.store_file(path) {
+            Ok(content_hash) => {
+                // Get metadata for manifest entry
+                match std::fs::metadata(path) {
+                    Ok(meta) => {
+                        use std::os::unix::fs::MetadataExt;
 
-                // Compute blake3 hash of file content
-                let content_hash = match self.hash_file(path) {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        info!(path = %path.display(), error = %e, "Failed to hash file");
-                        return;
+                        let vnode = vrift_ipc::VnodeEntry {
+                            content_hash,
+                            size: meta.size(),
+                            mtime: meta.mtime() as u64,
+                            mode: meta.mode(),
+                            flags: 0,
+                            _pad: 0,
+                        };
+
+                        // Insert into manifest
+                        self.manifest.insert(
+                            &rel_path,
+                            vnode,
+                            vrift_manifest::lmdb::AssetTier::Tier2Mutable,
+                        );
+
+                        info!(
+                            path = %rel_path,
+                            size = meta.size(),
+                            hash = %vrift_cas::CasStore::hash_to_hex(&content_hash)[..8],
+                            "Ingest: file stored to CAS and registered in manifest"
+                        );
                     }
-                };
-
-                let vnode = vrift_ipc::VnodeEntry {
-                    content_hash,
-                    size: meta.size(),
-                    mtime: meta.mtime() as u64,
-                    mode: meta.mode(),
-                    flags: 0,
-                    _pad: 0,
-                };
-
-                // Insert into manifest
-                self.manifest.insert(
-                    &rel_path,
-                    vnode,
-                    vrift_manifest::lmdb::AssetTier::Tier2Mutable,
-                );
-
-                info!(
-                    path = %rel_path,
-                    size = meta.size(),
-                    "Ingest: file registered in manifest"
-                );
+                    Err(e) => {
+                        info!(path = %path.display(), error = %e, "Ingest: file metadata not accessible after CAS store");
+                    }
+                }
             }
             Err(e) => {
-                info!(path = %path.display(), error = %e, "Ingest: file not accessible");
+                info!(path = %path.display(), error = %e, "Ingest: failed to store file to CAS");
             }
         }
     }
@@ -305,25 +308,6 @@ impl IngestHandler {
         path.strip_prefix(&self.project_root)
             .map(|p| format!("/{}", p.display()))
             .unwrap_or_else(|_| path.display().to_string())
-    }
-
-    /// Compute blake3 hash of file content
-    fn hash_file(&self, path: &std::path::Path) -> std::io::Result<[u8; 32]> {
-        use std::io::Read;
-
-        let mut file = std::fs::File::open(path)?;
-        let mut hasher = blake3::Hasher::new();
-        let mut buffer = [0u8; 8192];
-
-        loop {
-            let n = file.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
-
-        Ok(*hasher.finalize().as_bytes())
     }
 }
 

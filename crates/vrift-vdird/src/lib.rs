@@ -114,9 +114,14 @@ pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
     // RFC-0039: Create ingest channel (fixed-size for backpressure)
     let (ingest_tx, ingest_rx) = mpsc::channel::<watch::IngestEvent>(4096);
 
+    // Initialize CAS store (TheSource™)
+    let cas = vrift_cas::CasStore::default_location()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize CAS: {}", e))?;
+    info!(root = %cas.root().display(), "CAS store initialized");
+
     // Phase 1: Start consumer FIRST (consumer-first pattern)
     let ingest_queue = ingest::IngestQueue::new(ingest_rx);
-    let handler = ingest::IngestHandler::new(config.project_root.clone(), manifest.clone());
+    let handler = ingest::IngestHandler::new(config.project_root.clone(), manifest.clone(), cas);
     let consumer_handle = tokio::spawn(async move {
         ingest::run_consumer(ingest_queue, handler).await;
     });
