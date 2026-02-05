@@ -175,8 +175,9 @@ def benchmark_vrift_ingest(
         print(f"  ERROR: {stderr[:200]}")
         return BenchmarkResult(name="vrift", files=files, bytes_processed=size, duration_sec=0)
 
-    # Parse unique blobs from output
+    # Parse unique blobs and actual ingest duration from output
     unique_blobs = files  # fallback
+    actual_duration = duration  # fallback to wall clock
     for line in stdout.split("\n"):
         if "blobs" in line and "→" in line:
             parts = line.split("→")
@@ -186,12 +187,18 @@ def benchmark_vrift_ingest(
                     unique_blobs = int(blob_part)
                 except ValueError:
                     pass
+        # Parse actual ingest time: "VRift Complete in X.XXs"
+        if "Complete in" in line:
+            import re
+            match = re.search(r"(\d+\.?\d*)\s*s", line)
+            if match:
+                actual_duration = float(match.group(1))
 
     return BenchmarkResult(
         name="vrift",
         files=files,
         bytes_processed=size,
-        duration_sec=duration,
+        duration_sec=actual_duration,
         unique_blobs=unique_blobs,
     )
 
