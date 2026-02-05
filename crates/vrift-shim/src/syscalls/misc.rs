@@ -640,7 +640,10 @@ pub unsafe extern "C" fn getattrlist_shim(
     attrbufsize: libc::size_t,
     options: libc::c_ulong,
 ) -> c_int {
-    vfs_log!("getattrlist_shim called for path: {:?}", CStr::from_ptr(path));
+    vfs_log!(
+        "getattrlist_shim called for path: {:?}",
+        CStr::from_ptr(path)
+    );
     if let Some(res) = block_vfs_mutation(path) {
         return res;
     }
@@ -656,7 +659,10 @@ pub unsafe extern "C" fn setattrlist_shim(
     attrbufsize: libc::size_t,
     options: libc::c_ulong,
 ) -> c_int {
-    vfs_log!("setattrlist_shim called for path: {:?}", CStr::from_ptr(path));
+    vfs_log!(
+        "setattrlist_shim called for path: {:?}",
+        CStr::from_ptr(path)
+    );
     if let Some(err) = quick_block_vfs_mutation(path) {
         return err;
     }
@@ -684,7 +690,10 @@ pub(crate) unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
         if let Some(state) = ShimState::get() {
             if let Some(vpath) = state.resolve_path(path_str) {
                 // RFC-0047: Block all mutations in VFS territory to ensure integrity
-                vfs_log!("blocking mutation on VFS territory path: '{}'", vpath.absolute);
+                vfs_log!(
+                    "blocking mutation on VFS territory path: '{}'",
+                    vpath.absolute
+                );
                 crate::set_errno(libc::EPERM);
                 return Some(-1);
             }
@@ -692,7 +701,10 @@ pub(crate) unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
     }
 
     if quick_is_in_vfs(path) {
-        vfs_log!("blocking mutation (quick-check) on VFS path: '{}'", path_str);
+        vfs_log!(
+            "blocking mutation (quick-check) on VFS path: '{}'",
+            path_str
+        );
         crate::set_errno(libc::EPERM);
         return Some(-1);
     }
@@ -733,7 +745,10 @@ pub(crate) unsafe fn quick_block_vfs_mutation(path: *const c_char) -> Option<c_i
         if let Ok(vfs_prefix) = CStr::from_ptr(vfs_prefix_ptr).to_str() {
             let matches = path_str.starts_with(vfs_prefix);
             if matches {
-                vfs_log!("blocking mutation (quick-block) on VFS path: '{}'", path_str);
+                vfs_log!(
+                    "blocking mutation (quick-block) on VFS path: '{}'",
+                    path_str
+                );
                 crate::set_errno(libc::EPERM);
                 return Some(-1);
             }

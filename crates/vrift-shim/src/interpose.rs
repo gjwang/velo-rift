@@ -985,7 +985,6 @@ pub unsafe extern "C" fn creat(path: *const c_char, mode: mode_t) -> c_int {
 
 #[cfg(target_os = "macos")]
 #[no_mangle]
-#[no_mangle]
 pub unsafe extern "C" fn getattrlist(
     path: *const c_char,
     attrlist: *mut c_void,
