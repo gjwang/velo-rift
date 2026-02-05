@@ -46,25 +46,22 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             e
         }
         None => {
+            // RFC-0039 Solid Mode: Allow new file creation in VFS territory
+            // Manifest MISS means the file doesn't exist in VFS yet - this is a NEW file
+            // We passthrough to real FS and track for later Live Ingest on close()
             let is_write =
                 (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
-            if is_write {
-                vfs_log!(
-                    "open write request for '{}' (VFS territory, manifest MISS) -> EPERM",
-                    vpath.absolute
-                );
-                crate::set_errno(libc::EPERM);
-                return Some(-1);
-            }
 
             vfs_log!(
-                "manifest lookup '{}': NOT FOUND -> passthrough (TRACKING FOR PERIMETER)",
-                vpath.manifest_key
+                "manifest lookup '{}': NOT FOUND -> passthrough + track (is_write={})",
+                vpath.manifest_key,
+                is_write
             );
-            vfs_record!(EventType::OpenMiss, vpath.manifest_key_hash, -libc::ENOENT);
+            vfs_record!(EventType::OpenMiss, vpath.manifest_key_hash, 0);
+
             let fd = unsafe { raw_open(path, flags, mode) };
             if fd >= 0 {
-                // No cache for miss (file not in manifest)
+                // Track FD for Live Ingest on close() - especially important for writes
                 crate::syscalls::io::track_fd(fd, &vpath.manifest_key, true, None);
                 return Some(fd);
             }
