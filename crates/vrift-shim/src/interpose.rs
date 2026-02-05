@@ -657,14 +657,14 @@ pub static IT_UNLINKAT: Interpose = Interpose {
     old_func: real_unlinkat as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_MKDIRAT: Interpose = Interpose {
     new_func: mkdirat_shim as _,
     old_func: real_mkdirat as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_SYMLINKAT: Interpose = Interpose {
     new_func: symlinkat_shim as _,
@@ -722,7 +722,7 @@ pub static IT_FCHOWNAT: Interpose = Interpose {
     old_func: real_fchownat as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_EXCHANGEDATA: Interpose = Interpose {
     new_func: exchangedata_shim as _,
@@ -984,6 +984,7 @@ pub unsafe extern "C" fn creat(path: *const c_char, mode: mode_t) -> c_int {
 }
 
 #[cfg(target_os = "macos")]
+#[no_mangle]
 #[no_mangle]
 pub unsafe extern "C" fn getattrlist(
     path: *const c_char,
