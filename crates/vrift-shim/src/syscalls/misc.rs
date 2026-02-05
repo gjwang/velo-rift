@@ -615,7 +615,6 @@ pub unsafe extern "C" fn utimes_shim(path: *const c_char, times: *const libc::ti
     })
 }
 
-#[no_mangle]
 #[cfg(target_os = "linux")]
 pub unsafe extern "C" fn utime_shim(path: *const c_char, times: *const libc::c_void) -> c_int {
     // utime(path, utimbuf) is legacy but used by some tools
@@ -632,6 +631,41 @@ pub unsafe extern "C" fn utime_shim(path: *const c_char, times: *const libc::c_v
     // For simplicity, we just use the raw assembly for utimes(path, NULL)
     // if it's in VFS we already blocked it.
     libc::utime(path, times as _)
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn getattrlist_shim(
+    path: *const c_char,
+    attrlist: *mut libc::c_void,
+    attrbuf: *mut libc::c_void,
+    attrbufsize: libc::size_t,
+    options: libc::c_ulong,
+) -> c_int {
+    // Read operations are generally allowed unless we want strict isolation.
+    // However, if it's in VFS territory and NOT a manifest file, we might return fake attrs.
+    // For now, passthrough to raw but intercept recursion.
+    crate::syscalls::macos_raw::raw_getattrlist(path, attrlist, attrbuf, attrbufsize, options)
+}
+
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn setattrlist_shim(
+    path: *const c_char,
+    attrlist: *mut libc::c_void,
+    attrbuf: *mut libc::c_void,
+    attrbufsize: libc::size_t,
+    options: libc::c_ulong,
+) -> c_int {
+    if let Some(err) = quick_block_vfs_mutation(path) {
+        return err;
+    }
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state == 0 {
+        if let Some(res) = block_vfs_mutation(path) {
+            return res;
+        }
+    }
+    crate::syscalls::macos_raw::raw_setattrlist(path, attrlist, attrbuf, attrbufsize, options)
 }
 
 /// Helper: Check if path is in VFS and return EPERM if so
@@ -700,7 +734,8 @@ pub(crate) unsafe fn quick_block_vfs_mutation(path: *const c_char) -> Option<c_i
     let vfs_prefix_ptr = libc::getenv(env_name.as_ptr() as *const c_char);
     if !vfs_prefix_ptr.is_null() {
         if let Ok(vfs_prefix) = CStr::from_ptr(vfs_prefix_ptr).to_str() {
-            if path_str.starts_with(vfs_prefix) {
+            let matches = path_str.starts_with(vfs_prefix);
+            if matches {
                 crate::set_errno(libc::EPERM);
                 return Some(-1);
             }

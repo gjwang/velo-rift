@@ -45,8 +45,11 @@ pub fn track_fd(fd: c_int, path: &str, is_vfs: bool, cached_stat: Option<libc::s
     }));
 
     // Safety: Reactor is guaranteed to be initialized after ShimState::init()
+    let reactor = match crate::sync::get_reactor() {
+        Some(r) => r,
+        None => return,
+    };
     unsafe {
-        let reactor = crate::sync::get_reactor_unchecked();
         let old = reactor.fd_table.set(fd as u32, entry);
         if !old.is_null() {
             // Push old entry to RingBuffer for safe reclamation by Worker
@@ -63,8 +66,11 @@ pub fn untrack_fd(fd: c_int) {
     if fd < 0 {
         return;
     }
+    let reactor = match crate::sync::get_reactor() {
+        Some(r) => r,
+        None => return,
+    };
     unsafe {
-        let reactor = crate::sync::get_reactor_unchecked();
         let old = reactor.fd_table.remove(fd as u32);
         if !old.is_null() {
             let _ = reactor
@@ -80,8 +86,11 @@ pub fn get_fd_entry(fd: c_int) -> Option<FdEntry> {
     if fd < 0 {
         return None;
     }
+    let reactor = match crate::sync::get_reactor() {
+        Some(r) => r,
+        None => return None,
+    };
     unsafe {
-        let reactor = crate::sync::get_reactor_unchecked();
         let entry_ptr = reactor.fd_table.get(fd as u32);
         if !entry_ptr.is_null() {
             // Safety: We assume the grace period in the RingBuffer is sufficient

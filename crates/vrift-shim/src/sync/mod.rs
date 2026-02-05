@@ -22,8 +22,8 @@ static REACTOR_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[inline(always)]
 pub fn get_reactor() -> Option<&'static Reactor> {
-    // Fast path: check atomic flag first (relaxed is fine for initialized state)
-    if !REACTOR_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+    // Fast path: check atomic flag first with Acquire to ensure REACTOR visibility
+    if !REACTOR_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
         return None;
     }
     unsafe { (*REACTOR.get()).as_ref() }
@@ -35,8 +35,9 @@ pub(crate) unsafe fn mark_reactor_ready() {
 }
 
 /// UNSAFE: Only call after Reactor is initialized (post-init phase)
-/// This skips the initialization check for maximum performance
 #[inline(always)]
 pub unsafe fn get_reactor_unchecked() -> &'static Reactor {
-    (*REACTOR.get()).as_ref().unwrap_unchecked()
+    // Use get_reactor() even in unchecked to ensure we respect the initialization flag
+    // and avoid hitting unwrap_unchecked on None if possible.
+    get_reactor().expect("Reactor not initialized")
 }

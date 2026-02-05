@@ -678,14 +678,19 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
     let mmap_path_cstr = CString::new(mmap_path.to_string_lossy().as_ref()).unwrap_or_default();
 
     #[cfg(target_os = "macos")]
-    let fd =
-        unsafe { crate::syscalls::macos_raw::raw_open(mmap_path_cstr.as_ptr(), libc::O_RDONLY, 0) };
+    let fd = unsafe {
+        crate::syscalls::macos_raw::raw_open(
+            mmap_path_cstr.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+            0,
+        )
+    };
     #[cfg(target_os = "linux")]
     let fd = unsafe {
         crate::syscalls::linux_raw::raw_openat(
             libc::AT_FDCWD,
             mmap_path_cstr.as_ptr(),
-            libc::O_RDONLY,
+            libc::O_RDONLY | libc::O_CLOEXEC,
             0,
         )
     };

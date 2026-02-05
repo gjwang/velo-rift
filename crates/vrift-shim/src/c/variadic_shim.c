@@ -233,6 +233,33 @@ int c_renameat_bridge(int oldfd, const char *old, int newfd, const char *new) {
   return velo_renameat_impl(oldfd, old, newfd, new);
 }
 
+/* --- Metadata Hardening Bridges --- */
+
+extern int creat_shim(const char *path, mode_t mode);
+extern int getattrlist_shim(const char *path, void *attrlist, void *attrbuf,
+                            size_t attrbufsize, unsigned long options);
+extern int setattrlist_shim(const char *path, void *attrlist, void *attrbuf,
+                            size_t attrbufsize, unsigned long options);
+
+int c_creat_bridge(const char *path, mode_t mode) {
+  if (INITIALIZING != 0) {
+    return (int)raw_syscall(SYS_OPEN, (long)path,
+                            (long)(O_CREAT | O_WRONLY | O_TRUNC), (long)mode,
+                            0);
+  }
+  return creat_shim(path, mode);
+}
+
+int c_getattrlist_bridge(const char *path, void *attrlist, void *attrbuf,
+                         size_t attrbufsize, unsigned long options) {
+  return getattrlist_shim(path, attrlist, attrbuf, attrbufsize, options);
+}
+
+int c_setattrlist_bridge(const char *path, void *attrlist, void *attrbuf,
+                         size_t attrbufsize, unsigned long options) {
+  return setattrlist_shim(path, attrlist, attrbuf, attrbufsize, options);
+}
+
 /* --- fcntl variadic bridge --- */
 
 extern int velo_fcntl_impl(int fd, int cmd, long arg);

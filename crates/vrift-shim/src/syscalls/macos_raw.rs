@@ -947,9 +947,9 @@ const SYS_SETXATTR: i64 = 236;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_REMOVEXATTR: i64 = 238;
 
-/// SYS_utimes = 138 on macOS
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_UTIMES: i64 = 138;
+const SYS_GETATTRLIST: i64 = 220;
+const SYS_SETATTRLIST: i64 = 221;
 
 /// Raw linkat syscall for macOS ARM64.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1101,6 +1101,72 @@ pub unsafe fn raw_utimes(path: *const libc::c_char, times: *const libc::timeval)
         return -1;
     }
     ret as libc::c_int
+}
+
+/// Raw getattrlist syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(always)]
+pub unsafe fn raw_getattrlist(
+    path: *const libc::c_char,
+    attrlist: *mut libc::c_void,
+    attrbuf: *mut libc::c_void,
+    attrbufsize: libc::size_t,
+    options: libc::c_ulong,
+) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_GETATTRLIST,
+        in("x0") path as i64,
+        in("x1") attrlist as i64,
+        in("x2") attrbuf as i64,
+        in("x3") attrbufsize as i64,
+        in("x4") options as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+/// Raw setattrlist syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(always)]
+pub unsafe fn raw_setattrlist(
+    path: *const libc::c_char,
+    attrlist: *mut libc::c_void,
+    attrbuf: *mut libc::c_void,
+    attrbufsize: libc::size_t,
+    options: libc::c_ulong,
+) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_SETATTRLIST,
+        in("x0") path as i64,
+        in("x1") attrlist as i64,
+        in("x2") attrbuf as i64,
+        in("x3") attrbufsize as i64,
+        in("x4") options as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
 }
 
 /// SYS_fchdir = 13 on macOS
@@ -1443,8 +1509,9 @@ const SYS_ACCESS_X64: i64 = 33;
 const SYS_STAT64_X64: i64 = 338;
 
 /// SYS_lstat64 on macOS x86_64 = 340
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const SYS_LSTAT64_X64: i64 = 340;
+const SYS_GETATTRLIST_X64: i64 = 220;
+const SYS_SETATTRLIST_X64: i64 = 221;
 
 /// Raw stat64 syscall for macOS x86_64.
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -2095,6 +2162,68 @@ pub unsafe fn raw_fstatat64(
         in("rsi") path as i64,
         in("rdx") buf as i64,
         in("r10") flags as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+/// Raw getattrlist syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_getattrlist(
+    path: *const libc::c_char,
+    attrlist: *mut libc::c_void,
+    attrbuf: *mut libc::c_void,
+    attrbufsize: libc::size_t,
+    options: libc::c_ulong,
+) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_GETATTRLIST_X64 | 0x2000000,
+        in("rdi") path as i64,
+        in("rsi") attrlist as i64,
+        in("rdx") attrbuf as i64,
+        in("r10") attrbufsize as i64,
+        in("r8") options as i64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    if ret as isize > -4096 && (ret as isize) < 0 {
+        -1
+    } else {
+        ret as libc::c_int
+    }
+}
+
+/// Raw setattrlist syscall for macOS x86_64.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[inline(never)]
+pub unsafe fn raw_setattrlist(
+    path: *const libc::c_char,
+    attrlist: *mut libc::c_void,
+    attrbuf: *mut libc::c_void,
+    attrbufsize: libc::size_t,
+    options: libc::c_ulong,
+) -> libc::c_int {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        in("rax") SYS_SETATTRLIST_X64 | 0x2000000,
+        in("rdi") path as i64,
+        in("rsi") attrlist as i64,
+        in("rdx") attrbuf as i64,
+        in("r10") attrbufsize as i64,
+        in("r8") options as i64,
         lateout("rax") ret,
         lateout("rcx") _,
         lateout("r11") _,

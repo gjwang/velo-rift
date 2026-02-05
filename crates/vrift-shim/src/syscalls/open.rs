@@ -46,6 +46,17 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             e
         }
         None => {
+            let is_write =
+                (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
+            if is_write {
+                vfs_log!(
+                    "open write request for '{}' (VFS territory, manifest MISS) -> EPERM",
+                    vpath.absolute
+                );
+                crate::set_errno(libc::EPERM);
+                return Some(-1);
+            }
+
             vfs_log!(
                 "manifest lookup '{}': NOT FOUND -> passthrough (TRACKING FOR PERIMETER)",
                 vpath.manifest_key
@@ -399,4 +410,11 @@ pub unsafe extern "C" fn openat2_shim(
     // but covering path redirection is the primary goal.
     open_impl(p, flags, mode)
         .unwrap_or_else(|| crate::syscalls::linux_raw::raw_openat2(dirfd, p, how as _, size))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn creat_shim(path: *const c_char, mode: mode_t) -> c_int {
+    let flags = libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC;
+    // Route through open_shim (macOS uses c_open_bridge, Linux uses velo_open_impl)
+    open_shim(path, flags, mode)
 }

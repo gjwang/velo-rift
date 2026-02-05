@@ -10,12 +10,31 @@ use crate::syscalls::io::{
     sendfile_shim, write_shim,
 };
 #[cfg(target_os = "macos")]
+extern "C" {
+    fn c_creat_bridge(path: *const c_char, mode: mode_t) -> c_int;
+    fn c_getattrlist_bridge(
+        path: *const c_char,
+        attrlist: *mut c_void,
+        attrbuf: *mut c_void,
+        attrbufsize: libc::size_t,
+        options: libc::c_ulong,
+    ) -> c_int;
+    fn c_setattrlist_bridge(
+        path: *const c_char,
+        attrlist: *mut c_void,
+        attrbuf: *mut c_void,
+        attrbufsize: libc::size_t,
+        options: libc::c_ulong,
+    ) -> c_int;
+}
+#[cfg(target_os = "macos")]
 use crate::syscalls::misc::{
     chflags_shim, chmod_shim, exchangedata_shim, execve_shim, faccessat_shim, fchflags_shim,
-    fchmod_shim, fchmodat_shim, fchown_shim, fchownat_shim, flock_shim, futimes_shim, link_shim,
-    linkat_shim, mkdir_shim, mkdirat_shim, posix_spawn_shim, posix_spawnp_shim, removexattr_shim,
-    rmdir_shim, setrlimit_shim, setxattr_shim, symlink_shim, symlinkat_shim, truncate_shim,
-    unlink_shim, unlinkat_shim, utimensat_shim, utimes_shim,
+    fchmod_shim, fchmodat_shim, fchown_shim, fchownat_shim, flock_shim, futimes_shim,
+    getattrlist_shim, link_shim, linkat_shim, mkdir_shim, mkdirat_shim, posix_spawn_shim,
+    posix_spawnp_shim, removexattr_shim, rmdir_shim, setattrlist_shim, setrlimit_shim,
+    setxattr_shim, symlink_shim, symlinkat_shim, truncate_shim, unlink_shim, unlinkat_shim,
+    utimensat_shim, utimes_shim,
 };
 
 #[cfg(target_os = "macos")]
@@ -222,6 +241,24 @@ extern "C" {
         hdtr: *mut c_void,
         flags: c_int,
     ) -> c_int;
+    #[link_name = "creat"]
+    fn real_creat(path: *const c_char, mode: mode_t) -> c_int;
+    #[link_name = "getattrlist"]
+    fn real_getattrlist(
+        path: *const c_char,
+        attrlist: *mut c_void,
+        attrbuf: *mut c_void,
+        attrbufsize: size_t,
+        options: libc::c_ulong,
+    ) -> c_int;
+    #[link_name = "setattrlist"]
+    fn real_setattrlist(
+        path: *const c_char,
+        attrlist: *mut c_void,
+        attrbuf: *mut c_void,
+        attrbufsize: size_t,
+        options: libc::c_ulong,
+    ) -> c_int;
 }
 
 #[cfg(target_os = "macos")]
@@ -300,6 +337,27 @@ pub static IT_ACCESS: Interpose = Interpose {
 pub static IT_READLINK: Interpose = Interpose {
     new_func: c_readlink_bridge as _,
     old_func: real_readlink as _,
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_CREAT: Interpose = Interpose {
+    new_func: c_creat_bridge as _,
+    old_func: real_creat as _,
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_GETATTRLIST: Interpose = Interpose {
+    new_func: c_getattrlist_bridge as _,
+    old_func: real_getattrlist as _,
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_SETATTRLIST: Interpose = Interpose {
+    new_func: c_setattrlist_bridge as _,
+    old_func: real_setattrlist as _,
 };
 #[cfg(target_os = "macos")]
 #[link_section = "__DATA,__interpose"]
@@ -913,4 +971,30 @@ pub unsafe extern "C" fn openat2(
     size: libc::size_t,
 ) -> c_int {
     crate::syscalls::open::openat2_shim(dirfd, p, how as _, size)
+}
+#[no_mangle]
+pub unsafe extern "C" fn creat(path: *const c_char, mode: mode_t) -> c_int {
+    c_creat_bridge(path, mode)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn getattrlist(
+    path: *const c_char,
+    attrlist: *mut c_void,
+    attrbuf: *mut c_void,
+    attrbufsize: libc::size_t,
+    options: libc::c_ulong,
+) -> c_int {
+    c_getattrlist_bridge(path, attrlist, attrbuf, attrbufsize, options)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn setattrlist(
+    path: *const c_char,
+    attrlist: *mut c_void,
+    attrbuf: *mut c_void,
+    attrbufsize: libc::size_t,
+    options: libc::c_ulong,
+) -> c_int {
+    c_setattrlist_bridge(path, attrlist, attrbuf, attrbufsize, options)
 }
