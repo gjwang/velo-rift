@@ -46,8 +46,11 @@ echo "════════════════════════�
 echo "📍 STEP 2: Project Daemon (vrift-vdird)"
 echo "═══════════════════════════════════════════════════════════════"
 DAEMON_LOG="$TEST_WORKSPACE/vdird.log"
-timeout 5 "$VDIRD_BIN" "$TEST_WORKSPACE" > "$DAEMON_LOG" 2>&1 &
+# macOS compatible: use background watchdog instead of timeout command
+"$VDIRD_BIN" "$TEST_WORKSPACE" > "$DAEMON_LOG" 2>&1 &
 VDIRD_PID=$!
+( sleep 5 && kill -9 $VDIRD_PID 2>/dev/null ) &
+WATCHDOG_PID=$!
 sleep 2
 if kill -0 $VDIRD_PID 2>/dev/null; then
     if ps aux | grep $VDIRD_PID | grep -v grep | grep -q "UE"; then
