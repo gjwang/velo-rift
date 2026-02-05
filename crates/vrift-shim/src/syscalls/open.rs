@@ -251,7 +251,7 @@ pub unsafe extern "C" fn openat_shim(dfd: c_int, p: *const c_char, f: c_int, m: 
 pub unsafe extern "C" fn open_shim_c_impl(p: *const c_char, f: c_int, m: mode_t) -> c_int {
     #[inline(always)]
     unsafe fn raw_open_internal(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             let ret: i64;
             let err: i64;
@@ -266,6 +266,10 @@ pub unsafe extern "C" fn open_shim_c_impl(p: *const c_char, f: c_int, m: mode_t)
             } else {
                 ret as c_int
             }
+        }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            crate::syscalls::macos_raw::raw_open(path, flags, mode)
         }
         #[cfg(target_os = "linux")]
         {
@@ -331,7 +335,7 @@ pub unsafe extern "C" fn velo_openat_impl(
         flags: c_int,
         mode: mode_t,
     ) -> c_int {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             let ret: i64;
             let err: i64;
@@ -346,6 +350,10 @@ pub unsafe extern "C" fn velo_openat_impl(
             } else {
                 ret as c_int
             }
+        }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            crate::syscalls::macos_raw::raw_openat(dirfd, path, flags, mode)
         }
         #[cfg(target_os = "linux")]
         {

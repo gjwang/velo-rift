@@ -79,13 +79,11 @@ pub fn get_fd_entry(fd: c_int) -> Option<FdEntry> {
         return None;
     }
     let reactor = crate::sync::get_reactor()?;
-    unsafe {
-        let entry_ptr = reactor.fd_table.get(fd as u32);
-        if !entry_ptr.is_null() {
-            // Safety: We assume the grace period in the RingBuffer is sufficient
-            // to prevent UAF during this clone.
-            return Some((&*entry_ptr).clone());
-        }
+    let entry_ptr = reactor.fd_table.get(fd as u32);
+    if !entry_ptr.is_null() {
+        // Safety: We assume the grace period in the RingBuffer is sufficient
+        // to prevent UAF during this clone.
+        return unsafe { Some((&*entry_ptr).clone()) };
     }
     None
 }
@@ -99,7 +97,6 @@ pub fn is_vfs_fd(fd: c_int) -> bool {
 // dup/dup2 shims - copy FD tracking on duplicate
 // ============================================================================
 
-#[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
     // BUG-007: Use raw syscall during early init OR when shim not fully ready
@@ -110,15 +107,27 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
             .load(std::sync::atomic::Ordering::Acquire)
             .is_null()
     {
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_dup(oldfd);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_dup(oldfd);
     }
 
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
-        None => return crate::syscalls::macos_raw::raw_dup(oldfd),
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_dup(oldfd);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_dup(oldfd);
+        }
     };
 
+    #[cfg(target_os = "macos")]
     let newfd = crate::syscalls::macos_raw::raw_dup(oldfd);
+    #[cfg(target_os = "linux")]
+    let newfd = crate::syscalls::linux_raw::raw_dup(oldfd);
+
     if newfd >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
@@ -128,7 +137,6 @@ pub unsafe extern "C" fn dup_shim(oldfd: c_int) -> c_int {
     newfd
 }
 
-#[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
     // BUG-007: Use raw syscall during early init OR when shim not fully ready
@@ -139,18 +147,30 @@ pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
             .load(std::sync::atomic::Ordering::Acquire)
             .is_null()
     {
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_dup2(oldfd, newfd);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_dup2(oldfd, newfd);
     }
 
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
-        None => return crate::syscalls::macos_raw::raw_dup2(oldfd, newfd),
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_dup2(oldfd, newfd);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_dup2(oldfd, newfd);
+        }
     };
 
     // If newfd was tracked, untrack it (it's being replaced)
     untrack_fd(newfd);
 
+    #[cfg(target_os = "macos")]
     let result = crate::syscalls::macos_raw::raw_dup2(oldfd, newfd);
+    #[cfg(target_os = "linux")]
+    let result = crate::syscalls::linux_raw::raw_dup2(oldfd, newfd);
+
     if result >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
@@ -164,7 +184,6 @@ pub unsafe extern "C" fn dup2_shim(oldfd: c_int, newfd: c_int) -> c_int {
 // fchdir shim - update virtual CWD from FD
 // ============================================================================
 
-#[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn fchdir_shim(fd: c_int) -> c_int {
     let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
@@ -173,23 +192,31 @@ pub unsafe extern "C" fn fchdir_shim(fd: c_int) -> c_int {
             .load(std::sync::atomic::Ordering::Acquire)
             .is_null()
     {
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_fchdir(fd);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_fchdir(fd);
     }
 
     // TODO: Update virtual CWD tracking if fd is a VFS directory
     // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-    crate::syscalls::macos_raw::raw_fchdir(fd)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_fchdir(fd);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_fchdir(fd);
 }
 
 // ============================================================================
 // lseek shim - passthrough with tracking
 // ============================================================================
 
-#[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn lseek_shim(fd: c_int, offset: off_t, whence: c_int) -> off_t {
     // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-    crate::syscalls::macos_raw::raw_lseek(fd, offset, whence)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_lseek(fd, offset, whence);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_lseek(fd, offset, whence);
 }
 
 // ============================================================================
@@ -225,7 +252,6 @@ pub unsafe extern "C" fn read_shim(fd: c_int, buf: *mut c_void, count: size_t) -
     return crate::syscalls::linux_raw::raw_read(fd, buf, count);
 }
 
-#[cfg(target_os = "macos")]
 #[no_mangle]
 pub unsafe extern "C" fn close_shim(fd: c_int) -> c_int {
     use crate::state::{EventType, ShimGuard, ShimState};

@@ -169,18 +169,22 @@ pub unsafe extern "C" fn closedir_shim(dir: *mut c_void) -> c_int {
     real(dir)
 }
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn getcwd_shim(
     buf: *mut libc::c_char,
     size: libc::size_t,
 ) -> *mut libc::c_char {
     // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-    crate::syscalls::macos_raw::raw_getcwd(buf, size)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_getcwd(buf, size);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_getcwd(buf, size);
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn chdir_shim(path: *const libc::c_char) -> c_int {
     // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-    crate::syscalls::macos_raw::raw_chdir(path)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_chdir(path);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_chdir(path);
 }

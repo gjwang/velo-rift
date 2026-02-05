@@ -3,7 +3,6 @@ use crate::reals::*;
 use crate::state::*;
 use libc::{c_char, c_int, stat as libc_stat};
 use std::ffi::CStr;
-#[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 
 /// Linux statx structures (RFC-0044: Metadata virtualization)
@@ -145,40 +144,51 @@ unsafe fn stat_impl(
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn velo_stat_impl(path: *const c_char, buf: *mut libc_stat) -> c_int {
-    stat_impl(path, buf, true).unwrap_or_else(|| crate::syscalls::macos_raw::raw_stat(path, buf))
+    stat_impl(path, buf, true).unwrap_or_else(|| {
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_stat(path, buf);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_stat(path, buf);
+    })
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn stat_shim(path: *const c_char, buf: *mut libc_stat) -> c_int {
     // Standard interpose entry point
     let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
     if init_state != 0 {
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_stat(path, buf);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_stat(path, buf);
     }
     velo_stat_impl(path, buf)
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn velo_lstat_impl(path: *const c_char, buf: *mut libc_stat) -> c_int {
-    stat_impl(path, buf, false).unwrap_or_else(|| crate::syscalls::macos_raw::raw_lstat(path, buf))
+    stat_impl(path, buf, false).unwrap_or_else(|| {
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_lstat(path, buf);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_lstat(path, buf);
+    })
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn lstat_shim(path: *const c_char, buf: *mut libc_stat) -> c_int {
     let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
     if init_state != 0 {
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_lstat(path, buf);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_lstat(path, buf);
     }
     velo_lstat_impl(path, buf)
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_int {
     // 🔥 ULTRA-FAST PATH: No ShimGuard for common case
     if let Some(reactor) = crate::sync::get_reactor() {
@@ -194,7 +204,12 @@ pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_in
 
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
-        None => return crate::syscalls::macos_raw::raw_fstat64(fd, buf),
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_fstat64(fd, buf);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_fstat(fd, buf);
+        }
     };
 
     if let Some(entry) = crate::syscalls::io::get_fd_entry(fd) {
@@ -208,7 +223,14 @@ pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_in
                 if let Some(vnode) = state.query_manifest(&entry.path) {
                     std::ptr::write_bytes(buf, 0, 1);
                     (*buf).st_size = vnode.size as _;
-                    (*buf).st_mode = vnode.mode as u16;
+                    #[cfg(target_os = "macos")]
+                    {
+                        (*buf).st_mode = vnode.mode as u16;
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        (*buf).st_mode = vnode.mode as _;
+                    }
                     (*buf).st_mtime = vnode.mtime as _;
                     (*buf).st_dev = 0x52494654;
                     (*buf).st_nlink = 1;
@@ -220,15 +242,20 @@ pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_in
         }
     }
 
-    crate::syscalls::macos_raw::raw_fstat64(fd, buf)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_fstat64(fd, buf);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_fstat(fd, buf);
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn fstat_shim(fd: c_int, buf: *mut libc_stat) -> c_int {
     let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
     if init_state != 0 {
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_fstat64(fd, buf);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_fstat(fd, buf);
     }
     velo_fstat_impl(fd, buf)
 }
@@ -284,7 +311,6 @@ pub unsafe extern "C" fn access_shim(path: *const c_char, mode: c_int) -> c_int 
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn velo_fstatat_impl(
     dirfd: c_int,
     path: *const c_char,
@@ -294,22 +320,29 @@ pub unsafe extern "C" fn velo_fstatat_impl(
     // Use raw syscall for fallback to avoid dlsym deadlock (Pattern 2682.v2)
     let _guard = match ShimGuard::enter() {
         Some(g) => g,
-        None => return crate::syscalls::macos_raw::raw_fstatat64(dirfd, path, buf, flags),
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_fstatat64(dirfd, path, buf, flags);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_fstatat(dirfd, path, buf, flags);
+        }
     };
 
-    if dirfd == libc::AT_FDCWD || (!path.is_null() && *path == b'/' as i8) {
-        if let Ok(path_str) = CStr::from_ptr(path).to_str() {
+    if dirfd == libc::AT_FDCWD || (!path.is_null() && unsafe { *path == b'/' as i8 }) {
+        if let Ok(path_str) = unsafe { CStr::from_ptr(path).to_str() } {
             if let Some(res) = stat_impl_common(path_str, buf) {
                 return res;
             }
         }
     }
 
-    crate::syscalls::macos_raw::raw_fstatat64(dirfd, path, buf, flags)
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_fstatat64(dirfd, path, buf, flags);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_fstatat(dirfd, path, buf, flags);
 }
 
 #[no_mangle]
-#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn fstatat_shim(
     dirfd: c_int,
     path: *const c_char,
@@ -318,13 +351,12 @@ pub unsafe extern "C" fn fstatat_shim(
 ) -> c_int {
     // BUG-007 / RFC-0051: Use raw syscall during early init to avoid dlsym recursion.
     // Also check if SHIM_STATE is null to avoid TLS deadlock hazards.
-    let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
-    if init_state != 0
-        || crate::state::SHIM_STATE
-            .load(std::sync::atomic::Ordering::Acquire)
-            .is_null()
-    {
+    let init_state = crate::state::INITIALIZING.load(Ordering::Relaxed);
+    if init_state != 0 || crate::state::SHIM_STATE.load(Ordering::Acquire).is_null() {
+        #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_fstatat64(dirfd, path, buf, flags);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_fstatat(dirfd, path, buf, flags);
     }
 
     velo_fstatat_impl(dirfd, path, buf, flags)
