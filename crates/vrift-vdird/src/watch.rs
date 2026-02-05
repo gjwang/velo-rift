@@ -10,6 +10,8 @@ use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, info, warn};
 
+use crate::ignore::IgnoreMatcher;
+
 /// Ingest event from any source (L1/L2/L3)
 #[derive(Debug, Clone)]
 pub enum IngestEvent {
@@ -30,8 +32,8 @@ pub struct WatchConfig {
     pub root: PathBuf,
     /// Debounce duration (to coalesce rapid writes)
     pub debounce: Duration,
-    /// Patterns to ignore (e.g., .git, target/)
-    pub ignore_patterns: Vec<String>,
+    /// Ignore matcher
+    pub ignore: IgnoreMatcher,
 }
 
 impl Default for WatchConfig {
@@ -39,12 +41,7 @@ impl Default for WatchConfig {
         Self {
             root: PathBuf::new(),
             debounce: Duration::from_millis(100),
-            ignore_patterns: vec![
-                ".git".into(),
-                ".vrift".into(),
-                "target".into(),
-                "node_modules".into(),
-            ],
+            ignore: IgnoreMatcher::new(),
         }
     }
 }
@@ -91,15 +88,7 @@ impl FsWatch {
 
     /// Check if path should be ignored
     fn should_ignore(&self, path: &Path) -> bool {
-        for pattern in &self.config.ignore_patterns {
-            if path
-                .components()
-                .any(|c| c.as_os_str().to_string_lossy() == *pattern)
-            {
-                return true;
-            }
-        }
-        false
+        self.config.ignore.should_ignore(path)
     }
 
     /// Convert notify event to IngestEvent
@@ -225,7 +214,8 @@ mod tests {
     #[test]
     fn test_watch_config_default() {
         let config = WatchConfig::default();
-        assert!(config.ignore_patterns.contains(&".git".into()));
-        assert!(config.ignore_patterns.contains(&"target".into()));
+        // Test that default ignore patterns include .git and target
+        assert!(config.ignore.should_ignore(Path::new(".git")));
+        assert!(config.ignore.should_ignore(Path::new("target")));
     }
 }

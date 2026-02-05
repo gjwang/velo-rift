@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::ignore::IgnoreMatcher;
 use crate::watch::IngestEvent;
 
 /// Scan configuration
@@ -18,8 +19,8 @@ pub struct ScanConfig {
     pub root: PathBuf,
     /// Last known scan time (from manifest)
     pub last_scan: SystemTime,
-    /// Patterns to ignore
-    pub ignore_patterns: Vec<String>,
+    /// Ignore pattern matcher
+    pub ignore: IgnoreMatcher,
     /// Maximum depth to scan
     pub max_depth: usize,
 }
@@ -29,12 +30,7 @@ impl Default for ScanConfig {
         Self {
             root: PathBuf::new(),
             last_scan: SystemTime::UNIX_EPOCH,
-            ignore_patterns: vec![
-                ".git".into(),
-                ".vrift".into(),
-                "target".into(),
-                "node_modules".into(),
-            ],
+            ignore: IgnoreMatcher::new(),
             max_depth: 50,
         }
     }
@@ -59,15 +55,7 @@ impl CompensationScanner {
 
     /// Check if path should be ignored
     fn should_ignore(&self, path: &Path) -> bool {
-        for pattern in &self.config.ignore_patterns {
-            if path
-                .components()
-                .any(|c| c.as_os_str().to_string_lossy() == *pattern)
-            {
-                return true;
-            }
-        }
-        false
+        self.config.ignore.should_ignore(path)
     }
 
     /// Scan directory and emit events for changed files

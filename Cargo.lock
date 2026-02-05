@@ -2144,6 +2144,7 @@ dependencies = [
  "libc",
  "memmap2",
  "notify",
+ "serde",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

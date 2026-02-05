@@ -16,9 +16,11 @@
 //! - Protocol: bincode-serialized VeloRequest/VeloResponse
 
 pub mod commands;
+pub mod ignore;
 pub mod ingest;
 pub mod scan;
 pub mod socket;
+pub mod state;
 pub mod vdir;
 pub mod watch;
 
@@ -100,6 +102,15 @@ pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
     );
     info!(path = %manifest_path.display(), "LMDB manifest initialized");
 
+    // P0: Load persistent state (last_scan time)
+    let state_path = state::state_path(&config.project_root);
+    let mut daemon_state = state::DaemonState::load(&state_path);
+    let last_scan = daemon_state.last_scan();
+    info!(
+        last_scan_secs = daemon_state.last_scan_secs,
+        "Loaded daemon state"
+    );
+
     // RFC-0039: Create ingest channel (fixed-size for backpressure)
     let (ingest_tx, ingest_rx) = mpsc::channel::<watch::IngestEvent>(4096);
 
@@ -118,13 +129,50 @@ pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
     // Phase 3: Run compensation scan (Layer 3) for offline changes
     let scan_tx = ingest_tx.clone();
     let scan_root = config.project_root.clone();
+    let state_path_clone = state_path.clone();
     tokio::spawn(async move {
-        // Use UNIX_EPOCH to catch all files on first run
-        // TODO: Load last_scan from persistent state
-        let last_scan = std::time::SystemTime::UNIX_EPOCH;
-        scan::run_compensation_scan(scan_root, last_scan, scan_tx).await;
+        let count = scan::run_compensation_scan(scan_root, last_scan, scan_tx).await;
+
+        // P0: Update last_scan after successful scan
+        if count > 0 || last_scan == std::time::SystemTime::UNIX_EPOCH {
+            let mut state = state::DaemonState::load(&state_path_clone);
+            state.update_last_scan();
+            if let Err(e) = state.save(&state_path_clone) {
+                tracing::warn!(error = %e, "Failed to save daemon state after scan");
+            }
+        }
     });
     info!("Compensation scan started");
+
+    // P1: Periodic manifest commit task (every 30 seconds)
+    let commit_manifest = manifest.clone();
+    let commit_state_path = state_path.clone();
+    let commit_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+
+            // Commit delta layer to base layer
+            match commit_manifest.commit() {
+                Ok(_) => {
+                    let mut state = state::DaemonState::load(&commit_state_path);
+                    state.update_last_commit();
+                    if let Err(e) = commit_manifest.len() {
+                        tracing::debug!(error = %e, "Failed to get manifest len");
+                    }
+                    if let Err(e) = state.save(&commit_state_path) {
+                        tracing::warn!(error = %e, "Failed to save state after commit");
+                    }
+                    tracing::debug!("Periodic manifest commit completed");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Periodic manifest commit failed");
+                }
+            }
+        }
+    });
+    info!("Periodic commit task started (30s interval)");
+
     let socket_handle = socket::run_listener(config, vdir);
 
     // Wait for all tasks
@@ -135,10 +183,26 @@ pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
         _ = watch_handle => {
             info!("Watch exited");
         }
+        _ = commit_handle => {
+            info!("Commit task exited");
+        }
         result = socket_handle => {
             result?;
         }
     }
+
+    // P0: Save state on shutdown
+    daemon_state.update_last_scan();
+    if let Err(e) = daemon_state.save(&state_path) {
+        tracing::warn!(error = %e, "Failed to save daemon state on shutdown");
+    }
+    info!("Daemon state saved on shutdown");
+
+    // P1: Final commit on shutdown
+    if let Err(e) = manifest.commit() {
+        tracing::warn!(error = %e, "Failed to commit manifest on shutdown");
+    }
+    info!("Manifest committed on shutdown");
 
     Ok(())
 }
