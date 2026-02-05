@@ -457,12 +457,11 @@ pub unsafe extern "C" fn mkdirat_shim(
     {
         let init_state = INITIALIZING.load(Ordering::Relaxed);
         if init_state != 0 || crate::state::SHIM_STATE.load(Ordering::Acquire).is_null() {
-            if let Some(err) = quick_block_vfs_mutation(path) {
-                return err;
-            }
+            // RFC-0039: During early init, allow mkdirat passthrough
             return crate::syscalls::macos_raw::raw_mkdirat(dirfd, path, mode);
-        } // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-        block_vfs_mutation(path)
+        }
+        // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
+        block_existing_vfs_entry(path)
             .unwrap_or_else(|| crate::syscalls::macos_raw::raw_mkdirat(dirfd, path, mode))
     }
     #[cfg(target_os = "linux")]
@@ -470,12 +469,11 @@ pub unsafe extern "C" fn mkdirat_shim(
         if INITIALIZING.load(Ordering::Relaxed) >= 2
             || crate::state::SHIM_STATE.load(Ordering::Acquire).is_null()
         {
-            if let Some(err) = quick_block_vfs_mutation(path) {
-                return err;
-            }
+            // RFC-0039: During early init, allow mkdirat passthrough
             return crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode);
         }
-        block_vfs_mutation(path)
+        // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
+        block_existing_vfs_entry(path)
             .unwrap_or_else(|| crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode))
     }
 }
@@ -562,14 +560,13 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
             .load(std::sync::atomic::Ordering::Acquire)
             .is_null()
     {
-        if let Some(err) = quick_block_vfs_mutation(path) {
-            return err;
-        }
+        // RFC-0039: During early init, allow mkdir passthrough (FS handles EEXIST)
         return crate::syscalls::macos_raw::raw_mkdir(path, mode);
     }
 
-    // Pattern 2878: Use raw syscall to avoid dlsym recursion
-    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::macos_raw::raw_mkdir(path, mode))
+    // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
+    block_existing_vfs_entry(path)
+        .unwrap_or_else(|| crate::syscalls::macos_raw::raw_mkdir(path, mode))
 }
 
 #[no_mangle]
@@ -581,12 +578,12 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
             .load(std::sync::atomic::Ordering::Acquire)
             .is_null()
     {
-        if let Some(err) = quick_block_vfs_mutation(path) {
-            return err;
-        }
+        // RFC-0039: During early init, allow mkdir passthrough (FS handles EEXIST)
         return crate::syscalls::linux_raw::raw_mkdir(path, mode);
     }
-    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_mkdir(path, mode))
+    // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
+    block_existing_vfs_entry(path)
+        .unwrap_or_else(|| crate::syscalls::linux_raw::raw_mkdir(path, mode))
 }
 
 #[no_mangle]
@@ -678,6 +675,9 @@ pub unsafe extern "C" fn setattrlist_shim(
 /// Helper: Check if path is in VFS and return EPERM if so
 /// RFC-0048: Must check is_vfs_ready() FIRST to avoid deadlock during init (Pattern 2543)
 /// RFC-0052: Standalone mode - check VRIFT_VFS_PREFIX even without daemon
+///
+/// NOTE: This blocks ALL mutations in VFS territory (for destructive ops like unlink, chmod)
+/// For creation ops (mkdir, symlink), use block_existing_vfs_entry instead
 pub(crate) unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
     if path.is_null() {
         return None;
@@ -708,6 +708,44 @@ pub(crate) unsafe fn block_vfs_mutation(path: *const c_char) -> Option<c_int> {
         crate::set_errno(libc::EPERM);
         return Some(-1);
     }
+    None
+}
+
+/// Helper for CREATION ops (mkdir, symlink): Only block if path EXISTS in manifest
+/// RFC-0039 Solid Mode: Allow creating new files/directories in VFS territory
+/// This enables compilers to create .o files, build dirs, etc.
+pub(crate) unsafe fn block_existing_vfs_entry(path: *const c_char) -> Option<c_int> {
+    if path.is_null() {
+        return None;
+    }
+
+    let path_str = CStr::from_ptr(path).to_str().ok()?;
+
+    // Full shim state check: only block if manifest HIT
+    if let Some(_guard) = ShimGuard::enter() {
+        if let Some(state) = ShimState::get() {
+            if let Some(vpath) = state.resolve_path(path_str) {
+                // Check if this path exists in manifest
+                if state.query_manifest_ipc(&vpath).is_some() {
+                    vfs_log!(
+                        "blocking creation on EXISTING VFS entry: '{}'",
+                        vpath.absolute
+                    );
+                    crate::set_errno(libc::EEXIST);
+                    return Some(-1);
+                }
+                // Manifest MISS: Allow creation (passthrough)
+                vfs_log!(
+                    "allowing creation in VFS territory (manifest MISS): '{}'",
+                    vpath.absolute
+                );
+                return None;
+            }
+        }
+    }
+
+    // During early init, we cannot check manifest - allow passthrough
+    // The file system itself will report EEXIST if needed
     None
 }
 
