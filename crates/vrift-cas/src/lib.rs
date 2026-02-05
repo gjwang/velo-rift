@@ -27,6 +27,7 @@ pub mod link_strategy;
 pub mod parallel_ingest;
 pub mod protection;
 pub mod reflink;
+pub mod streaming_ingest;
 pub mod streaming_pipeline;
 pub mod zero_copy_ingest;
 
@@ -42,6 +43,7 @@ pub use parallel_ingest::{
 pub use protection::{
     enforce_cas_invariant, is_immutable, set_immutable, CAS_FORBIDDEN_PERM_MASK, CAS_READ_ONLY_PERM,
 };
+pub use streaming_ingest::{streaming_ingest, streaming_ingest_with_progress};
 pub use streaming_pipeline::{IngestPipeline, IngestStats, PipelineConfig};
 pub use zero_copy_ingest::{
     ingest_phantom, ingest_solid_tier1, ingest_solid_tier1_dedup, ingest_solid_tier2,

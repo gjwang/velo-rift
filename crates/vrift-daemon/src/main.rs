@@ -844,8 +844,7 @@ async fn handle_request(
             tier1,
         } => {
             use std::time::Instant;
-            use vrift_cas::{parallel_ingest_with_progress, IngestMode};
-            use walkdir::WalkDir;
+            use vrift_cas::{streaming_ingest, IngestMode};
 
             let source_path = PathBuf::from(&path);
             let manifest_out = PathBuf::from(&manifest_path);
@@ -857,32 +856,12 @@ async fn handle_request(
                 threads = ?threads,
                 phantom = phantom,
                 tier1 = tier1,
-                "Starting full scan ingest"
+                "Starting streaming ingest"
             );
 
             let start = Instant::now();
 
-            // 1. Collect files
-            let file_paths: Vec<PathBuf> = WalkDir::new(&source_path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .map(|e| e.path().to_path_buf())
-                .collect();
-
-            let total_files = file_paths.len() as u64;
-            if total_files == 0 {
-                return VeloResponse::IngestAck {
-                    files: 0,
-                    blobs: 0,
-                    new_bytes: 0,
-                    total_bytes: 0,
-                    duration_ms: 0,
-                    manifest_path: manifest_path.clone(),
-                };
-            }
-
-            // 2. Determine mode
+            // Determine mode
             let mode = if phantom {
                 IngestMode::Phantom
             } else if tier1 {
@@ -891,28 +870,16 @@ async fn handle_request(
                 IngestMode::SolidTier2
             };
 
-            // 3. Use CAS path from request (not env var)
+            // Use CAS path from request
             let cas_root_path = vrift_manifest::normalize_path(&cas_root);
 
-            // 4. Run parallel ingest in blocking task (Rayon would block tokio runtime)
-            tracing::info!(
-                "Collected {} files, starting parallel ingest in spawn_blocking...",
-                total_files
-            );
-            let file_paths_clone = file_paths.clone();
-            let cas_root_clone = cas_root_path.clone();
+            // Run streaming ingest in blocking task
+            let source_clone = source_path.clone();
+            let cas_clone = cas_root_path.clone();
             let results = match tokio::task::spawn_blocking(move || {
-                tracing::info!("spawn_blocking: entering parallel_ingest_with_progress");
-                let r = parallel_ingest_with_progress(
-                    &file_paths_clone,
-                    &cas_root_clone,
-                    mode,
-                    threads,
-                    |_result, _idx| {
-                        // Progress callback (could stream to client in future)
-                    },
-                );
-                tracing::info!("spawn_blocking: parallel_ingest done, {} results", r.len());
+                tracing::info!("spawn_blocking: starting streaming_ingest");
+                let r = streaming_ingest(&source_clone, &cas_clone, mode, threads);
+                tracing::info!("spawn_blocking: streaming_ingest done, {} results", r.len());
                 r
             })
             .await
@@ -920,6 +887,8 @@ async fn handle_request(
                 Ok(r) => r,
                 Err(e) => return VeloResponse::Error(format!("Ingest task failed: {}", e)),
             };
+
+            let total_files = results.len() as u64;
 
             // 5. Collect stats
             let mut total_bytes = 0u64;
