@@ -2039,6 +2039,7 @@ dependencies = [
  "vrift-cas",
  "vrift-ipc",
  "vrift-manifest",
+ "walkdir",
 ]
 
 [[package]]

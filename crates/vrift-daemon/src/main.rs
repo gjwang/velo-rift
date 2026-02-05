@@ -828,11 +828,151 @@ async fn handle_request(
                 VeloResponse::Error("Workspace not registered".to_string())
             }
         }
-        // IngestFullScan is handled by vDird (per-project daemon), not global daemon
-        VeloRequest::IngestFullScan { .. } => VeloResponse::Error(
-            "IngestFullScan should be sent to vDird, not global daemon".to_string(),
-        ),
+        // IngestFullScan: Unified ingest architecture
+        // CLI becomes thin client, daemon handles all ingest logic
+        VeloRequest::IngestFullScan {
+            path,
+            manifest_path,
+            threads,
+            phantom,
+            tier1,
+        } => {
+            use std::time::Instant;
+            use vrift_cas::{parallel_ingest_with_progress, IngestMode};
+            use walkdir::WalkDir;
+
+            let source_path = PathBuf::from(&path);
+            let manifest_out = PathBuf::from(&manifest_path);
+
+            tracing::info!(
+                path = %path,
+                manifest = %manifest_path,
+                threads = ?threads,
+                phantom = phantom,
+                tier1 = tier1,
+                "Starting full scan ingest"
+            );
+
+            let start = Instant::now();
+
+            // 1. Collect files
+            let file_paths: Vec<PathBuf> = WalkDir::new(&source_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.path().to_path_buf())
+                .collect();
+
+            let total_files = file_paths.len() as u64;
+            if total_files == 0 {
+                return VeloResponse::IngestAck {
+                    files: 0,
+                    blobs: 0,
+                    new_bytes: 0,
+                    total_bytes: 0,
+                    duration_ms: 0,
+                    manifest_path: manifest_path.clone(),
+                };
+            }
+
+            // 2. Determine mode
+            let mode = if phantom {
+                IngestMode::Phantom
+            } else if tier1 {
+                IngestMode::SolidTier1
+            } else {
+                IngestMode::SolidTier2
+            };
+
+            // 3. Get CAS path
+            let cas_root = vrift_manifest::normalize_path(
+                &std::env::var("VR_THE_SOURCE")
+                    .unwrap_or_else(|_| "~/.vrift/the_source".to_string()),
+            );
+
+            // 4. Run parallel ingest in blocking task (Rayon would block tokio runtime)
+            let file_paths_clone = file_paths.clone();
+            let cas_root_clone = cas_root.clone();
+            let results = match tokio::task::spawn_blocking(move || {
+                parallel_ingest_with_progress(
+                    &file_paths_clone,
+                    &cas_root_clone,
+                    mode,
+                    threads,
+                    |_result, _idx| {
+                        // Progress callback (could stream to client in future)
+                    },
+                )
+            })
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => return VeloResponse::Error(format!("Ingest task failed: {}", e)),
+            };
+
+            // 5. Collect stats
+            let mut total_bytes = 0u64;
+            let mut new_bytes = 0u64;
+            let mut unique_blobs = 0u64;
+
+            for r in results.iter().flatten() {
+                total_bytes += r.size;
+                if r.was_new {
+                    unique_blobs += 1;
+                    new_bytes += r.size;
+                }
+            }
+
+            let duration = start.elapsed();
+
+            // 6. Write simple binary manifest
+            if let Err(e) = write_ingest_manifest(&manifest_out, &results) {
+                return VeloResponse::Error(format!("Failed to write manifest: {}", e));
+            }
+
+            tracing::info!(
+                files = total_files,
+                blobs = unique_blobs,
+                new_bytes = new_bytes,
+                duration_ms = duration.as_millis() as u64,
+                "Full scan ingest complete"
+            );
+
+            VeloResponse::IngestAck {
+                files: total_files,
+                blobs: unique_blobs,
+                new_bytes,
+                total_bytes,
+                duration_ms: duration.as_millis() as u64,
+                manifest_path,
+            }
+        }
     }
+}
+
+/// Write manifest file from ingest results
+fn write_ingest_manifest(
+    manifest_path: &Path,
+    results: &[Result<vrift_cas::IngestResult, vrift_cas::CasError>],
+) -> Result<()> {
+    use std::io::Write;
+
+    // Simple binary manifest: count + entries
+    let entries: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+
+    let mut file = std::fs::File::create(manifest_path)?;
+
+    // Write count
+    let count = entries.len() as u32;
+    file.write_all(&count.to_le_bytes())?;
+
+    // Write entries (hash + size)
+    for entry in entries {
+        file.write_all(&entry.hash)?;
+        file.write_all(&entry.size.to_le_bytes())?;
+    }
+
+    Ok(())
 }
 
 async fn handle_protect(path_str: String, immutable: bool, owner: Option<String>) -> VeloResponse {
