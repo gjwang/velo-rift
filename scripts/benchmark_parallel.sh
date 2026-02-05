@@ -81,6 +81,8 @@ run_benchmark() {
     
     echo -e "${GREEN}$TIME${NC} ($RATE files/sec)"
     
+    # Clear uchg flag from CAS files before removal (macOS immutable protection)
+    chflags -R nouchg "$CAS" 2>/dev/null || true
     rm -rf "$CAS"
 }
 

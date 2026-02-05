@@ -152,15 +152,40 @@ cd "$PHYSICAL_ROOT"
 echo ""
 echo "=== Test 2: VFS (with shim, mmap stat cache) ==="
 
-# Create warmup binary (system stat may bypass shim due to SIP)
+# Create warmup binary that traverses ALL files to ensure mmap is fully populated
 cat > warmup.c << 'EOF'
 #include <sys/stat.h>
 #include <stdio.h>
-int main() {
-    struct stat sb;
-    if (lstat("node_modules", &sb) == 0) {
-        printf("Warmup: stat OK, entries triggered\n");
+#include <dirent.h>
+#include <string.h>
+
+void warmup_all(const char *path, int *count) {
+    struct dirent *entry;
+    DIR *dir = opendir(path);
+    if (!dir) return;
+    
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        
+        char fullpath[4096];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+        
+        struct stat sb;
+        if (lstat(fullpath, &sb) == 0) {
+            (*count)++;
+            if (S_ISDIR(sb.st_mode)) {
+                warmup_all(fullpath, count);
+            }
+        }
     }
+    closedir(dir);
+}
+
+int main() {
+    int count = 0;
+    warmup_all("node_modules", &count);
+    printf("Warmup: stat'd %d entries, mmap populated\n", count);
     return 0;
 }
 EOF
@@ -169,12 +194,15 @@ codesign -f -s - warmup 2>/dev/null || true
 
 export DYLD_INSERT_LIBRARIES="$SHIM_PATH"
 export DYLD_FORCE_FLAT_NAMESPACE=1
+# Suppress debug output for cleaner benchmark results
+export VRIFT_DEBUG=0
 
-# Warmup: trigger workspace registration and mmap export
-echo "[Warmup: triggering mmap export...]"
+# Warmup: trigger workspace registration and populate mmap cache
+echo "[Warmup: traversing all files to populate mmap...]" 
 ./warmup
-sleep 1  # Give daemon time to export mmap
+sleep 2  # Give daemon time to fully export mmap
 
+# Now run the actual benchmark with warm cache
 ../bench
 
 unset DYLD_INSERT_LIBRARIES
