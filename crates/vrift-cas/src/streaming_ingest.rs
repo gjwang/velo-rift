@@ -55,8 +55,8 @@ pub fn streaming_ingest(
 
     // Scanner thread
     let source_path = source.to_path_buf();
-    let wq: Arc<ArrayQueue<PathBuf>> = Arc::clone(&work_queue);
-    let done = Arc::clone(&scanner_done);
+    let scanner_wq = Arc::clone(&work_queue);
+    let scanner_done_flag = Arc::clone(&scanner_done);
 
     let scanner = std::thread::spawn(move || {
         for entry in WalkDir::new(&source_path)
@@ -64,21 +64,18 @@ pub fn streaming_ingest(
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
         {
-            let path = entry.into_path(); // zero-copy: take ownership
-
-            // Push with backpressure (spin if queue full)
-            let mut p = path;
+            let mut path = entry.into_path();
             loop {
-                match wq.push(p) {
+                match scanner_wq.push(path) {
                     Ok(()) => break,
                     Err(returned) => {
-                        p = returned;
+                        path = returned;
                         std::hint::spin_loop();
                     }
                 }
             }
         }
-        done.store(true, Ordering::Release);
+        scanner_done_flag.store(true, Ordering::Release);
     });
 
     // Worker loop
@@ -153,8 +150,8 @@ where
 
     // Scanner
     let source_path = source.to_path_buf();
-    let wq: Arc<ArrayQueue<PathBuf>> = Arc::clone(&work_queue);
-    let done: Arc<AtomicBool> = Arc::clone(&scanner_done);
+    let scanner_wq = Arc::clone(&work_queue);
+    let scanner_done_flag = Arc::clone(&scanner_done);
 
     let scanner = std::thread::spawn(move || {
         for entry in WalkDir::new(&source_path)
@@ -162,19 +159,18 @@ where
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
         {
-            let path = entry.into_path();
-            let mut p = path;
+            let mut path = entry.into_path();
             loop {
-                match wq.push(p) {
+                match scanner_wq.push(path) {
                     Ok(()) => break,
                     Err(returned) => {
-                        p = returned;
+                        path = returned;
                         std::hint::spin_loop();
                     }
                 }
             }
         }
-        done.store(true, Ordering::Release);
+        scanner_done_flag.store(true, Ordering::Release);
     });
 
     // Workers
