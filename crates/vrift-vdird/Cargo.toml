@@ -31,5 +31,8 @@ libc = "0.2"
 hex = "0.4"
 dirs = "5"
 
+# RFC-0039: FS Watch for Live Ingest (Layer 2)
+notify = { version = "6", default-features = false, features = ["macos_kqueue", "macos_fsevent"] }
+
 [dev-dependencies]
 tempfile = "3"

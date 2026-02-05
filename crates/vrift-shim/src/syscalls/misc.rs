@@ -493,10 +493,28 @@ pub unsafe extern "C" fn symlinkat_shim(
                 return err;
             }
             return crate::syscalls::macos_raw::raw_symlinkat(p1, dirfd, p2);
-        } // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-        block_vfs_mutation(p1)
-            .or_else(|| block_vfs_mutation(p2))
-            .unwrap_or_else(|| crate::syscalls::macos_raw::raw_symlinkat(p1, dirfd, p2))
+        }
+
+        // Block mutation on existing VFS entries
+        if let Some(err) = block_vfs_mutation(p1).or_else(|| block_vfs_mutation(p2)) {
+            return err;
+        }
+
+        // Execute the actual symlinkat
+        let result = crate::syscalls::macos_raw::raw_symlinkat(p1, dirfd, p2);
+
+        // RFC-0039 Live Ingest: Notify daemon of successful symlink
+        if result == 0 {
+            if let Some(state) = crate::state::ShimState::get() {
+                let target_str = CStr::from_ptr(p1).to_string_lossy();
+                let link_str = CStr::from_ptr(p2).to_string_lossy();
+                if let Some(vpath) = state.resolve_path(&link_str) {
+                    let _ = state.manifest_symlink(&vpath.manifest_key, &target_str);
+                }
+            }
+        }
+
+        result
     }
     #[cfg(target_os = "linux")]
     {
@@ -509,9 +527,27 @@ pub unsafe extern "C" fn symlinkat_shim(
             }
             return crate::syscalls::linux_raw::raw_symlinkat(p1, dirfd, p2);
         }
-        block_vfs_mutation(p1)
-            .or_else(|| block_vfs_mutation(p2))
-            .unwrap_or_else(|| crate::syscalls::linux_raw::raw_symlinkat(p1, dirfd, p2))
+
+        // Block mutation on existing VFS entries
+        if let Some(err) = block_vfs_mutation(p1).or_else(|| block_vfs_mutation(p2)) {
+            return err;
+        }
+
+        // Execute the actual symlinkat
+        let result = crate::syscalls::linux_raw::raw_symlinkat(p1, dirfd, p2);
+
+        // RFC-0039 Live Ingest: Notify daemon of successful symlink
+        if result == 0 {
+            if let Some(state) = crate::state::ShimState::get() {
+                let target_str = CStr::from_ptr(p1).to_string_lossy();
+                let link_str = CStr::from_ptr(p2).to_string_lossy();
+                if let Some(vpath) = state.resolve_path(&link_str) {
+                    let _ = state.manifest_symlink(&vpath.manifest_key, &target_str);
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -565,8 +601,25 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
     }
 
     // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
-    block_existing_vfs_entry(path)
-        .unwrap_or_else(|| crate::syscalls::macos_raw::raw_mkdir(path, mode))
+    if let Some(err) = block_existing_vfs_entry(path) {
+        return err;
+    }
+
+    // Execute the actual mkdir
+    let result = crate::syscalls::macos_raw::raw_mkdir(path, mode);
+
+    // RFC-0039 Live Ingest: Notify daemon of successful mkdir
+    if result == 0 {
+        if let Some(state) = crate::state::ShimState::get() {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            if let Some(vpath) = state.resolve_path(&path_str) {
+                // Fire-and-forget IPC to register new dir in manifest
+                let _ = state.manifest_mkdir(&vpath.manifest_key, mode);
+            }
+        }
+    }
+
+    result
 }
 
 #[no_mangle]
@@ -581,9 +634,26 @@ pub unsafe extern "C" fn mkdir_shim(path: *const c_char, mode: libc::mode_t) -> 
         // RFC-0039: During early init, allow mkdir passthrough (FS handles EEXIST)
         return crate::syscalls::linux_raw::raw_mkdir(path, mode);
     }
-    // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
-    block_existing_vfs_entry(path)
-        .unwrap_or_else(|| crate::syscalls::linux_raw::raw_mkdir(path, mode))
+
+    // RFC-0039: Only block if path EXISTS in manifest
+    if let Some(err) = block_existing_vfs_entry(path) {
+        return err;
+    }
+
+    // Execute the actual mkdir
+    let result = crate::syscalls::linux_raw::raw_mkdir(path, mode);
+
+    // RFC-0039 Live Ingest: Notify daemon of successful mkdir
+    if result == 0 {
+        if let Some(state) = crate::state::ShimState::get() {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            if let Some(vpath) = state.resolve_path(&path_str) {
+                let _ = state.manifest_mkdir(&vpath.manifest_key, mode);
+            }
+        }
+    }
+
+    result
 }
 
 #[no_mangle]

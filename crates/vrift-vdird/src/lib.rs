@@ -16,8 +16,11 @@
 //! - Protocol: bincode-serialized VeloRequest/VeloResponse
 
 pub mod commands;
+pub mod ingest;
+pub mod scan;
 pub mod socket;
 pub mod vdir;
+pub mod watch;
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -71,6 +74,8 @@ impl ProjectConfig {
 
 /// Main daemon entry point
 pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
+    use tokio::sync::mpsc;
+
     info!(
         project_root = %config.project_root.display(),
         project_id = %config.project_id,
@@ -86,6 +91,45 @@ pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
     let vdir = vdir::VDir::create_or_open(&config.vdir_path)?;
     info!(path = %config.vdir_path.display(), "VDir mmap initialized");
 
-    // Start socket listener
-    socket::run_listener(config, vdir).await
+    // RFC-0039: Create ingest channel (fixed-size for backpressure)
+    let (ingest_tx, ingest_rx) = mpsc::channel::<watch::IngestEvent>(4096);
+
+    // Phase 1: Start consumer FIRST (consumer-first pattern)
+    let ingest_queue = ingest::IngestQueue::new(ingest_rx);
+    let handler = ingest::IngestHandler::new(config.project_root.clone());
+    let consumer_handle = tokio::spawn(async move {
+        ingest::run_consumer(ingest_queue, handler).await;
+    });
+    info!("Ingest consumer started (consumer-first pattern)");
+
+    // Phase 2: Start FS Watch producer
+    let watch_handle = watch::spawn_watch_task(config.project_root.clone(), ingest_tx.clone());
+    info!("FS Watch producer started");
+
+    // Phase 3: Run compensation scan (Layer 3) for offline changes
+    let scan_tx = ingest_tx.clone();
+    let scan_root = config.project_root.clone();
+    tokio::spawn(async move {
+        // Use UNIX_EPOCH to catch all files on first run
+        // TODO: Load last_scan from persistent state
+        let last_scan = std::time::SystemTime::UNIX_EPOCH;
+        scan::run_compensation_scan(scan_root, last_scan, scan_tx).await;
+    });
+    info!("Compensation scan started");
+    let socket_handle = socket::run_listener(config, vdir);
+
+    // Wait for all tasks
+    tokio::select! {
+        _ = consumer_handle => {
+            info!("Consumer exited");
+        }
+        _ = watch_handle => {
+            info!("Watch exited");
+        }
+        result = socket_handle => {
+            result?;
+        }
+    }
+
+    Ok(())
 }

@@ -2143,6 +2143,7 @@ dependencies = [
  "hex",
  "libc",
  "memmap2",
+ "notify",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

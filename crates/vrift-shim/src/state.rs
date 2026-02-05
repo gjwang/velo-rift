@@ -1304,6 +1304,15 @@ impl ShimState {
         }
     }
 
+    /// RFC-0039: Create symlink entry in manifest for Live Ingest
+    pub(crate) fn manifest_symlink(&self, path: &str, target: &str) -> Result<(), ()> {
+        if unsafe { crate::ipc::sync_ipc_manifest_symlink(&self.socket_path, path, target) } {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
     /// Query daemon for directory listing (for opendir/readdir)
     #[allow(dead_code)]
     pub(crate) fn query_dir_listing(&self, path: &str) -> Option<Vec<vrift_ipc::DirEntry>> {
