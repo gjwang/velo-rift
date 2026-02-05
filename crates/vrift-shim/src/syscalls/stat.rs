@@ -328,7 +328,7 @@ pub unsafe extern "C" fn velo_fstatat_impl(
         }
     };
 
-    if dirfd == libc::AT_FDCWD || (!path.is_null() && unsafe { *path == b'/' as i8 }) {
+    if dirfd == libc::AT_FDCWD || (!path.is_null() && unsafe { *path == b'/' as libc::c_char }) {
         if let Ok(path_str) = unsafe { CStr::from_ptr(path).to_str() } {
             if let Some(res) = stat_impl_common(path_str, buf) {
                 return res;
