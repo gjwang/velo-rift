@@ -50,7 +50,7 @@ fi
 
 # Start daemon in background
 echo "Starting vrift-vdird daemon..."
-$VDIRD --project-root "$TEST_DIR" > "$DAEMON_LOG" 2>&1 &
+$VDIRD "$TEST_DIR" > "$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 sleep 2
 

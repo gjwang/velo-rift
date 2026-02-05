@@ -141,6 +141,8 @@ pub struct IngestConfig {
     pub threads: Option<usize>,
     /// Default tier: tier1, tier2, or auto
     pub default_tier: String,
+    /// Deduplication window in milliseconds (default: 200ms)
+    pub dedup_window_ms: u64,
     /// Patterns to ignore during ingest and live watch
     pub ignore_patterns: Vec<String>,
 }
@@ -150,6 +152,7 @@ impl Default for IngestConfig {
         Self {
             threads: None,
             default_tier: "tier2".to_string(),
+            dedup_window_ms: 200,
             // Only system/junk files - user adds .git etc in config file
             ignore_patterns: vec![
                 ".vrift".to_string(),    // Vrift system directory (always needed)

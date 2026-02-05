@@ -64,11 +64,14 @@ pub struct IngestQueue {
 impl IngestQueue {
     /// Create a new ingest queue
     pub fn new(rx: mpsc::Receiver<IngestEvent>) -> Self {
+        let config = vrift_config::config();
+        let dedup_window = Duration::from_millis(config.ingest.dedup_window_ms);
+
         Self {
             rx,
             state: AtomicU8::new(IngestState::Init as u8),
             recent: HashSet::new(),
-            dedup_window: Duration::from_millis(200),
+            dedup_window,
             last_cleanup: Instant::now(),
         }
     }

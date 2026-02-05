@@ -53,10 +53,21 @@ impl ProjectConfig {
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join(".vrift");
 
+        // VDir path: use /dev/shm on Linux (fast), tmpdir on macOS
+        #[cfg(target_os = "linux")]
+        let vdir_path = PathBuf::from(format!("/dev/shm/vrift_vdir_{}", &project_id[..16]));
+
+        #[cfg(not(target_os = "linux"))]
+        let vdir_path = {
+            let vdir_dir = vrift_home.join("vdir");
+            std::fs::create_dir_all(&vdir_dir).ok();
+            vdir_dir.join(format!("{}.vdir", &project_id[..16]))
+        };
+
         Self {
             project_root: project_root.clone(),
             project_id: project_id.clone(),
-            vdir_path: PathBuf::from(format!("/dev/shm/vrift_vdir_{}", &project_id[..16])),
+            vdir_path,
             socket_path: vrift_home
                 .join("sockets")
                 .join(format!("{}.sock", &project_id[..16])),

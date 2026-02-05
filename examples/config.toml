@@ -12,6 +12,9 @@ default_mode = "solid"
 # threads = 4
 # Default tier: tier1, tier2, or auto
 default_tier = "tier2"
+# Deduplication window in milliseconds (default: 200)
+# Lower = faster ingest, higher = less duplicate processing
+# dedup_window_ms = 200
 # Patterns to ignore during live ingest and file watching
 # Code hardcodes: .vrift, .DS_Store
 # Add project-specific patterns here:
