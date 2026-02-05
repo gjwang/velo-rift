@@ -70,12 +70,19 @@ setup_vfs() {
 # Returns 0 if found, 1 if not
 check_manifest_contains() {
     local path="$1"
-    # TODO: Replace with actual manifest query when implemented
-    # For now, this always returns 1 (not found) to mark tests as RED
     
-    if [ -f "$VRIFT_DATA/manifest.lmdb" ]; then
-        # Use vrift CLI to query manifest
-        if "$VRIFT_CLI" manifest query "$path" 2>/dev/null; then
+    # Convert absolute path to manifest key format (relative to VFS_DIR)
+    local manifest_key
+    if [[ "$path" == "$VFS_DIR"* ]]; then
+        manifest_key="${path#$VFS_DIR}"
+        [ -z "$manifest_key" ] && manifest_key="/"
+    else
+        manifest_key="$path"
+    fi
+    
+    if [ -d "$VRIFT_DATA/manifest.lmdb" ]; then
+        # Use vrift manifest query CLI
+        if "$VRIFT_CLI" manifest query "$manifest_key" -d "$VFS_DIR" 2>/dev/null; then
             return 0
         fi
     fi

@@ -222,6 +222,19 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+
+    /// Manifest operations (RFC-0039 Live Ingest)
+    Manifest {
+        #[command(subcommand)]
+        command: ManifestCommands,
+    },
+
+    /// Synchronize project files with manifest (compensation scan)
+    Sync {
+        /// Project directory (default: current directory)
+        #[arg(value_name = "DIR")]
+        directory: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -268,6 +281,37 @@ enum ConfigCommands {
         /// Path to config file (default: auto-detect)
         #[arg(value_name = "FILE")]
         file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ManifestCommands {
+    /// Query if a path exists in the manifest
+    Query {
+        /// Path to query (absolute or relative to VFS)
+        path: String,
+
+        /// Project directory (default: current directory)
+        #[arg(short, long, value_name = "DIR")]
+        directory: Option<PathBuf>,
+    },
+
+    /// List all entries in the manifest
+    List {
+        /// Project directory (default: current directory)
+        #[arg(value_name = "DIR")]
+        directory: Option<PathBuf>,
+
+        /// Only show first N entries
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+    },
+
+    /// Show manifest statistics
+    Stats {
+        /// Project directory (default: current directory)
+        #[arg(value_name = "DIR")]
+        directory: Option<PathBuf>,
     },
 }
 
@@ -416,6 +460,11 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
             ServiceCommands::Restart => cmd_service_restart(),
         },
         Commands::Config { command } => cmd_config(command),
+        Commands::Manifest { command } => cmd_manifest(command),
+        Commands::Sync { directory } => {
+            let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
+            cmd_sync(&dir).await
+        }
     }
 }
 
@@ -585,6 +634,164 @@ fn cmd_config(command: ConfigCommands) -> Result<()> {
             }
         }
     }
+}
+
+/// Manifest management commands (RFC-0039 Live Ingest)
+fn cmd_manifest(command: ManifestCommands) -> Result<()> {
+    match command {
+        ManifestCommands::Query { path, directory } => {
+            let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
+            let manifest_path = dir.join(".vrift").join("manifest.lmdb");
+
+            if !manifest_path.exists() {
+                anyhow::bail!(
+                    "Manifest not found at {}. Run 'vrift init' first.",
+                    manifest_path.display()
+                );
+            }
+
+            let manifest = LmdbManifest::open(&manifest_path)?;
+
+            // Normalize path to manifest key format
+            let query_path = if path.starts_with('/') {
+                path.clone()
+            } else {
+                format!("/{}", path)
+            };
+
+            match manifest.get(&query_path)? {
+                Some(entry) => {
+                    println!("Found: {}", query_path);
+                    println!("  Size:  {} bytes", entry.vnode.size);
+                    println!("  Mode:  {:o}", entry.vnode.mode);
+                    println!("  MTime: {}", format_timestamp(entry.vnode.mtime));
+                    let hash_preview: String = entry.vnode.content_hash[..8]
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
+                    println!("  Hash:  {}", hash_preview);
+                    Ok(())
+                }
+                None => {
+                    // Exit with error for scripting use
+                    anyhow::bail!("Not found: {}", query_path);
+                }
+            }
+        }
+        ManifestCommands::List { directory, limit } => {
+            let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
+            let manifest_path = dir.join(".vrift").join("manifest.lmdb");
+
+            if !manifest_path.exists() {
+                anyhow::bail!(
+                    "Manifest not found at {}. Run 'vrift init' first.",
+                    manifest_path.display()
+                );
+            }
+
+            let manifest = LmdbManifest::open(&manifest_path)?;
+            let entries = manifest.iter()?;
+            let limit = limit.unwrap_or(entries.len());
+
+            println!("Manifest entries ({} total):", entries.len());
+            for (i, (path, entry)) in entries.iter().enumerate() {
+                if i >= limit {
+                    println!("... and {} more", entries.len() - limit);
+                    break;
+                }
+                println!("  {} ({} bytes)", path, entry.vnode.size);
+            }
+            Ok(())
+        }
+        ManifestCommands::Stats { directory } => {
+            let dir = directory.unwrap_or_else(|| std::env::current_dir().unwrap());
+            let manifest_path = dir.join(".vrift").join("manifest.lmdb");
+
+            if !manifest_path.exists() {
+                anyhow::bail!(
+                    "Manifest not found at {}. Run 'vrift init' first.",
+                    manifest_path.display()
+                );
+            }
+
+            let manifest = LmdbManifest::open(&manifest_path)?;
+            let entries = manifest.iter()?;
+
+            let total_size: u64 = entries.iter().map(|(_, e)| e.vnode.size).sum();
+            let dir_count = entries.iter().filter(|(p, _)| p.ends_with('/')).count();
+            let file_count = entries.len() - dir_count;
+
+            println!("Manifest Statistics:");
+            println!("  Path:       {}", manifest_path.display());
+            println!("  Entries:    {}", format_number(entries.len() as u64));
+            println!("  Files:      {}", format_number(file_count as u64));
+            println!("  Dirs:       {}", format_number(dir_count as u64));
+            println!("  Total Size: {}", format_bytes(total_size));
+            Ok(())
+        }
+    }
+}
+
+/// Synchronize project files with manifest (compensation scan)
+async fn cmd_sync(directory: &Path) -> Result<()> {
+    use walkdir::WalkDir;
+
+    println!("Synchronizing: {}", directory.display());
+
+    let manifest_path = directory.join(".vrift").join("manifest.lmdb");
+    if !manifest_path.exists() {
+        anyhow::bail!(
+            "Manifest not found at {}. Run 'vrift init' first.",
+            manifest_path.display()
+        );
+    }
+
+    let manifest = LmdbManifest::open(&manifest_path)?;
+    let existing = manifest.iter()?;
+    let existing_paths: std::collections::HashSet<String> =
+        existing.iter().map(|(p, _)| p.clone()).collect();
+
+    let mut new_files = 0u64;
+    let mut new_dirs = 0u64;
+
+    // Scan filesystem for new files
+    for entry in WalkDir::new(directory).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+
+        // Skip .vrift directory
+        if let Ok(rel) = path.strip_prefix(directory) {
+            if rel.starts_with(".vrift") || rel.starts_with(".git") {
+                continue;
+            }
+
+            let manifest_key = format!("/{}", rel.display());
+
+            if !existing_paths.contains(&manifest_key) {
+                if path.is_dir() {
+                    println!("  [NEW DIR]  {}", manifest_key);
+                    new_dirs += 1;
+                } else if path.is_file() {
+                    println!("  [NEW FILE] {}", manifest_key);
+                    new_files += 1;
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("Sync complete:");
+    println!("  New files: {}", new_files);
+    println!("  New dirs:  {}", new_dirs);
+
+    if new_files > 0 || new_dirs > 0 {
+        println!();
+        println!(
+            "Run 'vrift ingest {}' to add these to the manifest.",
+            directory.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn cmd_resolve(cas_root: &Path, lockfile: &Path) -> Result<()> {
