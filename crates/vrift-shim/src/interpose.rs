@@ -743,6 +743,46 @@ pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_in
     crate::syscalls::misc::unlinkat_shim(dirfd, path, flags)
 }
 
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn symlink(oldpath: *const c_char, newpath: *const c_char) -> c_int {
+    crate::syscalls::misc::symlink_shim(oldpath, newpath)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn symlinkat(
+    oldpath: *const c_char,
+    newdirfd: c_int,
+    newpath: *const c_char,
+) -> c_int {
+    crate::syscalls::misc::symlinkat_shim(oldpath, newdirfd, newpath)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn mkdir(path: *const c_char, mode: mode_t) -> c_int {
+    crate::syscalls::misc::mkdir_shim(path, mode)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: mode_t) -> c_int {
+    crate::syscalls::misc::mkdirat_shim(dirfd, path, mode)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
+    crate::syscalls::misc::rmdir_shim(path)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
+    crate::syscalls::dir::access_shim_linux(path, mode)
+}
+
 // Linux utimensat/touch interception
 #[cfg(target_os = "linux")]
 #[no_mangle]
@@ -814,6 +854,12 @@ pub unsafe extern "C" fn renameat(
     new: *const c_char,
 ) -> c_int {
     crate::syscalls::misc::renameat_shim_linux(oldfd, old, newfd, new)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn link(oldpath: *const c_char, newpath: *const c_char) -> c_int {
+    crate::syscalls::misc::link_shim(oldpath, newpath)
 }
 
 #[cfg(target_os = "linux")]
