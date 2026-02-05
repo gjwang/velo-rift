@@ -380,9 +380,7 @@ pub unsafe extern "C" fn linkat_shim(
         })
 }
 
-// ============================================================================
 // RFC-0047: Mutation Perimeter - Block modifications to VFS-managed files
-// ============================================================================
 
 #[no_mangle]
 #[cfg(target_os = "macos")]
@@ -633,6 +631,7 @@ pub unsafe extern "C" fn utime_shim(path: *const c_char, times: *const libc::c_v
     libc::utime(path, times as _)
 }
 
+#[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn getattrlist_shim(
     path: *const c_char,
@@ -892,10 +891,8 @@ pub unsafe extern "C" fn fchmod_shim(fd: c_int, mode: libc::mode_t) -> c_int {
     }
 }
 
-// =============================================================================
 // P0-P1 Gap Fix: fchown/fchownat - Block ownership changes on VFS files via FD
 // Pattern: Same as fchmod_shim - resolve FD to path, check VFS
-// =============================================================================
 
 /// fchown_shim: Block ownership changes on VFS files via FD
 /// Uses F_GETPATH (macOS) or /proc/self/fd (Linux) to resolve FD to path
@@ -1023,9 +1020,7 @@ pub unsafe extern "C" fn fchownat_shim(
     }
 }
 
-// =============================================================================
 // P0-P1 Gap Fix: exchangedata - Block atomic file swaps involving VFS (macOS only)
-// =============================================================================
 
 /// exchangedata_shim: Block atomic swaps if either path is in VFS
 /// Returns EXDEV if any path is in VFS (cross-device semantics)
@@ -1171,9 +1166,7 @@ pub unsafe extern "C" fn removexattr_shim(
         .unwrap_or_else(|| crate::syscalls::macos_raw::raw_removexattr(path, name, options))
 }
 
-// ============================================================================
 // RFC-0047: Timestamp Modification Protection
-// ============================================================================
 
 /// utimensat_shim: Block timestamp modifications on VFS files (at variant)
 /// Note: macOS doesn't have a direct utimensat syscall - it uses getattrlist/setattrlist
@@ -1247,9 +1240,7 @@ pub unsafe extern "C" fn setrlimit_shim(resource: c_int, rlp: *const libc::rlimi
     ret
 }
 
-// ============================================================================
 // Passthrough shims for interpose table compatibility
-// ============================================================================
 
 #[no_mangle]
 #[cfg(target_os = "macos")]
