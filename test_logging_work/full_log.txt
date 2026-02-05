@@ -1,4 +1,0 @@
-
---- [VFS] Flight Recorder Dump (PID: 28607) ---
-[              0] VfsInit          ID:0x0000000000000000 RES:0
---- End of Dump ---
