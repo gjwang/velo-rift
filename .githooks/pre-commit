@@ -1,45 +1,75 @@
 #!/bin/bash
 # =============================================================================
-# VRift Pre-commit Hook (Synced with Velo CI Pattern)
+# VRift Pre-commit Hook (Optimized - Only check changed file types)
 # =============================================================================
 # Auto-format and auto-fix safe issues before commit.
+# Skip checks for file types that weren't modified.
 # =============================================================================
 
 set -e
 
-echo "🎨 Auto-formatting with cargo fmt..."
-cargo fmt
+# Get list of staged files
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
 
-echo "🔧 Auto-fixing clippy (machine-applicable only)..."
-# --fix: auto-apply fixes, --allow-staged: work on staged files
-# --allow-dirty: don't fail if there are unstaged changes
-# Only apply machine-applicable fixes (safe, no semantic changes)
-cargo clippy --fix --allow-staged --allow-dirty --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets || true
+# Check if any Rust files are staged
+HAS_RUST_FILES=$(echo "$STAGED_FILES" | grep -E '\.rs$' || true)
 
-echo "🔍 Running cargo clippy check..."
-cargo clippy --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets -- -D warnings || {
-    echo "❌ Clippy check failed. Some warnings cannot be auto-fixed."
-    exit 1
-}
+# Check if any Python files are staged
+HAS_PYTHON_FILES=$(echo "$STAGED_FILES" | grep -E '\.py$' || true)
 
-echo "📝 Re-staging auto-fixed files..."
-git add -u
+# =============================================================================
+# Rust checks (only if .rs files are staged)
+# =============================================================================
+if [ -n "$HAS_RUST_FILES" ]; then
+    echo "🎨 Auto-formatting with cargo fmt..."
+    cargo fmt
 
-echo "🐍 Auto-fixing Python (Ruff)..."
-# Safe auto-fixes only (no semantic changes)
-uv run ruff check --fix tests/ scripts/ || true
-uv run ruff format tests/ scripts/ || true
+    echo "🔧 Auto-fixing clippy (machine-applicable only)..."
+    cargo clippy --fix --allow-staged --allow-dirty --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets || true
 
-echo "📝 Re-staging Python auto-fixed files..."
-git add -u
-
-echo "🔍 Running Full Pre-Commit Framework..."
-# Final validation: mypy, remaining lint errors
-if command -v pre-commit &>/dev/null; then
-    pre-commit run --all-files || {
-        echo "❌ Pre-commit framework failed. Fix the issues above."
+    echo "🔍 Running cargo clippy check..."
+    cargo clippy --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets -- -D warnings || {
+        echo "❌ Clippy check failed. Some warnings cannot be auto-fixed."
         exit 1
     }
+
+    echo "📝 Re-staging auto-fixed Rust files..."
+    git add -u
+else
+    echo "⏭️  No Rust files changed, skipping cargo fmt/clippy"
+fi
+
+# =============================================================================
+# Python checks (only if .py files are staged)
+# =============================================================================
+if [ -n "$HAS_PYTHON_FILES" ]; then
+    echo "🐍 Auto-fixing Python (Ruff)..."
+    uv run ruff check --fix tests/ scripts/ || true
+    uv run ruff format tests/ scripts/ || true
+
+    echo "📝 Re-staging Python auto-fixed files..."
+    git add -u
+
+    echo "🔍 Running mypy type check..."
+    if command -v pre-commit &>/dev/null; then
+        pre-commit run mypy --all-files || {
+            echo "❌ Mypy check failed."
+            exit 1
+        }
+    fi
+else
+    echo "⏭️  No Python files changed, skipping ruff/mypy"
+fi
+
+# =============================================================================
+# Always run basic pre-commit checks (trailing whitespace, etc.)
+# =============================================================================
+if command -v pre-commit &>/dev/null; then
+    echo "🔍 Running basic pre-commit checks..."
+    pre-commit run trailing-whitespace --all-files || true
+    pre-commit run end-of-file-fixer --all-files || true
+    pre-commit run check-yaml --all-files || true
+    pre-commit run check-added-large-files --all-files || true
 fi
 
 echo "✅ All pre-commit checks passed!"
