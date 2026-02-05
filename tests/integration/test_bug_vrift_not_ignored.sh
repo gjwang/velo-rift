@@ -78,15 +78,17 @@ else
     VRIFT_IN_ERRORS=0
 fi
 
-# Check 2: Does daemon process .vrift files at all?
+# Check 2: Does daemon INGEST .vrift files (not just log paths)?
+# Only match actual ingest events, NOT daemon initialization logs
 echo ""
-echo "🔍 Check 2: .vrift files being processed?"
-if grep -q "FileChanged.*\.vrift\|path.*\.vrift" "$DAEMON_LOG" 2>/dev/null; then
+echo "🔍 Check 2: .vrift files being INGESTED?"
+# Pattern: Ingest events for files under .vrift/
+if grep -E "(FileChanged|file stored|Ingest:.*path=).*\.vrift/(test_|another)" "$DAEMON_LOG" 2>/dev/null; then
     echo -e "   ${RED}❌ BUG: .vrift files being processed (should be ignored!)${NC}"
-    grep "\.vrift" "$DAEMON_LOG" | grep -v "manifest\|Initialized" | head -3 | sed 's/^/      /'
+    grep -E "(FileChanged|file stored).*\.vrift/" "$DAEMON_LOG" | head -3 | sed 's/^/      /'
     VRIFT_PROCESSED=1
 else
-    echo -e "   ${GREEN}✓ .vrift files not processed${NC}"
+    echo -e "   ${GREEN}✓ .vrift files not ingested (correctly ignored)${NC}"
     VRIFT_PROCESSED=0
 fi
 
