@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use vrift_config::path::{normalize_nonexistent, normalize_or_original};
 use vrift_ipc::{VeloRequest, VeloResponse};
 
 const SOCKET_PATH: &str = "/tmp/vrift.sock";
@@ -134,10 +135,8 @@ pub async fn connect_to_daemon(project_root: &Path) -> Result<UnixStream> {
     send_request(&mut stream, handshake).await?;
     let _ = read_response(&mut stream).await?;
 
-    // 2. Register Workspace (canonicalize to ensure daemon can find it)
-    let abs_project_root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
+    // 2. Register Workspace (normalize to absolute path for daemon)
+    let abs_project_root = normalize_or_original(project_root);
     let register = VeloRequest::RegisterWorkspace {
         project_root: abs_project_root.to_string_lossy().to_string(),
     };
@@ -251,26 +250,12 @@ pub async fn ingest_via_daemon(
     phantom: bool,
     tier1: bool,
 ) -> Result<IngestResult> {
-    // Canonicalize paths before sending to daemon (daemon's cwd may differ)
-    let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let abs_cas = cas_root
-        .canonicalize()
-        .unwrap_or_else(|_| cas_root.to_path_buf());
-    // CRITICAL: manifest_path must also be absolute for daemon write
-    // Manifest may not exist yet, so we canonicalize parent + append filename
-    let abs_manifest = manifest_path
-        .canonicalize()
-        .or_else(|_| {
-            manifest_path
-                .parent()
-                .and_then(|p| {
-                    p.canonicalize()
-                        .ok()
-                        .map(|cp| cp.join(manifest_path.file_name().unwrap_or_default()))
-                })
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent"))
-        })
-        .unwrap_or_else(|_| manifest_path.to_path_buf());
+    // Normalize paths before sending to daemon (daemon's cwd may differ)
+    let abs_path = normalize_or_original(path);
+    let abs_cas = normalize_or_original(cas_root);
+    // Manifest may not exist yet, so normalize parent + append filename
+    let abs_manifest =
+        normalize_nonexistent(manifest_path).unwrap_or_else(|_| manifest_path.to_path_buf());
 
     // Use simple connection - IngestFullScan doesn't need workspace context
     tracing::info!("[CLI] Connecting to daemon for ingest...");

@@ -7,6 +7,7 @@
 //! 2. `.vrift/config.toml` (project-local, overrides global)
 //! 3. Environment variables (highest priority)
 
+pub mod logging;
 pub mod path;
 
 use once_cell::sync::Lazy;
