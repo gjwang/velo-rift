@@ -1141,29 +1141,31 @@ impl InceptionLayerState {
 
         let mut cas_root = FixedString::<1024>::new();
         let cas_ptr = unsafe { libc::getenv(c"VR_THE_SOURCE".as_ptr()) };
-        if cas_ptr.is_null() {
-            // Phase 4.2: Manual tilde expansion for DEFAULT_CAS_ROOT (~/.vrift/the_source)
-            // SAFELY implemented without String/format! allocations
-            let default = vrift_ipc::DEFAULT_CAS_ROOT;
-            if default.starts_with("~/") {
-                let home_ptr = unsafe { libc::getenv(c"HOME".as_ptr()) };
-                if !home_ptr.is_null() {
-                    let home = unsafe { CStr::from_ptr(home_ptr).to_string_lossy() };
 
-                    // Safe concatenation on stack
-                    let mut path_buf = [0u8; 1024];
-                    let mut writer = crate::macros::StackWriter::new(&mut path_buf);
-                    use std::fmt::Write;
-                    let _ = write!(writer, "{}{}", home, &default[1..]); // Skip '~'
-                    cas_root.set(writer.as_str());
-                } else {
-                    cas_root.set(default);
-                }
+        // 1. Determine raw path (Env or Default)
+        let raw_path = if !cas_ptr.is_null() {
+            unsafe { CStr::from_ptr(cas_ptr).to_string_lossy() }
+        } else {
+            std::borrow::Cow::Borrowed(vrift_ipc::DEFAULT_CAS_ROOT)
+        };
+
+        // 2. Perform safe tilde expansion
+        if raw_path.starts_with("~/") {
+            let home_ptr = unsafe { libc::getenv(c"HOME".as_ptr()) };
+            if !home_ptr.is_null() {
+                let home = unsafe { CStr::from_ptr(home_ptr).to_string_lossy() };
+
+                // Safe concatenation on stack
+                let mut path_buf = [0u8; 1024];
+                let mut writer = crate::macros::StackWriter::new(&mut path_buf);
+                use std::fmt::Write;
+                let _ = write!(writer, "{}{}", home, &raw_path[1..]); // Skip '~'
+                cas_root.set(writer.as_str());
             } else {
-                cas_root.set(default);
+                cas_root.set(&raw_path);
             }
         } else {
-            cas_root.set(&unsafe { CStr::from_ptr(cas_ptr).to_string_lossy() });
+            cas_root.set(&raw_path);
         }
 
         let mut vfs_prefix = FixedString::<256>::new();
