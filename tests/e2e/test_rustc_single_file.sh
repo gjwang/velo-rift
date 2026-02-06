@@ -104,7 +104,7 @@ rm -f hello_baseline
 echo "    [4b] Testing rustc with shim loaded..."
 
 # We test that the shim loads without hanging
-timeout 30 env DYLD_INSERT_LIBRARIES="$SHIM_PATH" rustc hello.rs -o hello_shim --edition 2021 2>&1 | head -20 || {
+perl -e 'alarm 30; exec @ARGV' env DYLD_INSERT_LIBRARIES="$SHIM_PATH" rustc hello.rs -o hello_shim --edition 2021 2>&1 | head -20 || {
     RESULT=$?
     if [ $RESULT -eq 124 ]; then
         echo -e "${RED}FAIL: rustc with shim timed out (possible hang)${NC}"

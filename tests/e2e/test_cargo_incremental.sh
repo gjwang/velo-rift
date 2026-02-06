@@ -71,12 +71,12 @@ fn main() {
 }
 EOF
 
-BUILD_START=$(date +%s%N)
+BUILD_START=$(date +%s)
 cargo build 2>/dev/null
-BUILD_END=$(date +%s%N)
+BUILD_END=$(date +%s)
 
-BUILD_TIME_MS=$(( (BUILD_END - BUILD_START) / 1000000 ))
-echo -e "${GREEN}[4] Incremental build completed in ${BUILD_TIME_MS}ms${NC}"
+BUILD_TIME_S=$(( BUILD_END - BUILD_START ))
+echo -e "${GREEN}[4] Incremental build completed in ${BUILD_TIME_S}s${NC}"
 
 # Verify binary executes
 if [ -f "target/debug/vrift_e2e_test" ]; then
