@@ -448,10 +448,10 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
                         Ok(mut registry) => {
                             // Try to lock registry
                             let _lock = crate::registry::ManifestRegistry::acquire_lock().ok();
-                            
+
                             match registry.register_manifest(
                                 std::path::Path::new(&result.manifest_path),
-                                &directory
+                                &directory,
                             ) {
                                 Ok(_) => {
                                     if let Err(e) = registry.save() {
@@ -465,7 +465,7 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
                         }
                         Err(e) => tracing::warn!("Failed to load manifest registry: {}", e),
                     }
-                    
+
                     Ok(())
                 }
                 Err(e) => Err(e),

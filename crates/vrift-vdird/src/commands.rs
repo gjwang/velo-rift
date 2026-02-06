@@ -347,53 +347,55 @@ impl CommandHandler {
         results: &[Result<vrift_cas::IngestResult, vrift_cas::CasError>],
     ) -> Result<()> {
         let mut manifest = vrift_manifest::Manifest::new();
-        
+
         // Find common root to make paths relative
         // We assume file_paths come from walking a single directory
         let root = if !file_paths.is_empty() {
-             // Heuristic: take parent of first file until it's a common prefix?
-             // Actually, file_paths come from WalkDir(source_path)
-             // But we don't have source_path here easily unless we pass it.
-             // However, for flat ingest, making paths relative to manifest location or root is tricky.
-             // Standard behavior: keys should be absolute or relative to project root?
-             // RFC-0039 says manifest paths are typically relative to project root, starting with /
-             // If we don't know project root, we can check config, OR just use absolute for now.
-             // But for portability, relative is better.
-             // Let's assume common parent of all files is the ingest root.
-             file_paths[0].parent().unwrap_or(Path::new("/"))
+            // Heuristic: take parent of first file until it's a common prefix?
+            // Actually, file_paths come from WalkDir(source_path)
+            // But we don't have source_path here easily unless we pass it.
+            // However, for flat ingest, making paths relative to manifest location or root is tricky.
+            // Standard behavior: keys should be absolute or relative to project root?
+            // RFC-0039 says manifest paths are typically relative to project root, starting with /
+            // If we don't know project root, we can check config, OR just use absolute for now.
+            // But for portability, relative is better.
+            // Let's assume common parent of all files is the ingest root.
+            file_paths[0].parent().unwrap_or(Path::new("/"))
         } else {
-             Path::new("/")
+            Path::new("/")
         };
 
         for (path, result) in file_paths.iter().zip(results.iter()) {
             if let Ok(res) = result {
-                 // Try to get metadata for mtime/mode
-                 let (mtime, mode) = match fs::metadata(path) {
-                     Ok(meta) => (meta.mtime() as u64, meta.mode()),
-                     Err(_) => (0, 0o644), // Fallback
-                 };
+                // Try to get metadata for mtime/mode
+                let (mtime, mode) = match fs::metadata(path) {
+                    Ok(meta) => (meta.mtime() as u64, meta.mode()),
+                    Err(_) => (0, 0o644), // Fallback
+                };
 
-                 let entry = VnodeEntry {
-                     content_hash: res.hash,
-                     size: res.size,
-                     mtime,
-                     mode,
-                     flags: 0,
-                     _pad: 0,
-                 };
-                 
-                 // Make path relative if possible so it looks cleaner
-                 let key = if let Ok(rel) = path.strip_prefix(root) {
-                      format!("/{}", rel.display())
-                 } else {
-                      path.to_string_lossy().to_string()
-                 };
+                let entry = VnodeEntry {
+                    content_hash: res.hash,
+                    size: res.size,
+                    mtime,
+                    mode,
+                    flags: 0,
+                    _pad: 0,
+                };
 
-                 manifest.insert(&key, entry);
+                // Make path relative if possible so it looks cleaner
+                let key = if let Ok(rel) = path.strip_prefix(root) {
+                    format!("/{}", rel.display())
+                } else {
+                    path.to_string_lossy().to_string()
+                };
+
+                manifest.insert(&key, entry);
             }
         }
-        
-        manifest.save(manifest_path).map_err(|e| anyhow::anyhow!("Failed to save manifest: {}", e))?;
+
+        manifest
+            .save(manifest_path)
+            .map_err(|e| anyhow::anyhow!("Failed to save manifest: {}", e))?;
 
         Ok(())
     }

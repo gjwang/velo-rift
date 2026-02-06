@@ -21,8 +21,8 @@ fn send_request(
     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(request).unwrap();
 
     // Create and send header
-    let seq_id = 1u16; // Simple seq for tests
-    let header = IpcHeader::new_request(payload.len() as u16, seq_id);
+    let seq_id = 1u32; // Simple seq for tests
+    let header = IpcHeader::new_request(payload.len() as u32, seq_id);
     stream.write_all(&header.to_bytes()).unwrap();
     stream.write_all(&payload).unwrap();
 
