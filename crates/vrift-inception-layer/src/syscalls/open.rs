@@ -1,6 +1,7 @@
 use crate::state::*;
 use libc::{c_char, c_int, c_void, mode_t};
 use std::ffi::CStr;
+use std::fmt::Write;
 use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "linux")]
@@ -89,7 +90,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
 
         let mut attempts = 0;
         let mut fd = -1;
-        let mut temp_path_string = String::new();
+        let mut temp_path_fs = FixedString::<1024>::new();
         let pid = unsafe { libc::getpid() };
         let tid_addr = &attempts as *const _ as usize;
 
@@ -98,11 +99,17 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            temp_path_string = format!(
+
+            let mut buf = [0u8; 1024];
+            let mut writer = crate::macros::StackWriter::new(&mut buf);
+            let _ = write!(
+                writer,
                 "/tmp/vrift_cow_{}_{}_{}_{}.tmp",
                 pid, timestamp, tid_addr, attempts
             );
-            let c_temp = match std::ffi::CString::new(temp_path_string.as_str()) {
+            temp_path_fs.set(writer.as_str());
+
+            let c_temp = match std::ffi::CString::new(temp_path_fs.as_str()) {
                 Ok(c) => c,
                 Err(_) => break,
             };
@@ -126,7 +133,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             return None;
         }
         let temp_fd = fd;
-        let temp_path = temp_path_string;
+        let temp_path = temp_path_fs;
         unsafe { libc::close(temp_fd) };
         let temp_cpath = std::ffi::CString::new(temp_path.as_str()).ok()?;
 
@@ -173,16 +180,21 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
         if fd < 0 {
             None
         } else {
-            {
-                let mut fds = state.open_fds.lock();
-                fds.insert(
-                    fd,
-                    OpenFile {
-                        vpath: vpath.absolute.clone(),
-                        temp_path,
-                        mmap_count: 0,
-                    },
-                );
+            // Allocate entry manually for lock-free insertion
+            let entry = Box::into_raw(Box::new(crate::syscalls::io::FdEntry {
+                vpath: vpath.absolute,
+                temp_path,
+                is_vfs: true,
+                cached_stat: None,
+                mmap_count: 0,
+            }));
+
+            let old = state.open_fds.set(fd as u32, entry);
+            if !old.is_null() {
+                // If overwritten (unlikely for new FD!), reclaim old
+                unsafe { drop(Box::from_raw(old)) };
+            } else {
+                crate::syscalls::io::OPEN_FD_COUNT.fetch_add(1, Ordering::Relaxed);
             }
             Some(fd)
         }

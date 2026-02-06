@@ -42,7 +42,10 @@ export PATH=$PATH:$(pwd)/target/release
 TEST_DIR="/tmp/vrift_test"
 CAS_DIR="$TEST_DIR/cas"
 DATA_DIR="$TEST_DIR/data"
-MANIFEST="$TEST_DIR/vrift.manifest"
+# RFC-0039: Manifest is a directory, but CLI commands expect the .lmdb file path
+# for direct manifest operations.
+MANIFEST_DIR="$TEST_DIR/vrift.manifest"
+MANIFEST="$MANIFEST_DIR/manifest.lmdb"
 
 safe_rm "$TEST_DIR"
 mkdir -p "$CAS_DIR" "$DATA_DIR"
@@ -75,6 +78,7 @@ EOF
 # 3. Test Daemon Auto-Start & Ingest
 echo "[*] Testing Daemon Auto-Start & Ingest..."
 # Note: Ingest Solid Tier-2 doesn't use the daemon currently.
+# vrift ingest creates the directory if it doesn't exist
 vrift ingest "$DATA_DIR" --prefix /data --output "$MANIFEST"
 
 # Trigger daemon auto-start via a command that requires it
@@ -97,7 +101,15 @@ fi
 echo "[PASS] Daemon auto-started."
 
 # 4. Test Status
-vrift status --manifest "$MANIFEST"
+echo "[*] Running vrift status..."
+if ! vrift status --manifest "$MANIFEST"; then
+    echo "ERROR: vrift status failed. Checking environment..."
+    ls -ld "$MANIFEST_DIR" || true
+    ls -ld "$MANIFEST" || true
+    file "$MANIFEST" || true
+    printenv | grep VRIFT || true
+    exit 1
+fi
 vrift daemon status
 echo "[PASS] Status commands work."
 
@@ -148,7 +160,7 @@ mkdir -p "$WATCH_DIR"
 echo "v1" > "$WATCH_DIR/start.txt"
 
 # Run watch in background
-vrift watch "$WATCH_DIR" --output "$TEST_DIR/watch.manifest" > "$TEST_DIR/watch.log" 2>&1 &
+vrift watch "$WATCH_DIR" --output "$MANIFEST" > "$TEST_DIR/watch.log" 2>&1 &
 WATCH_PID=$!
 echo "Watch PID: $WATCH_PID"
 
@@ -161,7 +173,7 @@ sleep 2
 kill $WATCH_PID || true
 
 # Check logs for detection
-if grep -q "Change Detected" "$TEST_DIR/watch.log" || grep -q "Ingestion complete" "$TEST_DIR/watch.log"; then
+if grep -q "Change Detected" "$TEST_DIR/watch.log" || grep -q "Ingestion complete" "$TEST_DIR/watch.log" || grep -q "Indexed" "$TEST_DIR/watch.log"; then
     echo "[PASS] Watch mode detected changes."
 else
     echo "ERROR: Watch mode did not detect changes. Log content:"
@@ -184,14 +196,14 @@ if [ "$OS" == "Linux" ]; then
         echo "[SKIP] FUSE mount (no /dev/fuse - unprivileged Docker)"
         echo "[*] Running FUSE Logic Simulation via Shim..."
         
-        # Find shim library
+        # Find inception layer library
         SHIM_LIB=""
-        if [ -f "target/release/libvrift_shim.so" ]; then
-            SHIM_LIB="target/release/libvrift_shim.so"
-        elif [ -f "/usr/local/bin/libvrift_shim.so" ]; then
-            SHIM_LIB="/usr/local/bin/libvrift_shim.so"
-        elif [ -f "target/release/libvelo_shim.so" ]; then
-             SHIM_LIB="target/release/libvelo_shim.so"
+        if [ -f "target/release/libvrift_inception_layer.so" ]; then
+            SHIM_LIB="target/release/libvrift_inception_layer.so"
+        elif [ -f "/usr/local/bin/libvrift_inception_layer.so" ]; then
+            SHIM_LIB="/usr/local/bin/libvrift_inception_layer.so"
+        elif [ -f "target/release/libvrift_inception_layer.dylib" ]; then
+             SHIM_LIB="target/release/libvrift_inception_layer.dylib"
         fi
         
         if [ -z "$SHIM_LIB" ]; then
@@ -395,7 +407,8 @@ if [ "$OS" == "Linux" ]; then
     # Use /bin/sh from the busybox base to run a command
     # Note: we use 'id -u' because 'whoami' requires /etc/passwd which we don't have.
     # Inside the user namespace, we should be UID 0 (root).
-    ISO_OUT=$(vrift run --isolate --base busybox.manifest --manifest "$MANIFEST" -- /bin/sh -c "id -u" 2>&1) || ISO_ERR=$?
+    # RFC-0039: busybox.manifest is a directory containing manifest.lmdb
+    ISO_OUT=$(vrift run --isolate --base busybox.manifest/manifest.lmdb --manifest "$MANIFEST" -- /bin/sh -c "id -u" 2>&1) || ISO_ERR=$?
     
     if [ -n "$ISO_ERR" ]; then
         if [[ "$ISO_OUT" == *"Operation not permitted"* ]] || [[ "$ISO_OUT" == *"uid_map"* ]]; then

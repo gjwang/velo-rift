@@ -302,11 +302,11 @@ verify_after_state() {
     
     print_section "Checking manifests..."
     echo ""
-    if [[ -f "$DEMO_DIR/project-alpha/manifest.vrift" ]]; then
-        print_success "Project Alpha manifest: $(wc -l < "$DEMO_DIR/project-alpha/manifest.vrift") entries"
+    if [[ -d "$DEMO_DIR/project-alpha/manifest.vrift" ]]; then
+        print_success "Project Alpha manifest: $(ls -l "$DEMO_DIR/project-alpha/manifest.vrift/manifest.lmdb" | awk '{print $5}') bytes"
     fi
-    if [[ -f "$DEMO_DIR/project-beta/manifest.vrift" ]]; then
-        print_success "Project Beta manifest: $(wc -l < "$DEMO_DIR/project-beta/manifest.vrift") entries"
+    if [[ -d "$DEMO_DIR/project-beta/manifest.vrift" ]]; then
+        print_success "Project Beta manifest: $(ls -l "$DEMO_DIR/project-beta/manifest.vrift/manifest.lmdb" | awk '{print $5}') bytes"
     fi
     
     pause
@@ -378,13 +378,13 @@ print_summary() {
         echo "  │ CAS blobs created                      │ ❌ FAIL               │"
     fi
     
-    if [[ -f "$DEMO_DIR/project-alpha/manifest.vrift" ]]; then
+    if [[ -d "$DEMO_DIR/project-alpha/manifest.vrift" ]]; then
         echo "  │ Manifest generated (Alpha)             │ ✅ PASS               │"
     else
         echo "  │ Manifest generated (Alpha)             │ ❌ FAIL               │"
     fi
     
-    if [[ -f "$DEMO_DIR/project-beta/manifest.vrift" ]]; then
+    if [[ -d "$DEMO_DIR/project-beta/manifest.vrift" ]]; then
         echo "  │ Manifest generated (Beta)              │ ✅ PASS               │"
     else
         echo "  │ Manifest generated (Beta)              │ ❌ FAIL               │"

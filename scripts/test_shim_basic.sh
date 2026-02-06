@@ -31,10 +31,10 @@ VRIFTD_BIN="${PROJECT_ROOT}/target/release/vriftd"
 # Detect OS
 OS_TYPE=$(uname -s)
 if [ "$OS_TYPE" == "Darwin" ]; then
-    SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_shim.dylib"
+    SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_inception_layer.dylib"
     PRELOAD_VAR="DYLD_INSERT_LIBRARIES"
 else
-    SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_shim.so"
+    SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_inception_layer.so"
     PRELOAD_VAR="LD_PRELOAD"
 fi
 
@@ -42,8 +42,8 @@ fi
 if [ ! -f "$VELO_BIN" ] || [ ! -f "$VRIFTD_BIN" ] || [ ! -f "$SHIM_LIB" ]; then
     echo "Building release binaries..."
     cargo build --release --workspace
-    # Explicitly build shim cdylib (may not be built by --workspace alone)
-    cargo build --release -p vrift-shim
+    # Explicitly build inception layer cdylib (may not be built by --workspace alone)
+    cargo build --release -p vrift-inception-layer
 fi
 
 TEST_DIR=$(mktemp -d)

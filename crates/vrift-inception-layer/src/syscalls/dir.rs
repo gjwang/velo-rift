@@ -44,8 +44,10 @@ pub unsafe extern "C" fn opendir_inception(path: *const libc::c_char) -> *mut c_
     // Query directory listing from daemon
     if let Some(entries) = state.query_dir_listing(path_str) {
         // Create synthetic directory
+        let mut fs_vpath = crate::state::FixedString::<1024>::new();
+        fs_vpath.set(path_str);
         let syn_dir = Box::new(SyntheticDir {
-            vpath: path_str.to_string(),
+            vpath: fs_vpath,
             entries,
             position: 0,
         });
@@ -56,7 +58,7 @@ pub unsafe extern "C" fn opendir_inception(path: *const libc::c_char) -> *mut c_
         dirs.insert(
             ptr as usize,
             SyntheticDir {
-                vpath: String::new(),
+                vpath: crate::state::FixedString::new(),
                 entries: vec![],
                 position: 0,
             },

@@ -2,25 +2,31 @@ use libc::{c_char, c_int, AT_FDCWD};
 use std::ffi::CStr;
 use std::ptr;
 
+use crate::state::FixedString;
+
 /// RFC-0049: Unified path resolution for VFS domain.
 /// Encapsulates absolute path and the corresponding manifest key.
 #[derive(Debug, Clone)]
 pub(crate) struct VfsPath {
-    pub absolute: String,
-    pub manifest_key: String,
+    pub absolute: FixedString<1024>,
+    pub manifest_key: FixedString<1024>,
     pub manifest_key_hash: u64,
 }
 
 pub(crate) struct PathResolver {
-    pub vfs_prefix: String,
-    pub project_root: String,
+    pub vfs_prefix: FixedString<256>,
+    pub project_root: FixedString<1024>,
 }
 
 impl PathResolver {
     pub fn new(vfs_prefix: &str, project_root: &str) -> Self {
+        let mut prefix = FixedString::new();
+        prefix.set(vfs_prefix);
+        let mut root = FixedString::new();
+        root.set(project_root);
         Self {
-            vfs_prefix: vfs_prefix.to_string(),
-            project_root: project_root.to_string(),
+            vfs_prefix: prefix,
+            project_root: root,
         }
     }
 
@@ -28,68 +34,84 @@ impl PathResolver {
     /// Returns None if the path is not within the VFS domain.
     pub fn resolve(&self, path: &str) -> Option<VfsPath> {
         // RFC-0050: Early exit if VFS is not configured
-        // Empty vfs_prefix means no virtual filesystem is active
         if self.vfs_prefix.is_empty() {
             return None;
         }
 
+        let mut abs_buf = [0u8; 1024];
+        let mut abs_writer = crate::macros::StackWriter::new(&mut abs_buf);
+        use std::fmt::Write;
+
         // 1. Resolve relative paths using project_root
-        let abs_path = if !path.starts_with('/') {
+        if !path.starts_with('/') {
             if self.project_root.is_empty() {
                 return None;
             }
-            format!("{}/{}", self.project_root, path)
+            let _ = write!(abs_writer, "{}/{}", self.project_root.as_str(), path);
         } else {
-            path.to_string()
+            let _ = write!(abs_writer, "{}", path);
         };
+        let abs_path = abs_writer.as_str();
 
         // 2. Normalize (handle .., ., //)
-        let mut buf = vec![0u8; abs_path.len() + 1];
-        let len = unsafe { raw_path_normalize(&abs_path, &mut buf)? };
-        let normalized = std::str::from_utf8(&buf[..len]).ok()?.to_string();
+        let mut norm_buf = [0u8; 1024];
+        let len = unsafe { raw_path_normalize(abs_path, &mut norm_buf)? };
+        let normalized = std::str::from_utf8(&norm_buf[..len]).ok()?;
 
         // 3. Check VFS applicability
-        if !normalized.starts_with(&self.vfs_prefix) {
+        if !normalized.starts_with(self.vfs_prefix.as_str()) {
             return None;
         }
 
-        // Ensure we match on component boundaries (e.g., /vrift matches /vrift/file but not /vriftfile)
-        if normalized.len() > self.vfs_prefix.len()
-            && !self.vfs_prefix.ends_with('/')
-            && normalized.as_bytes()[self.vfs_prefix.len()] != b'/'
+        // Ensure we match on component boundaries
+        let prefix_len = self.vfs_prefix.len;
+        if normalized.len() > prefix_len
+            && !self.vfs_prefix.as_str().ends_with('/')
+            && normalized.as_bytes()[prefix_len] != b'/'
         {
             return None;
         }
 
-        // 4. Extract manifest key (relative to project_root, must start with /)
-        // If project_root is "/a/b" and normalized is "/a/b/c/d", manifest_key is "/c/d"
-        // RFC-0039: vrift ingest always prefixes paths with /
-        let manifest_key = if !self.project_root.is_empty()
-            && normalized.starts_with(&self.project_root)
-            && (normalized.len() == self.project_root.len()
-                || self.project_root.ends_with('/')
-                || normalized.as_bytes()[self.project_root.len()] == b'/')
+        // 4. Extract manifest key
+        let mut key_fs = FixedString::<1024>::new();
+        let proj_root_str = self.project_root.as_str();
+
+        if !self.project_root.is_empty()
+            && normalized.starts_with(proj_root_str)
+            && (normalized.len() == proj_root_str.len()
+                || proj_root_str.ends_with('/')
+                || normalized.as_bytes()[proj_root_str.len()] == b'/')
         {
-            let key = normalized.strip_prefix(&self.project_root).unwrap_or("");
+            let key = normalized.strip_prefix(proj_root_str).unwrap_or("");
             if !key.starts_with('/') {
-                format!("/{}", key)
+                let mut key_buf = [0u8; 1024];
+                let mut kw = crate::macros::StackWriter::new(&mut key_buf);
+                let _ = write!(kw, "/{}", key);
+                key_fs.set(kw.as_str());
             } else {
-                key.to_string()
+                key_fs.set(key);
             }
         } else {
-            // Fallback: if not under project_root but under vfs_prefix
-            let key = normalized.strip_prefix(&self.vfs_prefix).unwrap_or("");
+            let key = normalized
+                .strip_prefix(self.vfs_prefix.as_str())
+                .unwrap_or("");
             if !key.starts_with('/') {
-                format!("/{}", key)
+                let mut key_buf = [0u8; 1024];
+                let mut kw = crate::macros::StackWriter::new(&mut key_buf);
+                let _ = write!(kw, "/{}", key);
+                key_fs.set(kw.as_str());
             } else {
-                key.to_string()
+                key_fs.set(key);
             }
         };
 
-        let manifest_key_hash = vrift_ipc::fnv1a_hash(&manifest_key);
+        let mut norm_fs = FixedString::<1024>::new();
+        norm_fs.set(normalized);
+
+        let manifest_key_hash = vrift_ipc::fnv1a_hash(key_fs.as_str());
         Some(VfsPath {
-            absolute: normalized,
-            manifest_key,
+            absolute: norm_fs,
+            manifest_key: key_fs,
             manifest_key_hash,
         })
     }

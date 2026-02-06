@@ -190,37 +190,25 @@ pub unsafe extern "C" fn lstat_inception(path: *const c_char, buf: *mut libc_sta
 
 #[no_mangle]
 pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_int {
-    // 🔥 ULTRA-FAST PATH: No InceptionLayerGuard for common case
-    if let Some(reactor) = crate::sync::get_reactor() {
-        let entry_ptr = reactor.fd_table.get(fd as u32);
+    // 🔥 ULTRA-FAST PATH: Lock-free, Allocation-free, TLS-free logic
+    // This supports usage inside malloc() without deadlock.
+
+    // 1. Check FdTable (if initialized)
+    // Note: We use InceptionLayerState directly instead of Reactor to ensure consistency
+    if let Some(state) = InceptionLayerState::get() {
+        let entry_ptr = state.open_fds.get(fd as u32);
         if !entry_ptr.is_null() {
             let entry = &*entry_ptr;
+
+            // If we have a cached stat (standard case for VFS files)
             if let Some(ref cached) = entry.cached_stat {
                 *buf = *cached;
                 return 0;
             }
-        }
-    }
 
-    let _guard = match InceptionLayerGuard::enter() {
-        Some(g) => g,
-        None => {
-            #[cfg(target_os = "macos")]
-            return crate::syscalls::macos_raw::raw_fstat64(fd, buf);
-            #[cfg(target_os = "linux")]
-            return crate::syscalls::linux_raw::raw_fstat(fd, buf);
-        }
-    };
-
-    if let Some(entry) = crate::syscalls::io::get_fd_entry(fd) {
-        if let Some(ref cached) = entry.cached_stat {
-            *buf = *cached;
-            return 0;
-        }
-
-        if entry.is_vfs {
-            if let Some(state) = InceptionLayerState::get() {
-                if let Some(vnode) = state.query_manifest(&entry.path) {
+            // Fallback for VFS files without cached stat (rare?)
+            if entry.is_vfs {
+                if let Some(vnode) = state.query_manifest(entry.vpath.as_str()) {
                     std::ptr::write_bytes(buf, 0, 1);
                     (*buf).st_size = vnode.size as _;
                     #[cfg(target_os = "macos")]
@@ -234,7 +222,7 @@ pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_in
                     (*buf).st_mtime = vnode.mtime as _;
                     (*buf).st_dev = 0x52494654;
                     (*buf).st_nlink = 1;
-                    (*buf).st_ino = vrift_ipc::fnv1a_hash(&entry.path) as _;
+                    (*buf).st_ino = vrift_ipc::fnv1a_hash(entry.vpath.as_str()) as _;
                     inception_record!(EventType::StatHit, (*buf).st_ino, 0);
                     return 0;
                 }
@@ -242,6 +230,9 @@ pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_in
         }
     }
 
+    // 2. Not tracked or state not ready -> Raw Syscall
+    // We do NOT use InceptionLayerGuard here because fstat is used by malloc/TLS init.
+    // If it's not in FdTable, it's not a VFS file (Closed World Assumption).
     #[cfg(target_os = "macos")]
     return crate::syscalls::macos_raw::raw_fstat64(fd, buf);
     #[cfg(target_os = "linux")]

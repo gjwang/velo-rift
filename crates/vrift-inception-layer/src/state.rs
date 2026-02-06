@@ -2,7 +2,7 @@ use crate::path::{PathResolver, VfsPath};
 use crate::sync::RecursiveMutex;
 use libc::{c_int, c_void};
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -46,6 +46,7 @@ extern "C" {
 /// Flag to prevent recursion during TLS key creation (bootstrap phase)
 pub(crate) static BOOTSTRAPPING: AtomicBool = AtomicBool::new(false);
 pub(crate) static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+pub(crate) static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// VFS activation flag - starts 0 (FALSE), becomes 1 (TRUE) when daemon connection is established.
 /// Until VFS_READY is true, all open/openat calls passthrough to kernel directly.
@@ -604,27 +605,132 @@ pub fn vfs_dump_flight_recorder() {
     let _ = unsafe { libc::write(2, footer.as_ptr() as *const c_void, footer.len()) };
 }
 
+// ============================================================================
+// FixedString: Zero-Allocation String Storage
+// ============================================================================
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FixedString<const N: usize> {
+    pub(crate) data: [u8; N],
+    pub(crate) len: usize,
+}
+
+impl<const N: usize> FixedString<N> {
+    pub const fn new() -> Self {
+        Self {
+            data: [0u8; N],
+            len: 0,
+        }
+    }
+
+    pub fn set(&mut self, s: &str) {
+        let bytes = s.as_bytes();
+        let to_copy = std::cmp::min(bytes.len(), N);
+        self.data[..to_copy].copy_from_slice(&bytes[..to_copy]);
+        self.len = to_copy;
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.data[..self.len]).unwrap_or("")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<const N: usize> std::fmt::Display for FixedString<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl<const N: usize> std::fmt::Debug for FixedString<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
+impl<const N: usize> std::ops::Deref for FixedString<N> {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl<const N: usize> AsRef<str> for FixedString<N> {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<const N: usize> Default for FixedString<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// IdentityHasher: Safe, deterministic hasher for bootstrap safety
+// Avoiding RandomState prevents getrandom/open syscalls and TLS usage during init
+// ============================================================================
+
+pub(crate) struct IdentityHasher(u64);
+
+impl std::hash::Hasher for IdentityHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // FNV-1a simple mix
+        for &byte in bytes {
+            self.0 ^= byte as u64;
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+    fn write_usize(&mut self, i: usize) {
+        // For usize keys (pointers), use them directly mixed
+        self.0 ^= i as u64;
+        self.0 = self.0.wrapping_mul(0x100000001b3);
+    }
+    fn write_i32(&mut self, i: i32) {
+        // For FD keys
+        self.0 ^= i as u64;
+        self.0 = self.0.wrapping_mul(0x100000001b3);
+    }
+}
+
+pub(crate) struct IdentityBuildHasher;
+
+impl std::hash::BuildHasher for IdentityBuildHasher {
+    type Hasher = IdentityHasher;
+    fn build_hasher(&self) -> Self::Hasher {
+        IdentityHasher(0xcbf29ce484222325)
+    }
+}
+
+impl Default for IdentityBuildHasher {
+    fn default() -> Self {
+        Self
+    }
+}
+
 pub(crate) struct OpenFile {
-    pub vpath: String,
-    // Path to the temporary file backing this FD (for CoW)
-    pub temp_path: String,
-    // Number of active mmap mappings for this FD
+    pub vpath: FixedString<1024>,
+    pub temp_path: FixedString<1024>,
     pub mmap_count: usize,
 }
 
-/// Track active mmap regions for VFS files
 pub(crate) struct MmapInfo {
-    pub vpath: String,
-    pub temp_path: String,
+    pub vpath: FixedString<1024>,
+    pub temp_path: FixedString<1024>,
     pub len: usize,
 }
 
-/// Synthetic directory for VFS opendir/readdir
-#[allow(dead_code)]
 pub(crate) struct SyntheticDir {
-    pub vpath: String,
-    pub entries: Vec<vrift_ipc::DirEntry>, // IPC fallback
-    // pub mmap_children: Option<(*const vrift_ipc::MmapDirChild, usize)>, // mmap path: (start_ptr, count)
+    pub vpath: FixedString<1024>,
+    pub entries: Vec<vrift_ipc::DirEntry>,
     pub position: usize,
 }
 unsafe impl Send for SyntheticDir {} // Raw pointers in open_dirs HashMap
@@ -660,41 +766,58 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
     if manifest_ptr.is_null() {
         return (ptr::null(), 0);
     }
-    let manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
+    let _manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
 
-    // Project root is the parent of manifest file
-    let path = Path::new(manifest_path.as_ref());
-    let project_root = match path.parent() {
-        Some(p) => p,
-        None => return (ptr::null(), 0),
-    };
+    // Construct path on stack: {project_root}/.vrift/manifest.mmap
+    let mut path_buf = [0u8; 1024];
+    let mut writer = crate::macros::StackWriter::new(&mut path_buf);
+    use std::fmt::Write;
 
-    // If it's in .vrift/manifest.lmdb, go up one more
-    let project_root = if project_root.ends_with(".vrift") {
-        project_root.parent().unwrap_or(project_root)
+    let root_bytes = unsafe { CStr::from_ptr(manifest_ptr).to_bytes() };
+
+    // Naively assume project root is parent of manifest
+    // If manifest is /path/to/.vrift/manifest.lmdb -> root is /path/to
+    // If manifest is /path/to/manifest.lmdb -> root is /path/to
+
+    // Use low-level byte manipulation to find parent
+    let mut last_slash = 0;
+    for (i, &b) in root_bytes.iter().enumerate() {
+        if b == b'/' {
+            last_slash = i;
+        }
+    }
+
+    let root_len = if last_slash > 0 {
+        last_slash
     } else {
-        project_root
+        root_bytes.len()
     };
 
-    let _root_str = project_root.to_string_lossy();
-    let mmap_path_dir = project_root.join(".vrift");
-    let mmap_path = mmap_path_dir.join("manifest.mmap");
+    // If ending in .vrift, strip it too
+    let root_part = &root_bytes[..root_len];
+    let final_root_len = if root_part.ends_with(b"/.vrift") {
+        root_len - 7
+    } else if root_part.ends_with(b".vrift") {
+        // rare case if root is simply ".vrift"
+        root_len - 6
+    } else {
+        root_len
+    };
 
-    let mmap_path_cstr = CString::new(mmap_path.to_string_lossy().as_ref()).unwrap_or_default();
+    let root_str = std::str::from_utf8(&root_bytes[..final_root_len]).unwrap_or("");
+    let _ = write!(writer, "{}/.vrift/manifest.mmap\0", root_str);
+
+    let mmap_path_ptr = path_buf.as_ptr() as *const libc::c_char;
 
     #[cfg(target_os = "macos")]
     let fd = unsafe {
-        crate::syscalls::macos_raw::raw_open(
-            mmap_path_cstr.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-            0,
-        )
+        crate::syscalls::macos_raw::raw_open(mmap_path_ptr, libc::O_RDONLY | libc::O_CLOEXEC, 0)
     };
     #[cfg(target_os = "linux")]
     let fd = unsafe {
         crate::syscalls::linux_raw::raw_openat(
             libc::AT_FDCWD,
-            mmap_path_cstr.as_ptr(),
+            mmap_path_ptr,
             libc::O_RDONLY | libc::O_CLOEXEC,
             0,
         )
@@ -857,28 +980,19 @@ pub(crate) fn mmap_dir_lookup(
 }
 
 pub(crate) struct InceptionLayerState {
-    // pub cas: std::sync::Mutex<Option<CasStore>>, // Lazy init to avoid fs calls during dylib load
-    pub cas_root: std::borrow::Cow<'static, str>,
-    pub vfs_prefix: std::borrow::Cow<'static, str>,
-    pub socket_path: std::borrow::Cow<'static, str>,
-    pub open_fds: RecursiveMutex<HashMap<c_int, OpenFile>>,
-    /// Active mmap regions (Addr -> Info)
-    pub active_mmaps: RecursiveMutex<HashMap<usize, MmapInfo>>,
-    /// Synthetic directories for VFS readdir (DIR* pointer -> SyntheticDir)
-    pub open_dirs: RecursiveMutex<HashMap<usize, SyntheticDir>>,
+    pub cas_root: FixedString<1024>,
+    pub vfs_prefix: FixedString<256>,
+    pub socket_path: FixedString<1024>,
+    pub open_fds: crate::sync::FdTable,
+    pub active_mmaps: RecursiveMutex<HashMap<usize, MmapInfo, IdentityBuildHasher>>,
+    pub open_dirs: RecursiveMutex<HashMap<usize, SyntheticDir, IdentityBuildHasher>>,
     pub bloom_ptr: *const u8,
-    /// RFC-0044 Hot Stat Cache: mmap'd manifest for O(1) stat lookup
     pub mmap_ptr: *const u8,
     pub mmap_size: usize,
-    /// Absolute path to project root
-    pub project_root: String,
+    pub project_root: FixedString<1024>,
     pub path_resolver: PathResolver,
-    /// Cached soft FD limit to avoid syscalls in hot path (RFC-0051)
     pub cached_soft_limit: AtomicUsize,
-    /// Packed warning state: [32-bit threshold | 32-bit timestamp] (RFC-0051)
-    /// Allows atomic updates of both values without locks.
     pub last_usage_alert: std::sync::atomic::AtomicU64,
-    /// RingBuffer for background tasks
     pub tasks: &'static crate::sync::RingBuffer,
 }
 
@@ -892,15 +1006,22 @@ impl InceptionLayerState {
         // RFC-0050: Read log level
         let level_ptr = unsafe { libc::getenv(c"VRIFT_LOG_LEVEL".as_ptr()) };
         if !level_ptr.is_null() {
-            let level_str = unsafe { CStr::from_ptr(level_ptr).to_string_lossy() };
-            let level = match level_str.to_lowercase().as_str() {
-                "trace" => LogLevel::Trace,
-                "debug" => LogLevel::Debug,
-                "info" => LogLevel::Info,
-                "warn" => LogLevel::Warn,
-                "error" => LogLevel::Error,
-                "off" => LogLevel::Off,
-                _ => LogLevel::Info,
+            // Zero-allocation parsing
+            let level_bytes = unsafe { CStr::from_ptr(level_ptr).to_bytes() };
+            let level = if level_bytes.eq_ignore_ascii_case(b"trace") {
+                LogLevel::Trace
+            } else if level_bytes.eq_ignore_ascii_case(b"debug") {
+                LogLevel::Debug
+            } else if level_bytes.eq_ignore_ascii_case(b"info") {
+                LogLevel::Info
+            } else if level_bytes.eq_ignore_ascii_case(b"warn") {
+                LogLevel::Warn
+            } else if level_bytes.eq_ignore_ascii_case(b"error") {
+                LogLevel::Error
+            } else if level_bytes.eq_ignore_ascii_case(b"off") {
+                LogLevel::Off
+            } else {
+                LogLevel::Info
             };
             LOG_LEVEL.store(level as u8, Ordering::Relaxed);
         }
@@ -908,12 +1029,11 @@ impl InceptionLayerState {
         // RFC-0050: Read circuit breaker threshold
         let threshold_ptr = unsafe { libc::getenv(c"VRIFT_CIRCUIT_BREAKER_THRESHOLD".as_ptr()) };
         if !threshold_ptr.is_null() {
-            if let Ok(threshold) = unsafe {
-                CStr::from_ptr(threshold_ptr)
-                    .to_string_lossy()
-                    .parse::<usize>()
-            } {
-                CIRCUIT_BREAKER_THRESHOLD.store(threshold, Ordering::Relaxed);
+            let threshold_bytes = unsafe { CStr::from_ptr(threshold_ptr).to_bytes() };
+            if let Ok(s) = std::str::from_utf8(threshold_bytes) {
+                if let Ok(threshold) = s.parse::<usize>() {
+                    CIRCUIT_BREAKER_THRESHOLD.store(threshold, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -974,10 +1094,16 @@ impl InceptionLayerState {
                 let old_cur = rl.rlim_cur;
                 rl.rlim_cur = target;
                 if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) } == 0 {
-                    let msg = format!(
-                        "[vrift-inception] 🚀 Optimized FD limit: {} -> {} (target: 80% of system cap)\n",
+                    // Safe logging without allocation
+                    let mut buf = [0u8; 128];
+                    let mut writer = crate::macros::StackWriter::new(&mut buf);
+                    use std::fmt::Write;
+                    let _ = writeln!(
+                        writer,
+                        "[vrift-inception] 🚀 Optimized FD limit: {} -> {} (target: 80%)",
                         old_cur, rl.rlim_cur
                     );
+                    let msg = writer.as_str();
                     unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
                     soft_limit = rl.rlim_cur as usize;
                 }
@@ -989,47 +1115,34 @@ impl InceptionLayerState {
     pub(crate) fn init() -> Option<*mut Self> {
         let soft_limit = Self::boost_fd_limit();
         unsafe { Self::init_logger() };
-        // RFC-0050: VR_THE_SOURCE is the canonical env var (VRIFT_CAS_ROOT is deprecated)
+
+        let mut cas_root = FixedString::<1024>::new();
         let cas_ptr = unsafe { libc::getenv(c"VR_THE_SOURCE".as_ptr()) };
-        let cas_root: std::borrow::Cow<'static, str> = if cas_ptr.is_null() {
-            std::borrow::Cow::Borrowed(vrift_ipc::DEFAULT_CAS_ROOT)
+        if cas_ptr.is_null() {
+            cas_root.set(vrift_ipc::DEFAULT_CAS_ROOT);
         } else {
-            // Environment var found - must allocate (rare case, malloc should be ready by now)
-            std::borrow::Cow::Owned(unsafe {
-                CStr::from_ptr(cas_ptr).to_string_lossy().into_owned()
-            })
-        };
+            cas_root.set(&unsafe { CStr::from_ptr(cas_ptr).to_string_lossy() });
+        }
 
+        let mut vfs_prefix = FixedString::<256>::new();
         let prefix_ptr = unsafe { libc::getenv(c"VRIFT_VFS_PREFIX".as_ptr()) };
-        // RFC-0050: Default to empty string to disable VFS when not explicitly configured
-        // This prevents hang when inception layer is loaded but no VFS environment is set up
-        let vfs_prefix: std::borrow::Cow<'static, str> = if prefix_ptr.is_null() {
-            std::borrow::Cow::Borrowed("")
-        } else {
-            std::borrow::Cow::Owned(unsafe {
-                CStr::from_ptr(prefix_ptr).to_string_lossy().into_owned()
-            })
-        };
+        if !prefix_ptr.is_null() {
+            vfs_prefix.set(&unsafe { CStr::from_ptr(prefix_ptr).to_string_lossy() });
+        }
 
+        let mut socket_path = FixedString::<1024>::new();
         let socket_ptr = unsafe { libc::getenv(c"VRIFT_SOCKET_PATH".as_ptr()) };
-        let socket_path: std::borrow::Cow<'static, str> = if socket_ptr.is_null() {
-            std::borrow::Cow::Borrowed(vrift_ipc::DEFAULT_SOCKET_PATH)
+        if socket_ptr.is_null() {
+            socket_path.set(vrift_ipc::DEFAULT_SOCKET_PATH);
         } else {
-            std::borrow::Cow::Owned(unsafe {
-                CStr::from_ptr(socket_ptr).to_string_lossy().into_owned()
-            })
-        };
+            socket_path.set(&unsafe { CStr::from_ptr(socket_ptr).to_string_lossy() });
+        }
 
-        // NOTE: Bloom mmap is deferred - don't call during init
-        let bloom_ptr = ptr::null();
-
-        // RFC-0044: Hot Stat Cache - load mmap immediately
-        // (Lazy loading was TODO but never implemented, eager load is safe in practice)
         let (mmap_ptr, mmap_size) = open_manifest_mmap();
 
-        // Derive project root from VRIFT_MANIFEST
+        let mut project_root_fs = FixedString::<1024>::new();
         let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
-        let project_root: String = if !manifest_ptr.is_null() {
+        if !manifest_ptr.is_null() {
             let manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
             let path = Path::new(manifest_path.as_ref());
             let parent = path.parent().unwrap_or_else(|| Path::new("/"));
@@ -1038,34 +1151,40 @@ impl InceptionLayerState {
             } else {
                 parent
             };
-            root.to_string_lossy().into_owned()
-        } else {
-            String::new()
+            project_root_fs.set(&root.to_string_lossy());
+        }
+
+        // Use libc::malloc to avoid Rust allocator TLS dependency during bootstrap
+        let ptr = unsafe {
+            libc::malloc(std::mem::size_of::<InceptionLayerState>()) as *mut InceptionLayerState
         };
+        if ptr.is_null() {
+            return None;
+        }
 
-        let state = Box::new(InceptionLayerState {
-            // cas: std::sync::Mutex::new(None),
-            cas_root,
-            vfs_prefix: vfs_prefix.clone(),
-            socket_path,
-            open_fds: RecursiveMutex::new(HashMap::new()),
-            active_mmaps: RecursiveMutex::new(HashMap::new()),
-            open_dirs: RecursiveMutex::new(HashMap::new()),
-            bloom_ptr,
-            mmap_ptr,
-            mmap_size,
-            project_root: project_root.clone(),
-            path_resolver: PathResolver::new(&vfs_prefix, &project_root),
-            cached_soft_limit: AtomicUsize::new(soft_limit),
-            last_usage_alert: std::sync::atomic::AtomicU64::new(0),
-            tasks: Self::init_reactor(),
-        });
+        unsafe {
+            ptr::write(
+                ptr,
+                InceptionLayerState {
+                    cas_root,
+                    vfs_prefix,
+                    socket_path,
+                    open_fds: crate::sync::FdTable::new(),
+                    active_mmaps: RecursiveMutex::new(HashMap::with_hasher(IdentityBuildHasher)),
+                    open_dirs: RecursiveMutex::new(HashMap::with_hasher(IdentityBuildHasher)),
+                    bloom_ptr: ptr::null(),
+                    mmap_ptr,
+                    mmap_size,
+                    project_root: project_root_fs,
+                    path_resolver: PathResolver::new(vfs_prefix.as_str(), project_root_fs.as_str()),
+                    cached_soft_limit: AtomicUsize::new(soft_limit),
+                    last_usage_alert: std::sync::atomic::AtomicU64::new(0),
+                    tasks: Self::init_reactor(),
+                },
+            );
+        }
 
-        // RFC-OPT-002: Symbol Prefetching is deferred to first syscall.
-        // Calling dlsym here can still cause issues with some binaries.
-        // The lazy AtomicPtr caching in reals.rs handles this safely.
-
-        Some(Box::into_raw(state))
+        Some(ptr)
     }
 
     fn init_reactor() -> &'static crate::sync::RingBuffer {
@@ -1078,8 +1197,9 @@ impl InceptionLayerState {
                 };
                 *crate::sync::REACTOR.get() = Some(reactor);
 
-                // Start Worker Thread via pthread BEFORE marking as ready
-                Self::spawn_worker();
+                // Start Worker Thread via pthread LATER
+                // BUG-008: Spawning in ctor causes deadlock with dyld loader lock
+                // Self::spawn_worker(); NO!
 
                 // Now mark as ready for fast path in get_reactor()
                 crate::sync::mark_reactor_ready();
@@ -1089,6 +1209,11 @@ impl InceptionLayerState {
     }
 
     fn spawn_worker() {
+        // Double-check to ensure we don't spawn multiple times racefully
+        if WORKER_STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
         unsafe {
             let mut thread: libc::pthread_t = std::mem::zeroed();
             libc::pthread_create(
@@ -1140,6 +1265,7 @@ impl InceptionLayerState {
     }
 
     fn process_task(task: crate::sync::Task) {
+        // ... (same as before) ...
         match task {
             crate::sync::Task::ReclaimFd(_fd, entry) => {
                 if !entry.is_null() {
@@ -1147,7 +1273,9 @@ impl InceptionLayerState {
                 }
             }
             crate::sync::Task::Reingest { vpath, temp_path } => {
-                if let Some(state) = InceptionLayerState::get() {
+                // ...
+                if let Some(state) = InceptionLayerState::get_no_spawn() {
+                    // Use no_spawn to avoid recursion if we want
                     unsafe {
                         crate::ipc::sync_ipc_manifest_reingest(
                             &state.socket_path,
@@ -1163,11 +1291,26 @@ impl InceptionLayerState {
         }
     }
 
-    pub(crate) fn get() -> Option<&'static Self> {
+    // Internal helper to avoid infinite recursion when worker needs state
+    pub(crate) fn get_no_spawn() -> Option<&'static Self> {
         let ptr = INCEPTION_LAYER_STATE.load(Ordering::Acquire);
         if !ptr.is_null() {
             return unsafe { Some(&*ptr) };
         }
+        None
+    }
+
+    pub(crate) fn get() -> Option<&'static Self> {
+        let ptr = INCEPTION_LAYER_STATE.load(Ordering::Acquire);
+        if !ptr.is_null() {
+            // Lazy spawn worker if not started
+            if !WORKER_STARTED.load(Ordering::Relaxed) {
+                Self::spawn_worker();
+            }
+            return unsafe { Some(&*ptr) };
+        }
+
+        // ... (rest of get logic) ...
 
         // RFC-0050: Tiered Readiness Model
         // 2: Early-Init (Hazardous), 1: image init (Hazardous), 3: Busy, 0: Ready

@@ -33,27 +33,27 @@ EOF
 
 echo "[1] Test source created: $TEST_WORK/hello.rs"
 
-# Build the shim
-echo "[2] Building vrift-shim..."
+# Build the inception layer (shim)
+echo "[2] Building vrift-inception-layer..."
 cd "$PROJECT_ROOT"
-cargo build -p vrift-shim --release 2>/dev/null || {
-    echo -e "${RED}FAIL: Failed to build vrift-shim${NC}"
+cargo build -p vrift-inception-layer --release 2>/dev/null || {
+    echo -e "${RED}FAIL: Failed to build vrift-inception-layer${NC}"
     exit 1
 }
 
-SHIM_PATH="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
+SHIM_PATH="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
 if [ ! -f "$SHIM_PATH" ]; then
     # Try debug build
-    cargo build -p vrift-shim 2>/dev/null
-    SHIM_PATH="$PROJECT_ROOT/target/debug/libvrift_shim.dylib"
+    cargo build -p vrift-inception-layer 2>/dev/null
+    SHIM_PATH="$PROJECT_ROOT/target/debug/libvrift_inception_layer.dylib"
 fi
 
 if [ ! -f "$SHIM_PATH" ]; then
-    echo -e "${RED}FAIL: vrift-shim dylib not found${NC}"
+    echo -e "${RED}FAIL: vrift-inception-layer dylib not found${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}[2] vrift-shim built: $SHIM_PATH${NC}"
+echo -e "${GREEN}[2] vrift-inception-layer built: $SHIM_PATH${NC}"
 
 # Codesign if needed (macOS)
 if [[ "$(uname)" == "Darwin" ]]; then

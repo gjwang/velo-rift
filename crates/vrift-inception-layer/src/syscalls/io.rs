@@ -15,9 +15,11 @@ pub static OPEN_FD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug)]
 pub struct FdEntry {
-    pub path: String,
+    pub vpath: crate::state::FixedString<1024>,
+    pub temp_path: crate::state::FixedString<1024>,
     pub is_vfs: bool,
     pub cached_stat: Option<libc::stat>,
+    pub mmap_count: usize,
 }
 
 // RFC-0051 / Pattern 2648: Using Mutex for FD_TABLE to avoid RwLock hazards during dyld bootstrap.
@@ -30,28 +32,34 @@ pub fn track_fd(fd: c_int, path: &str, is_vfs: bool, cached_stat: Option<libc::s
         return;
     }
 
-    // CRITICAL OPTIMIZATION: Fast-path bypass for non-VFS files
-    // The benchmark (fstat) tests non-VFS files, so we must avoid
-    // ALL overhead (allocation, atomic ops, RingBuffer push) for this case
-    if !is_vfs {
-        return; // <-- This single line eliminates 6% overhead!
-    }
+    let mut vpath_fs = crate::state::FixedString::<1024>::new();
+    vpath_fs.set(path);
 
     let entry = Box::into_raw(Box::new(FdEntry {
-        path: path.to_string(),
+        vpath: vpath_fs,
+        temp_path: crate::state::FixedString::new(),
         is_vfs,
         cached_stat,
+        mmap_count: 0,
     }));
 
-    // Safety: Reactor is guaranteed to be initialized after InceptionLayerState::init()
-    if let Some(reactor) = crate::sync::get_reactor() {
-        let old = reactor.fd_table.set(fd as u32, entry);
+    if let Some(state) = crate::state::InceptionLayerState::get() {
+        let old = state.open_fds.set(fd as u32, entry);
         if !old.is_null() {
             // Push old entry to RingBuffer for safe reclamation by Worker
-            let _ = reactor
-                .ring_buffer
-                .push(crate::sync::Task::ReclaimFd(fd as u32, old));
+            if let Some(reactor) = crate::sync::get_reactor() {
+                let _ = reactor
+                    .ring_buffer
+                    .push(crate::sync::Task::ReclaimFd(fd as u32, old));
+            } else {
+                unsafe { drop(Box::from_raw(old)) };
+            }
+        } else {
+            // New entry, increment count
+            OPEN_FD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+    } else {
+        unsafe { drop(Box::from_raw(entry)) };
     }
 }
 
@@ -61,12 +69,19 @@ pub fn untrack_fd(fd: c_int) {
     if fd < 0 {
         return;
     }
-    if let Some(reactor) = crate::sync::get_reactor() {
-        let old = reactor.fd_table.remove(fd as u32);
+    if let Some(state) = crate::state::InceptionLayerState::get() {
+        let old = state.open_fds.remove(fd as u32);
         if !old.is_null() {
-            let _ = reactor
-                .ring_buffer
-                .push(crate::sync::Task::ReclaimFd(fd as u32, old));
+            // Entry removed, decrement count
+            OPEN_FD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
+            if let Some(reactor) = crate::sync::get_reactor() {
+                let _ = reactor
+                    .ring_buffer
+                    .push(crate::sync::Task::ReclaimFd(fd as u32, old));
+            } else {
+                unsafe { drop(Box::from_raw(old)) };
+            }
         }
     }
 }
@@ -77,8 +92,8 @@ pub fn get_fd_entry(fd: c_int) -> Option<FdEntry> {
     if fd < 0 {
         return None;
     }
-    let reactor = crate::sync::get_reactor()?;
-    let entry_ptr = reactor.fd_table.get(fd as u32);
+    let state = crate::state::InceptionLayerState::get()?;
+    let entry_ptr = state.open_fds.get(fd as u32);
     if !entry_ptr.is_null() {
         // Safety: We assume the grace period in the RingBuffer is sufficient
         // to prevent UAF during this clone.
@@ -130,7 +145,7 @@ pub unsafe extern "C" fn dup_inception(oldfd: c_int) -> c_int {
     if newfd >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
-            track_fd(newfd, &entry.path, entry.is_vfs, entry.cached_stat);
+            track_fd(newfd, entry.vpath.as_str(), entry.is_vfs, entry.cached_stat);
         }
     }
     newfd
@@ -173,7 +188,12 @@ pub unsafe extern "C" fn dup2_inception(oldfd: c_int, newfd: c_int) -> c_int {
     if result >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
-            track_fd(result, &entry.path, entry.is_vfs, entry.cached_stat);
+            track_fd(
+                result,
+                entry.vpath.as_str(),
+                entry.is_vfs,
+                entry.cached_stat,
+            );
         }
     }
     result
@@ -293,8 +313,13 @@ pub unsafe extern "C" fn close_inception(fd: c_int) -> c_int {
 
     // Check if this FD is a COW session
     let cow_info = {
-        let mut fds = state.open_fds.lock();
-        fds.remove(&fd)
+        let entry_ptr = state.open_fds.remove(fd as u32);
+        if !entry_ptr.is_null() {
+            crate::syscalls::io::OPEN_FD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            unsafe { Some(*Box::from_raw(entry_ptr)) }
+        } else {
+            None
+        }
     };
 
     // Use a hash of the FD or 0 if not tracked for general close event
@@ -319,8 +344,8 @@ pub unsafe extern "C" fn close_inception(fd: c_int) -> c_int {
         // Offload reingest to Worker (non-blocking)
         if let Some(reactor) = crate::sync::get_reactor() {
             let _ = reactor.ring_buffer.push(crate::sync::Task::Reingest {
-                vpath: info.vpath.clone(),
-                temp_path: info.temp_path.clone(),
+                vpath: info.vpath.to_string(),
+                temp_path: info.temp_path.to_string(),
             });
 
             // M4: Clear dirty status after reingest is queued
