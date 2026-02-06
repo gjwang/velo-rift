@@ -890,7 +890,10 @@ fn cmd_resolve(cas_root: &Path, lockfile: &Path) -> Result<()> {
 }
 
 /// Ingest a directory into the CAS using zero-copy operations (RFC-0039)
+/// DEPRECATED: Use daemon::ingest_via_daemon instead. This function will be removed.
+#[deprecated(since = "0.1.0", note = "use daemon::ingest_via_daemon instead")]
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn cmd_ingest(
     cas_root: &Path,
     directory: &Path,
@@ -1744,12 +1747,9 @@ async fn cmd_watch(cas_root: &Path, directory: &Path, output: &Path) -> Result<(
     println!("Watching {} for changes...", directory.display());
     println!("Press Ctrl+C to stop.");
 
-    // Initial ingest
+    // Initial ingest via daemon
     println!("\n[Initial Scan]");
-    cmd_ingest(
-        cas_root, directory, output, None, true, None, "solid", "tier2", true, false,
-    )
-    .await?;
+    daemon::ingest_via_daemon(directory, output, cas_root, None, false, false).await?;
 
     // Create a channel to receive the events.
     let (tx, rx) = channel();
@@ -1781,9 +1781,8 @@ async fn cmd_watch(cas_root: &Path, directory: &Path, output: &Path) -> Result<(
                         // Simple debounce
                         if last_ingest.elapsed() > debounce_duration {
                             println!("\n[Change Detected] Re-ingesting...");
-                            if let Err(e) = cmd_ingest(
-                                cas_root, directory, output, None, true, None, "solid", "tier2",
-                                true, false,
+                            if let Err(e) = daemon::ingest_via_daemon(
+                                directory, output, cas_root, None, false, false,
                             )
                             .await
                             {
