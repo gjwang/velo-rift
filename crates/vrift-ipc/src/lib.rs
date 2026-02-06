@@ -1,3 +1,4 @@
+use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
 /// IPC Protocol Version - bump when making breaking changes
@@ -156,9 +157,9 @@ pub mod frame_sync {
     use super::*;
     use std::io::{Read, Write};
 
-    /// Send a request frame (header + bincode payload)
+    /// Send a request frame (header + rkyv payload)
     pub fn send_request<W: Write>(writer: &mut W, request: &VeloRequest) -> std::io::Result<u16> {
-        let payload = bincode::serialize(request)
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(request)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         if payload.len() > IpcHeader::MAX_LENGTH {
@@ -188,7 +189,7 @@ pub mod frame_sync {
         response: &VeloResponse,
         seq_id: u16,
     ) -> std::io::Result<()> {
-        let payload = bincode::serialize(response)
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(response)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         if payload.len() > IpcHeader::MAX_LENGTH {
@@ -234,8 +235,9 @@ pub mod frame_sync {
         let mut payload = vec![0u8; header.length as usize];
         reader.read_exact(&mut payload)?;
 
-        let request: VeloRequest = bincode::deserialize(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let request: VeloRequest =
+            rkyv::from_bytes::<VeloRequest, rkyv::rancor::Error>(&payload)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         Ok((header, request))
     }
@@ -247,8 +249,9 @@ pub mod frame_sync {
         let mut payload = vec![0u8; header.length as usize];
         reader.read_exact(&mut payload)?;
 
-        let response: VeloResponse = bincode::deserialize(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let response: VeloResponse =
+            rkyv::from_bytes::<VeloResponse, rkyv::rancor::Error>(&payload)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         Ok((header, response))
     }
@@ -276,12 +279,12 @@ pub mod frame_async {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// Send a request frame (header + bincode payload)
+    /// Send a request frame (header + rkyv payload)
     pub async fn send_request<W: AsyncWriteExt + Unpin>(
         writer: &mut W,
         request: &VeloRequest,
     ) -> std::io::Result<u16> {
-        let payload = bincode::serialize(request)
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(request)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         if payload.len() > IpcHeader::MAX_LENGTH {
@@ -311,7 +314,7 @@ pub mod frame_async {
         response: &VeloResponse,
         seq_id: u16,
     ) -> std::io::Result<()> {
-        let payload = bincode::serialize(response)
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(response)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         if payload.len() > IpcHeader::MAX_LENGTH {
@@ -361,8 +364,9 @@ pub mod frame_async {
         let mut payload = vec![0u8; header.length as usize];
         reader.read_exact(&mut payload).await?;
 
-        let request: VeloRequest = bincode::deserialize(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let request: VeloRequest =
+            rkyv::from_bytes::<VeloRequest, rkyv::rancor::Error>(&payload)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         Ok((header, request))
     }
@@ -376,8 +380,9 @@ pub mod frame_async {
         let mut payload = vec![0u8; header.length as usize];
         reader.read_exact(&mut payload).await?;
 
-        let response: VeloResponse = bincode::deserialize(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let response: VeloResponse =
+            rkyv::from_bytes::<VeloResponse, rkyv::rancor::Error>(&payload)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         Ok((header, response))
     }
@@ -450,7 +455,8 @@ pub mod frame_async {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
 pub enum VeloRequest {
     Handshake {
         client_version: String,
@@ -545,7 +551,8 @@ pub enum VeloRequest {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
@@ -578,7 +585,19 @@ impl VnodeEntry {
 // ============================================================================
 
 /// Error categories for IPC responses
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[rkyv(derive(Debug))]
 pub enum VeloErrorKind {
     /// Resource not found (file, entry, workspace)
     NotFound,
@@ -599,7 +618,8 @@ pub enum VeloErrorKind {
 }
 
 /// Structured error for IPC responses
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
 pub struct VeloError {
     /// Error category
     pub kind: VeloErrorKind,
@@ -703,7 +723,8 @@ impl std::fmt::Display for VeloError {
 
 impl std::error::Error for VeloError {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
 pub enum VeloResponse {
     HandshakeAck {
         server_version: String,
@@ -1260,8 +1281,9 @@ mod tests {
     #[test]
     fn test_request_serialization() {
         let req = VeloRequest::Status;
-        let bytes = bincode::serialize(&req).unwrap();
-        let decoded: VeloRequest = bincode::deserialize(&bytes).unwrap();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&req).unwrap();
+        let decoded: VeloRequest =
+            rkyv::from_bytes::<VeloRequest, rkyv::rancor::Error>(&bytes).unwrap();
         assert!(matches!(decoded, VeloRequest::Status));
     }
 
@@ -1270,8 +1292,9 @@ mod tests {
         let resp = VeloResponse::StatusAck {
             status: "OK".to_string(),
         };
-        let bytes = bincode::serialize(&resp).unwrap();
-        let decoded: VeloResponse = bincode::deserialize(&bytes).unwrap();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&resp).unwrap();
+        let decoded: VeloResponse =
+            rkyv::from_bytes::<VeloResponse, rkyv::rancor::Error>(&bytes).unwrap();
         assert!(matches!(decoded, VeloResponse::StatusAck { .. }));
     }
 

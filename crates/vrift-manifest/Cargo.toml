@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 blake3.workspace = true
 serde.workspace = true
+rkyv.workspace = true
 bincode.workspace = true
 thiserror.workspace = true
 vrift-cas.workspace = true

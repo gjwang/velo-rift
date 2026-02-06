@@ -13,7 +13,7 @@ cas = ["dep:vrift-cas"]
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-bincode = { workspace = true }
+rkyv = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util"], optional = true }
 vrift-manifest = { path = "../vrift-manifest", optional = true }
 vrift-cas = { path = "../vrift-cas", optional = true }

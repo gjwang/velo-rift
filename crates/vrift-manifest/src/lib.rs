@@ -21,8 +21,9 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::path::Path;
 
+use rkyv::Archive;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+use thiserror::Error; // Added for bincode::Error
 
 use vrift_cas::Blake3Hash;
 
@@ -42,7 +43,22 @@ pub enum ManifestError {
 pub type Result<T> = std::result::Result<T, ManifestError>;
 
 /// Flags for VnodeEnt#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Default,
+    Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[rkyv(compare(PartialEq), derive(Debug))]
 #[repr(u8)]
 pub enum VnodeFlags {
     /// Regular file
@@ -65,7 +81,10 @@ pub enum VnodeFlags {
 /// - mode: 4 bytes
 /// - flags: 2 bytes
 /// - _pad: 2 bytes
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+#[rkyv(derive(Debug))]
 pub struct VnodeEntry {
     /// BLAKE3 hash of the file content (stored in CAS)
     pub content_hash: Blake3Hash,
@@ -79,6 +98,7 @@ pub struct VnodeEntry {
     pub flags: u16,
     /// Padding for alignment
     #[serde(skip)]
+    #[rkyv(with = rkyv::with::Skip)]
     pub _pad: u16,
 }
 
