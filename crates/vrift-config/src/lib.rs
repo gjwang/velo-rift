@@ -9,6 +9,7 @@
 
 pub mod logging;
 pub mod path;
+pub mod testing;
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};

@@ -527,8 +527,13 @@ async fn handle_request(
 ) -> VeloResponse {
     tracing::debug!("Received request: {:?}", req);
     match req {
-        VeloRequest::Handshake { client_version: _ } => VeloResponse::HandshakeAck {
+        VeloRequest::Handshake {
+            client_version: _,
+            protocol_version,
+        } => VeloResponse::HandshakeAck {
             server_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: vrift_ipc::PROTOCOL_VERSION,
+            compatible: vrift_ipc::is_version_compatible(protocol_version),
         },
         VeloRequest::Status => {
             let count = state.cas_index.lock().unwrap().len();

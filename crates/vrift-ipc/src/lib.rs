@@ -1,9 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+/// IPC Protocol Version - bump when making breaking changes
+/// v1: Initial protocol with basic requests
+/// v2: Added IngestFullScan, RegisterWorkspace (current)
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Minimum protocol version this server supports
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum VeloRequest {
     Handshake {
         client_version: String,
+        /// Protocol version (v2+). Missing = v1
+        #[serde(default)]
+        protocol_version: u32,
     },
     Status,
     Spawn {
@@ -125,6 +136,12 @@ impl VnodeEntry {
 pub enum VeloResponse {
     HandshakeAck {
         server_version: String,
+        /// Server protocol version
+        #[serde(default)]
+        protocol_version: u32,
+        /// Whether client version is compatible
+        #[serde(default = "default_compatible")]
+        compatible: bool,
     },
     StatusAck {
         status: String,
@@ -172,6 +189,16 @@ pub enum VeloResponse {
         manifest_path: String,
     },
     Error(String),
+}
+
+/// Default value for compatible field (backwards compatibility)
+fn default_compatible() -> bool {
+    true
+}
+
+/// Check if a protocol version is compatible with this build
+pub fn is_version_compatible(client_version: u32) -> bool {
+    (MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&client_version)
 }
 
 pub fn default_socket_path() -> &'static str {
@@ -632,9 +659,19 @@ pub mod client {
         pub async fn handshake(&mut self) -> anyhow::Result<String> {
             let request = VeloRequest::Handshake {
                 client_version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_version: PROTOCOL_VERSION,
             };
             match self.send(request).await? {
-                VeloResponse::HandshakeAck { server_version } => Ok(server_version),
+                VeloResponse::HandshakeAck {
+                    server_version,
+                    compatible,
+                    ..
+                } => {
+                    if !compatible {
+                        anyhow::bail!("Protocol version mismatch");
+                    }
+                    Ok(server_version)
+                }
                 VeloResponse::Error(e) => anyhow::bail!("Handshake failed: {}", e),
                 _ => anyhow::bail!("Unexpected response"),
             }

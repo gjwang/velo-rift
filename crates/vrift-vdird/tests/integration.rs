@@ -68,11 +68,12 @@ async fn test_daemon_lifecycle_handshake() {
         &mut stream,
         &vrift_ipc::VeloRequest::Handshake {
             client_version: "1.0.0".to_string(),
+            protocol_version: vrift_ipc::PROTOCOL_VERSION,
         },
     );
 
     match response {
-        vrift_ipc::VeloResponse::HandshakeAck { server_version } => {
+        vrift_ipc::VeloResponse::HandshakeAck { server_version, .. } => {
             assert!(!server_version.is_empty());
         }
         _ => panic!("Expected HandshakeAck"),
@@ -196,6 +197,7 @@ async fn test_daemon_multiple_clients() {
             stream,
             &vrift_ipc::VeloRequest::Handshake {
                 client_version: "1.0.0".to_string(),
+                protocol_version: vrift_ipc::PROTOCOL_VERSION,
             },
         );
         assert!(matches!(

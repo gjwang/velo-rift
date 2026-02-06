@@ -7,7 +7,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
-use vrift_ipc::{VeloRequest, VeloResponse, VnodeEntry};
+use vrift_ipc::{VeloRequest, VeloResponse, VnodeEntry, PROTOCOL_VERSION};
 
 /// Command handler for vdir_d
 pub struct CommandHandler {
@@ -23,10 +23,15 @@ impl CommandHandler {
     /// Handle incoming request
     pub async fn handle_request(&mut self, request: VeloRequest) -> VeloResponse {
         match request {
-            VeloRequest::Handshake { client_version } => {
-                info!(client_version = %client_version, "Handshake");
+            VeloRequest::Handshake {
+                client_version,
+                protocol_version,
+            } => {
+                info!(client_version = %client_version, protocol_version, "Handshake");
                 VeloResponse::HandshakeAck {
                     server_version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: PROTOCOL_VERSION,
+                    compatible: vrift_ipc::is_version_compatible(protocol_version),
                 }
             }
 
@@ -392,12 +397,18 @@ mod tests {
         let response = handler
             .handle_request(VeloRequest::Handshake {
                 client_version: "1.0.0".to_string(),
+                protocol_version: PROTOCOL_VERSION,
             })
             .await;
 
         match response {
-            VeloResponse::HandshakeAck { server_version } => {
+            VeloResponse::HandshakeAck {
+                server_version,
+                compatible,
+                ..
+            } => {
                 assert!(!server_version.is_empty());
+                assert!(compatible);
             }
             _ => panic!("Expected HandshakeAck"),
         }

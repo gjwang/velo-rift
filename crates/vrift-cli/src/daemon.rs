@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use vrift_config::path::{normalize_nonexistent, normalize_or_original};
-use vrift_ipc::{VeloRequest, VeloResponse};
+use vrift_ipc::{VeloRequest, VeloResponse, PROTOCOL_VERSION};
 
 const SOCKET_PATH: &str = "/tmp/vrift.sock";
 
@@ -131,6 +131,7 @@ pub async fn connect_to_daemon(project_root: &Path) -> Result<UnixStream> {
     // 1. Handshake
     let handshake = VeloRequest::Handshake {
         client_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: PROTOCOL_VERSION,
     };
     send_request(&mut stream, handshake).await?;
     let _ = read_response(&mut stream).await?;
@@ -173,6 +174,7 @@ async fn connect_simple() -> Result<UnixStream> {
     // Only handshake - no workspace registration
     let handshake = VeloRequest::Handshake {
         client_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: PROTOCOL_VERSION,
     };
     send_request(&mut stream, handshake).await?;
     let resp = read_response(&mut stream).await?;
