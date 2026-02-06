@@ -395,7 +395,7 @@ unsafe fn send_request_on_fd(fd: libc::c_int, request: &vrift_ipc::VeloRequest) 
     }
 
     let seq_id = next_seq_id();
-    let header = IpcHeader::new_request(payload.len() as u16, seq_id);
+    let header = IpcHeader::new_request(payload.len() as u32, seq_id);
 
     raw_write_all(fd, &header.to_bytes()) && raw_write_all(fd, &payload)
 }

@@ -14,7 +14,7 @@ set -e
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VRIFT_BIN="$PROJECT_ROOT/target/release/vrift"
-INCEPTION_LIB="$PROJECT_ROOT/target/release/libvrift_inception.dylib"
+INCEPTION_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
 MINI_READ="$PROJECT_ROOT/tests/qa_v2/mini_read"
 
 # Setup work dir (ignore errors from VFS-protected files in previous run)

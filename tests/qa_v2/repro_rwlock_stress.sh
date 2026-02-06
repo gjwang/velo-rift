@@ -11,7 +11,7 @@
 set -e
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
+SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
 VRIFT_BIN="$PROJECT_ROOT/target/release/vrift"
 REPRO_SRC="$PROJECT_ROOT/tests/qa_v2/repro_rwlock_stress.c"
 REPRO_BIN="$PROJECT_ROOT/tests/qa_v2/repro_rwlock_stress"

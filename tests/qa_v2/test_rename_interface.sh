@@ -11,8 +11,8 @@
 set -e
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VRIFT_BIN="$PROJECT_ROOT/target/release/vrift"
-SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
-[ ! -f "$SHIM_LIB" ] && SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.so"
+SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
+[ ! -f "$SHIM_LIB" ] && SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.so"
 
 WORK_DIR="/tmp/vrift_rename_interface"
 rm -rf "$WORK_DIR"

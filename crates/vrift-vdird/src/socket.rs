@@ -140,7 +140,7 @@ async fn handle_client(mut stream: UnixStream, handler: Arc<RwLock<CommandHandle
 async fn send_response(
     stream: &mut UnixStream,
     response: &VeloResponse,
-    seq_id: u16,
+    seq_id: u32,
 ) -> Result<()> {
     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(response)
         .map_err(|e| anyhow::anyhow!("Serialize error: {}", e))?;
@@ -152,7 +152,7 @@ async fn send_response(
         ));
     }
 
-    let header = IpcHeader::new_response(payload.len() as u16, seq_id);
+    let header = IpcHeader::new_response(payload.len() as u32, seq_id);
 
     stream.write_all(&header.to_bytes()).await?;
     stream.write_all(&payload).await?;

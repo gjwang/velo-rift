@@ -18,6 +18,7 @@
 # ==============================================================================
 
 set -euo pipefail
+export RUST_BACKTRACE=1
 
 # ============================================================================
 # Configuration
@@ -27,7 +28,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 VRIFT_CLI="$PROJECT_ROOT/target/release/vrift"
 VRIFTD_BIN="$PROJECT_ROOT/target/release/vriftd"
-SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
+SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
 
 TEST_WORKSPACE="/tmp/vdir_cargo_test_$$"
 VR_THE_SOURCE="$TEST_WORKSPACE/.cas"
@@ -379,8 +380,14 @@ static VALUE: Lazy<i32> = Lazy::new(|| 42);
 pub fn get_value() -> i32 { *VALUE }
 EOF
 
+    cat > src/main.rs << 'EOF'
+fn main() {
+    println!("Value: {}", vdir_test::get_value());
+}
+EOF
+
     log_test "R4.1" "Dependency downloaded to ~/.cargo/registry"
-    cargo build 2>/dev/null
+    cargo build
     
     if ls ~/.cargo/registry/cache/*/once_cell* 2>/dev/null | head -1; then
         log_pass "Dependency cached in ~/.cargo/registry"

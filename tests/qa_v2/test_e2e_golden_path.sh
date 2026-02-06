@@ -19,10 +19,10 @@ CAS_ROOT="$VFS_PREFIX/cas"
 # Platform detection
 OS=$(uname -s)
 if [ "$OS" == "Darwin" ]; then
-    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
+    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
     VFS_ENV_BASE="DYLD_INSERT_LIBRARIES=$SHIM_LIB DYLD_FORCE_FLAT_NAMESPACE=1"
 else
-    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.so"
+    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.so"
     VFS_ENV_BASE="LD_PRELOAD=$SHIM_LIB"
 fi
 

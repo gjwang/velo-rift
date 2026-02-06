@@ -221,7 +221,7 @@ fn spawn_daemon() -> Result<()> {
     Ok(())
 }
 
-pub async fn send_request(stream: &mut UnixStream, req: VeloRequest) -> Result<u16> {
+pub async fn send_request(stream: &mut UnixStream, req: VeloRequest) -> Result<u32> {
     tracing::debug!("Sending request: {:?}", req);
     let seq_id = vrift_ipc::frame_async::send_request(stream, &req).await?;
     Ok(seq_id)

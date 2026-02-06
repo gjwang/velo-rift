@@ -104,13 +104,13 @@ echo "Step 2: Testing WITH shim (Simulating CoW)..."
 
 # Find the shim (use same BUILD_DIR as binaries)
 if [[ "$OS_TYPE" == "Darwin" ]]; then
-    SHIM_BIN=$(find "$PROJECT_ROOT/target/$BUILD_DIR" -name "libvrift_shim.dylib" | head -n 1)
+    SHIM_BIN=$(find "$PROJECT_ROOT/target/$BUILD_DIR" -name "libvrift_inception_layer.dylib" | head -n 1)
 else
-    SHIM_BIN=$(find "$PROJECT_ROOT/target/$BUILD_DIR" -name "libvrift_shim.so" | head -n 1)
+    SHIM_BIN=$(find "$PROJECT_ROOT/target/$BUILD_DIR" -name "libvrift_inception_layer.so" | head -n 1)
 fi
 
 if [[ -z "$SHIM_BIN" ]]; then
-    echo "ERROR: libvrift_shim not found."
+    echo "ERROR: libvrift_inception_layer not found."
     exit 1
 fi
 

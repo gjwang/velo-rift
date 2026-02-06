@@ -12,7 +12,7 @@ set -euo pipefail
 # ============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SHIM_LIB="$PROJECT_ROOT/target/debug/libvrift_shim.dylib"
+SHIM_LIB="$PROJECT_ROOT/target/debug/libvrift_inception_layer.dylib"
 VRIFT_CLI="$PROJECT_ROOT/target/debug/vrift"
 
 VFS_DIR="/tmp/test_live_ingest_$$"

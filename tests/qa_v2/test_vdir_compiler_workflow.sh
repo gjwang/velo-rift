@@ -25,10 +25,10 @@ SAMPLE_PROJECT="$SCRIPT_DIR/lib/sample_project"
 # Use release binaries if available, otherwise debug
 if [ -f "$PROJECT_ROOT/target/release/vrift" ]; then
     VRIFT_CLI="$PROJECT_ROOT/target/release/vrift"
-    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
+    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
 else
     VRIFT_CLI="$PROJECT_ROOT/target/debug/vrift"
-    SHIM_LIB="$PROJECT_ROOT/target/debug/libvrift_shim.dylib"
+    SHIM_LIB="$PROJECT_ROOT/target/debug/libvrift_inception_layer.dylib"
 fi
 
 TEST_WORKSPACE="/tmp/vdir_compiler_test_$$"

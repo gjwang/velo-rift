@@ -27,8 +27,8 @@ fi
 
 # Run test with shim injected
 echo "Running ABI hazard test with shim..."
-DYLD_INSERT_LIBRARIES="$PROJECT_ROOT/target/release/libvrift_shim.dylib" \
-LD_PRELOAD="$PROJECT_ROOT/target/release/libvrift_shim.so" \
+DYLD_INSERT_LIBRARIES="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib" \
+LD_PRELOAD="$PROJECT_ROOT/target/release/libvrift_inception_layer.so" \
 "$TEST_BIN"
 
 echo "✅ ABI Hazard Test Passed"

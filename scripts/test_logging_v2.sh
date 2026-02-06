@@ -16,7 +16,7 @@ else
     EXT="so"
 fi
 
-SHIM_PATH="$PROJECT_ROOT/target/$TARGET_DIR/libvrift_shim.$EXT"
+SHIM_PATH="$PROJECT_ROOT/target/$TARGET_DIR/libvrift_inception_layer.$EXT"
 
 # Ensure work dir exists
 mkdir -p test_logging_work

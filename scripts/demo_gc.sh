@@ -164,7 +164,7 @@ print_step "3" "GC Status (all healthy, 2 active manifests)"
 print_step "4" "Delete proj1 metadata + manifest (simulate project deletion)"
 
 rm -rf "$DEMO_DIR/proj1/node_modules/.vrift"
-rm -f "$DEMO_DIR/proj1.manifest"
+rm -rf "$DEMO_DIR/proj1.manifest"
 print_success "Deleted proj1 project manifest metadata"
 echo ""
 
@@ -215,7 +215,7 @@ echo -e "${CYAN}  ════════════════════�
 echo ""
 
 # Check if 100% dedup (meaning all blobs already exist)
-if echo "$OUTPUT" | grep -q "100.0% DEDUP"; then
+if echo "$OUTPUT" | grep -iq "100.0% DEDUP"; then
     print_success "ALL BLOBS INTACT - 100% DEDUP on re-ingest!"
     echo ""
     echo -e "     ${GREEN}✓ GC only deleted orphans from proj1${NC}"

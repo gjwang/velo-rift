@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// v1: Initial protocol with basic requests
 /// v2: Added IngestFullScan, RegisterWorkspace (current)
 /// v3: New wire format with IpcHeader (magic + request ID)
-pub const PROTOCOL_VERSION: u32 = 3;
+/// v4: Payload length and SeqID upgraded to u32
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Minimum protocol version this server supports
 pub const MIN_PROTOCOL_VERSION: u32 = 1;
@@ -61,21 +62,21 @@ pub struct IpcHeader {
     pub type_ver: u8,
     /// Flags (reserved for future use)
     pub flags: u8,
-    /// Payload length in bytes (max 65535)
-    pub length: u16,
+    /// Payload length in bytes (max u32::MAX)
+    pub length: u32,
     /// Sequence ID for tracing and request-response matching
-    pub seq_id: u16,
+    pub seq_id: u32,
 }
 
 impl IpcHeader {
     /// Size of the header in bytes
-    pub const SIZE: usize = 8;
+    pub const SIZE: usize = 12;
 
-    /// Maximum payload length (64KB - 1)
-    pub const MAX_LENGTH: usize = 65535;
+    /// Maximum payload length (32MB safety limit)
+    pub const MAX_LENGTH: usize = 32 * 1024 * 1024;
 
     /// Create a new header with specified frame type
-    pub fn new(frame_type: FrameType, length: u16, seq_id: u16) -> Self {
+    pub fn new(frame_type: FrameType, length: u32, seq_id: u32) -> Self {
         Self {
             magic: IPC_MAGIC,
             type_ver: ((frame_type as u8) << 4) | (PROTOCOL_VERSION as u8 & 0x0F),
@@ -86,17 +87,17 @@ impl IpcHeader {
     }
 
     /// Create a new request header
-    pub fn new_request(length: u16, seq_id: u16) -> Self {
+    pub fn new_request(length: u32, seq_id: u32) -> Self {
         Self::new(FrameType::Request, length, seq_id)
     }
 
     /// Create a new response header
-    pub fn new_response(length: u16, seq_id: u16) -> Self {
+    pub fn new_response(length: u32, seq_id: u32) -> Self {
         Self::new(FrameType::Response, length, seq_id)
     }
 
     /// Create a heartbeat header
-    pub fn new_heartbeat(seq_id: u16) -> Self {
+    pub fn new_heartbeat(seq_id: u32) -> Self {
         Self::new(FrameType::Heartbeat, 0, seq_id)
     }
 
@@ -123,8 +124,8 @@ impl IpcHeader {
         bytes[0..2].copy_from_slice(&self.magic);
         bytes[2] = self.type_ver;
         bytes[3] = self.flags;
-        bytes[4..6].copy_from_slice(&self.length.to_le_bytes());
-        bytes[6..8].copy_from_slice(&self.seq_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.length.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.seq_id.to_le_bytes());
         bytes
     }
 
@@ -134,8 +135,8 @@ impl IpcHeader {
             magic: [bytes[0], bytes[1]],
             type_ver: bytes[2],
             flags: bytes[3],
-            length: u16::from_le_bytes([bytes[4], bytes[5]]),
-            seq_id: u16::from_le_bytes([bytes[6], bytes[7]]),
+            length: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            seq_id: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
         }
     }
 }
@@ -144,13 +145,13 @@ impl IpcHeader {
 // Frame IO Helpers (v3+ wire format)
 // ============================================================================
 
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Global sequence ID counter for request tracing
-static NEXT_SEQ_ID: AtomicU16 = AtomicU16::new(1);
+static NEXT_SEQ_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Get next sequence ID (thread-safe, wraps at 65535)
-pub fn next_seq_id() -> u16 {
+/// Get next sequence ID (thread-safe, wraps at u32::MAX)
+pub fn next_seq_id() -> u32 {
     NEXT_SEQ_ID.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -160,7 +161,7 @@ pub mod frame_sync {
     use std::io::{Read, Write};
 
     /// Send a request frame (header + rkyv payload)
-    pub fn send_request<W: Write>(writer: &mut W, request: &VeloRequest) -> std::io::Result<u16> {
+    pub fn send_request<W: Write>(writer: &mut W, request: &VeloRequest) -> std::io::Result<u32> {
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(request)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
@@ -176,7 +177,7 @@ pub mod frame_sync {
         }
 
         let seq_id = next_seq_id();
-        let header = IpcHeader::new_request(payload.len() as u16, seq_id);
+        let header = IpcHeader::new_request(payload.len() as u32, seq_id);
 
         writer.write_all(&header.to_bytes())?;
         writer.write_all(&payload)?;
@@ -189,7 +190,7 @@ pub mod frame_sync {
     pub fn send_response<W: Write>(
         writer: &mut W,
         response: &VeloResponse,
-        seq_id: u16,
+        seq_id: u32,
     ) -> std::io::Result<()> {
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(response)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -205,7 +206,7 @@ pub mod frame_sync {
             ));
         }
 
-        let header = IpcHeader::new_response(payload.len() as u16, seq_id);
+        let header = IpcHeader::new_response(payload.len() as u32, seq_id);
 
         writer.write_all(&header.to_bytes())?;
         writer.write_all(&payload)?;
@@ -305,7 +306,7 @@ pub mod frame_sync {
     }
 
     /// Send a heartbeat frame (zero-length payload)
-    pub fn send_heartbeat<W: Write>(writer: &mut W) -> std::io::Result<u16> {
+    pub fn send_heartbeat<W: Write>(writer: &mut W) -> std::io::Result<u32> {
         let seq_id = next_seq_id();
         let header = IpcHeader::new(FrameType::Heartbeat, 0, seq_id);
 
@@ -331,7 +332,7 @@ pub mod frame_async {
     pub async fn send_request<W: AsyncWriteExt + Unpin>(
         writer: &mut W,
         request: &VeloRequest,
-    ) -> std::io::Result<u16> {
+    ) -> std::io::Result<u32> {
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(request)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
@@ -347,7 +348,7 @@ pub mod frame_async {
         }
 
         let seq_id = next_seq_id();
-        let header = IpcHeader::new_request(payload.len() as u16, seq_id);
+        let header = IpcHeader::new_request(payload.len() as u32, seq_id);
 
         writer.write_all(&header.to_bytes()).await?;
         writer.write_all(&payload).await?;
@@ -360,7 +361,7 @@ pub mod frame_async {
     pub async fn send_response<W: AsyncWriteExt + Unpin>(
         writer: &mut W,
         response: &VeloResponse,
-        seq_id: u16,
+        seq_id: u32,
     ) -> std::io::Result<()> {
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(response)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -376,7 +377,7 @@ pub mod frame_async {
             ));
         }
 
-        let header = IpcHeader::new_response(payload.len() as u16, seq_id);
+        let header = IpcHeader::new_response(payload.len() as u32, seq_id);
 
         writer.write_all(&header.to_bytes()).await?;
         writer.write_all(&payload).await?;
@@ -496,7 +497,7 @@ pub mod frame_async {
         writer: &mut W,
         request: &VeloRequest,
         timeout: std::time::Duration,
-    ) -> std::io::Result<u16> {
+    ) -> std::io::Result<u32> {
         tokio::time::timeout(timeout, send_request(writer, request))
             .await
             .map_err(|_| {
@@ -533,7 +534,7 @@ pub mod frame_async {
     // ========================================================================
 
     /// Send a heartbeat frame (zero-length payload)
-    pub async fn send_heartbeat<W: AsyncWriteExt + Unpin>(writer: &mut W) -> std::io::Result<u16> {
+    pub async fn send_heartbeat<W: AsyncWriteExt + Unpin>(writer: &mut W) -> std::io::Result<u32> {
         let seq_id = next_seq_id();
         let header = IpcHeader::new(FrameType::Heartbeat, 0, seq_id);
 
@@ -1409,9 +1410,9 @@ mod tests {
 
     #[test]
     fn test_ipc_header_size() {
-        // Verify header is exactly 8 bytes
-        assert_eq!(IpcHeader::SIZE, 8);
-        assert_eq!(std::mem::size_of::<IpcHeader>(), 8);
+        // Verify header is exactly 12 bytes
+        assert_eq!(IpcHeader::SIZE, 12);
+        assert_eq!(std::mem::size_of::<IpcHeader>(), 12);
     }
 
     #[test]

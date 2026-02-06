@@ -1594,7 +1594,7 @@ impl InceptionLayerState {
 
             // Send request frame
             let seq_id = next_seq_id();
-            let header = IpcHeader::new_request(payload.len() as u16, seq_id);
+            let header = IpcHeader::new_request(payload.len() as u32, seq_id);
             if !raw_write_all(fd, &header.to_bytes()) || !raw_write_all(fd, &payload) {
                 libc::close(fd);
                 return None;

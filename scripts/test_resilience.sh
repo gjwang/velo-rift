@@ -9,7 +9,7 @@ else
     TARGET_DIR="debug"
 fi
 
-SHIM_BIN="$PROJECT_ROOT/target/$TARGET_DIR/libvrift_shim.dylib"
+SHIM_BIN="$PROJECT_ROOT/target/$TARGET_DIR/libvrift_inception_layer.dylib"
 VRIFTD_BIN="$PROJECT_ROOT/target/$TARGET_DIR/vriftd"
 TEST_DIR="$PROJECT_ROOT/test_resilience_work"
 

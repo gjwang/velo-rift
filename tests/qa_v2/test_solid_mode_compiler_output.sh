@@ -11,7 +11,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SHIM_PATH="$PROJECT_ROOT/target/debug/libvrift_shim.dylib"
+SHIM_PATH="$PROJECT_ROOT/target/debug/libvrift_inception_layer.dylib"
 
 # Setup test environment
 VFS_DIR="${VRIFT_VFS_PREFIX:-/tmp/test_compiler_output_vfs}"

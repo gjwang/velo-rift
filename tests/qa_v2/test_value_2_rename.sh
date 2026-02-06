@@ -27,13 +27,13 @@ run_with_timeout() {
 # Platform detection
 OS=$(uname -s)
 if [ "$OS" == "Darwin" ]; then
-    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
+    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
     VFS_ENV="DYLD_INSERT_LIBRARIES=$SHIM_LIB DYLD_FORCE_FLAT_NAMESPACE=1"
     BIN_MV="/bin/mv"
     BIN_LN="/bin/ln"
     BIN_SHASUM="/usr/bin/shasum"
 else
-    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.so"
+    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.so"
     VFS_ENV="LD_PRELOAD=$SHIM_LIB"
     BIN_MV="/bin/mv"
     BIN_LN="/bin/ln"
@@ -249,7 +249,7 @@ fi
 # 3. Outbound Move (Cross-Domain Out)
 echo -e "\n${BLUE}🧪 Test 3: Outbound Move (VFS -> External)${NC}"
 echo "   Action: mv ./renamed.bin ../external/outbound.bin"
-run_with_timeout $TIMEOUT_SEC env $FULL_VFS_ENV "$MY_MV" "$WORK_DIR/project/renamed.bin" "$WORK_DIR/external/outbound.bin" 2>/dev/null
+run_with_timeout $TIMEOUT_SEC env $FULL_VFS_ENV VRIFT_DEBUG=1 "$MY_MV" "$WORK_DIR/project/renamed.bin" "$WORK_DIR/external/outbound.bin"
 RET=$?
 if [ $RET -ne 0 ]; then
     if [ $RET -eq 142 ]; then

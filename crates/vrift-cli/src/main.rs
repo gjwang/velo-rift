@@ -441,6 +441,31 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
                     println!("   📊 {:.1}% dedup", dedup_ratio);
                     println!("   ⚡ {:.0} files/sec", files_per_sec);
                     println!("   📄 Manifest: {}", result.manifest_path);
+
+                    // RFC-0041: Explicitly register the manifest after ingest for GC tracking
+                    // We attempt to acquire lock but don't block indefinitely on failures
+                    match crate::registry::ManifestRegistry::load_or_create() {
+                        Ok(mut registry) => {
+                            // Try to lock registry
+                            let _lock = crate::registry::ManifestRegistry::acquire_lock().ok();
+                            
+                            match registry.register_manifest(
+                                std::path::Path::new(&result.manifest_path),
+                                &directory
+                            ) {
+                                Ok(_) => {
+                                    if let Err(e) = registry.save() {
+                                        tracing::warn!("Failed to save manifest registry: {}", e);
+                                    } else {
+                                        tracing::info!("Registered manifest for GC tracking");
+                                    }
+                                }
+                                Err(e) => tracing::warn!("Failed to register manifest: {}", e),
+                            }
+                        }
+                        Err(e) => tracing::warn!("Failed to load manifest registry: {}", e),
+                    }
+                    
                     Ok(())
                 }
                 Err(e) => Err(e),

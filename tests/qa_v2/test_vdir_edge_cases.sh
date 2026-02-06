@@ -21,7 +21,7 @@ SAMPLE_PROJECT="$SCRIPT_DIR/lib/sample_project"
 
 VRIFT_CLI="$PROJECT_ROOT/target/release/vrift"
 VRIFTD_BIN="$PROJECT_ROOT/target/release/vriftd"
-SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_shim.dylib"
+SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
 
 TEST_WORKSPACE="/tmp/vdir_edge_test_$$"
 VR_THE_SOURCE="$TEST_WORKSPACE/.cas"

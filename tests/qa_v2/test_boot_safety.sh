@@ -12,7 +12,7 @@ WORK_DIR=$(cd "$WORK_DIR" && pwd)
 echo "📂 Work Directory: $WORK_DIR"
 
 # Paths
-SHIM_LIB="$(pwd)/target/release/libvrift_shim.dylib"
+SHIM_LIB="$(pwd)/target/release/libvrift_inception_layer.dylib"
 
 if [ ! -f "$SHIM_LIB" ]; then
     echo "❌ Error: Shim not found at $SHIM_LIB. Build it first with 'cargo build --release'."
