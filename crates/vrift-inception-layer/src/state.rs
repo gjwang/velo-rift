@@ -1015,7 +1015,21 @@ impl InceptionLayerState {
         // RFC-0050: VR_THE_SOURCE is the canonical env var (VRIFT_CAS_ROOT is deprecated)
         let cas_ptr = unsafe { libc::getenv(c"VR_THE_SOURCE".as_ptr()) };
         let cas_root: std::borrow::Cow<'static, str> = if cas_ptr.is_null() {
-            std::borrow::Cow::Borrowed(vrift_ipc::DEFAULT_CAS_ROOT)
+            // Phase 4.2: Manual tilde expansion for DEFAULT_CAS_ROOT (~/.vrift/the_source)
+            let default = vrift_ipc::DEFAULT_CAS_ROOT;
+            if default.starts_with("~/") {
+                let home_ptr = unsafe { libc::getenv(c"HOME".as_ptr()) };
+                if !home_ptr.is_null() {
+                    let home = unsafe { CStr::from_ptr(home_ptr).to_string_lossy() };
+                    // Replace first char '~' with home dir
+                    std::borrow::Cow::Owned(format!("{}{}", home, &default[1..]))
+                } else {
+                    // Fallback if HOME not set (unlikely)
+                    std::borrow::Cow::Borrowed(default)
+                }
+            } else {
+                std::borrow::Cow::Borrowed(default)
+            }
         } else {
             // Environment var found - must allocate (rare case, malloc should be ready by now)
             std::borrow::Cow::Owned(unsafe {
