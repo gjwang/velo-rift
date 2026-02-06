@@ -460,7 +460,19 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) {
     tracing::info!("[DAEMON] New connection accepted");
     let peer_creds = PeerCredentials::from_stream(&stream);
     let daemon_uid = unsafe { libc::getuid() };
-    let mut current_workspace: Option<Arc<WorkspaceState>> = None;
+    let mut current_workspace: Option<Arc<WorkspaceState>> =
+        if let Ok(mpath) = std::env::var("VRIFT_MANIFEST") {
+            let mpath = PathBuf::from(mpath);
+            let p = mpath.parent().unwrap_or(Path::new("/"));
+            let root = if p.ends_with(".vrift") {
+                p.parent().unwrap_or(p).to_path_buf()
+            } else {
+                p.to_path_buf()
+            };
+            get_or_create_workspace(&state, root).await.ok()
+        } else {
+            None
+        };
 
     loop {
         tracing::debug!("[DAEMON] Waiting for request...");

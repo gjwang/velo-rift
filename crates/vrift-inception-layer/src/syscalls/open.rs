@@ -183,6 +183,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             // Allocate entry manually for lock-free insertion
             let entry = Box::into_raw(Box::new(crate::syscalls::io::FdEntry {
                 vpath: vpath.absolute,
+                manifest_key: vpath.manifest_key,
                 temp_path,
                 is_vfs: true,
                 cached_stat: None,

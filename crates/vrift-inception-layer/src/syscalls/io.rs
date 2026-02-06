@@ -16,6 +16,7 @@ pub static OPEN_FD_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Debug)]
 pub struct FdEntry {
     pub vpath: crate::state::FixedString<1024>,
+    pub manifest_key: crate::state::FixedString<1024>,
     pub temp_path: crate::state::FixedString<1024>,
     pub is_vfs: bool,
     pub cached_stat: Option<libc::stat>,
@@ -37,6 +38,7 @@ pub fn track_fd(fd: c_int, path: &str, is_vfs: bool, cached_stat: Option<libc::s
 
     let entry = Box::into_raw(Box::new(FdEntry {
         vpath: vpath_fs,
+        manifest_key: vpath_fs, // For now assume path is the manifest key if not otherwise specified
         temp_path: crate::state::FixedString::new(),
         is_vfs,
         cached_stat,
@@ -347,10 +349,6 @@ pub unsafe extern "C" fn close_inception(fd: c_int) -> c_int {
                 vpath: info.vpath.to_string(),
                 temp_path: info.temp_path.to_string(),
             });
-
-            // M4: Clear dirty status after reingest is queued
-            // Note: actual commit happens async, but dirty is cleared to resume reads from manifest
-            crate::state::DIRTY_TRACKER.clear_dirty(&info.vpath);
         }
 
         res

@@ -1353,15 +1353,18 @@ impl InceptionLayerState {
                 }
             }
             crate::sync::Task::Reingest { vpath, temp_path } => {
-                // ...
                 if let Some(state) = InceptionLayerState::get_no_spawn() {
                     // Use no_spawn to avoid recursion if we want
                     unsafe {
-                        crate::ipc::sync_ipc_manifest_reingest(
+                        if crate::ipc::sync_ipc_manifest_reingest(
                             &state.socket_path,
                             &vpath,
                             &temp_path,
-                        );
+                        ) {
+                            // M4: Clear dirty status ONLY after the daemon confirms reingest.
+                            // This ensures subsequent reads see the updated manifest data.
+                            DIRTY_TRACKER.clear_dirty(&vpath);
+                        }
                     }
                 }
             }

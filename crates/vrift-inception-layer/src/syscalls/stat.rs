@@ -69,28 +69,55 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
         );
     }
 
-    // Try Hot Stat Cache (O(1) mmap lookup)
-    if let Some(entry) = mmap_lookup(state.mmap_ptr, state.mmap_size, manifest_path) {
-        if count < 3 {
-            eprintln!("[DEBUG] mmap HIT for '{}'", manifest_path);
+    // M4: Dirty Check - if file is being written to, bypass mmap cache
+    if DIRTY_TRACKER.is_dirty(manifest_path) {
+        // Try to find live metadata from open FDs
+        if let Some(temp_path) = find_live_temp_path(manifest_path) {
+            let temp_path_cstr = match std::ffi::CString::new(temp_path.as_str()) {
+                Ok(c) => c,
+                Err(_) => return None,
+            };
+            #[cfg(target_os = "macos")]
+            let res = unsafe { crate::syscalls::macos_raw::raw_stat(temp_path_cstr.as_ptr(), buf) };
+            #[cfg(target_os = "linux")]
+            let res = unsafe { crate::syscalls::linux_raw::raw_stat(temp_path_cstr.as_ptr(), buf) };
+
+            if res == 0 {
+                // Virtualize the dev/ino to match VFS expectations
+                unsafe {
+                    (*buf).st_dev = 0x52494654; // "RIFT"
+                    (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str) as _;
+                }
+                inception_record!(EventType::StatHit, vrift_ipc::fnv1a_hash(path_str), 0);
+                return Some(0);
+            }
         }
-        std::ptr::write_bytes(buf, 0, 1);
-        (*buf).st_size = entry.size as _;
-        #[cfg(target_os = "macos")]
-        {
-            (*buf).st_mode = entry.mode as u16;
-            (*buf).st_mtime = entry.mtime as _;
+        // If not found in open FDs (e.g. closed but not reingested), fall back to IPC
+        // but SKIP mmap cache.
+    } else {
+        // Try Hot Stat Cache (O(1) mmap lookup)
+        if let Some(entry) = mmap_lookup(state.mmap_ptr, state.mmap_size, manifest_path) {
+            if count < 3 {
+                eprintln!("[DEBUG] mmap HIT for '{}'", manifest_path);
+            }
+            std::ptr::write_bytes(buf, 0, 1);
+            (*buf).st_size = entry.size as _;
+            #[cfg(target_os = "macos")]
+            {
+                (*buf).st_mode = entry.mode as u16;
+                (*buf).st_mtime = entry.mtime as _;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                (*buf).st_mode = entry.mode as _;
+                (*buf).st_mtime = entry.mtime as _;
+            }
+            (*buf).st_dev = 0x52494654; // "RIFT"
+            (*buf).st_nlink = 1;
+            (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str) as _;
+            inception_record!(EventType::StatHit, vrift_ipc::fnv1a_hash(path_str), 0);
+            return Some(0);
         }
-        #[cfg(target_os = "linux")]
-        {
-            (*buf).st_mode = entry.mode as _;
-            (*buf).st_mtime = entry.mtime as _;
-        }
-        (*buf).st_dev = 0x52494654; // "RIFT"
-        (*buf).st_nlink = 1;
-        (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str) as _;
-        inception_record!(EventType::StatHit, vrift_ipc::fnv1a_hash(path_str), 0);
-        return Some(0);
     }
 
     if count < 3 {
@@ -199,6 +226,25 @@ pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_in
         let entry_ptr = state.open_fds.get(fd as u32);
         if !entry_ptr.is_null() {
             let entry = &*entry_ptr;
+
+            // M4: If this is a COW file with a temp_path, return live metadata from temp file
+            if !entry.temp_path.is_empty() {
+                let temp_path_cstr = match std::ffi::CString::new(entry.temp_path.as_str()) {
+                    Ok(c) => c,
+                    Err(_) => return -1,
+                };
+                #[cfg(target_os = "macos")]
+                let res = crate::syscalls::macos_raw::raw_stat(temp_path_cstr.as_ptr(), buf);
+                #[cfg(target_os = "linux")]
+                let res = crate::syscalls::linux_raw::raw_stat(temp_path_cstr.as_ptr(), buf);
+
+                if res == 0 {
+                    // Virtualize the dev/ino to match VFS expectations
+                    (*buf).st_dev = 0x52494654;
+                    (*buf).st_ino = vrift_ipc::fnv1a_hash(entry.vpath.as_str()) as _;
+                    return 0;
+                }
+            }
 
             // If we have a cached stat (standard case for VFS files)
             if let Some(ref cached) = entry.cached_stat {
@@ -448,4 +494,16 @@ pub unsafe extern "C" fn statx_inception(
     }
 
     crate::syscalls::linux_raw::raw_statx(dirfd, path, flags, mask, buf as *mut libc::c_void)
+}
+
+/// Helper: Find an open temp_path for a given manifest path.
+unsafe fn find_live_temp_path(manifest_path: &str) -> Option<crate::state::FixedString<1024>> {
+    let state = InceptionLayerState::get()?;
+    let mut result = None;
+    state.open_fds.for_each(|entry| {
+        if entry.manifest_key.as_str() == manifest_path && !entry.temp_path.is_empty() {
+            result = Some(entry.temp_path);
+        }
+    });
+    result
 }

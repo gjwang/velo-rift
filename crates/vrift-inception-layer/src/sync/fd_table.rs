@@ -97,6 +97,25 @@ impl FdTable {
     pub fn remove(&self, fd: u32) -> *mut FdEntry {
         self.set(fd, ptr::null_mut())
     }
+
+    /// Scan all entries in the table.
+    pub fn for_each<F>(&self, mut f: F)
+    where
+        F: FnMut(&FdEntry),
+    {
+        for i1 in 0..TIER1_SIZE {
+            let tier2_ptr = self.table[i1].load(Ordering::Relaxed);
+            if tier2_ptr.is_null() {
+                continue;
+            }
+            for i2 in 0..TIER2_SIZE {
+                let entry_ptr = unsafe { (&*tier2_ptr).entries[i2].load(Ordering::Relaxed) };
+                if !entry_ptr.is_null() {
+                    unsafe { f(&*entry_ptr) };
+                }
+            }
+        }
+    }
 }
 
 // Safety: FdTable handles its own synchronization via atomics.

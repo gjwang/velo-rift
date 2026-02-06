@@ -69,7 +69,11 @@ async fn handle_client(mut stream: UnixStream, handler: Arc<RwLock<CommandHandle
         let header = IpcHeader::from_bytes(&header_buf);
         if !header.is_valid() {
             if header.magic != vrift_ipc::IPC_MAGIC {
-                warn!("Invalid IPC magic, dropping client");
+                warn!(
+                    "Invalid IPC magic: {:02X?} (expected {:02X?}), dropping client",
+                    header.magic,
+                    vrift_ipc::IPC_MAGIC
+                );
             } else if header.version() != vrift_ipc::PROTOCOL_VERSION as u8 {
                 warn!(
                     expected = vrift_ipc::PROTOCOL_VERSION,
