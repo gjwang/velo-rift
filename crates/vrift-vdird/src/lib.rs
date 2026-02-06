@@ -18,6 +18,7 @@
 pub mod commands;
 pub mod ignore;
 pub mod ingest;
+pub mod journal;
 pub mod scan;
 pub mod socket;
 pub mod state;
@@ -100,9 +101,46 @@ pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
     std::fs::create_dir_all(&config.staging_base)?;
     std::fs::create_dir_all(&config.cas_path)?;
 
+    // Cleanup orphan staging files (max age: 1 hour)
+    match state::cleanup_orphan_staging(&config.staging_base, 3600) {
+        Ok(0) => {}
+        Ok(count) => info!(count, "Cleaned orphan staging files"),
+        Err(e) => tracing::warn!(error = %e, "Failed to cleanup orphan staging files"),
+    }
+
     // Initialize VDir mmap
     let vdir = vdir::VDir::create_or_open(&config.vdir_path)?;
     info!(path = %config.vdir_path.display(), "VDir mmap initialized");
+
+    // Initialize reingest journal for crash recovery
+    let journal_path = config
+        .project_root
+        .join(".vrift")
+        .join("reingest_journal.bin");
+    let mut reingest_journal = journal::ReingestJournal::open(&journal_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open reingest journal: {}", e))?;
+
+    // Cleanup stale journal entries (older than 1 hour)
+    if let Err(e) = reingest_journal.cleanup_stale(3600) {
+        tracing::warn!(error = %e, "Failed to cleanup stale journal entries");
+    }
+
+    // Log recoverable entries (entries with CAS hash but incomplete VDir update)
+    let recoverable = reingest_journal.recoverable_entries();
+    if !recoverable.is_empty() {
+        tracing::warn!(
+            count = recoverable.len(),
+            "Found recoverable reingest entries from previous crash - manual recovery may be needed"
+        );
+        for entry in recoverable {
+            tracing::warn!(
+                vpath = %entry.vpath,
+                has_cas_hash = entry.cas_hash.is_some(),
+                "Recoverable reingest entry"
+            );
+        }
+    }
+    info!(path = %journal_path.display(), pending = reingest_journal.len(), "Reingest journal initialized");
 
     // RFC-0039: Initialize LMDB manifest for Live Ingest
     let manifest_path = config.project_root.join(".vrift").join("manifest.lmdb");

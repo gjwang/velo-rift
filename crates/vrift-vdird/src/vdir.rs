@@ -5,11 +5,11 @@ use memmap2::MmapMut;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// VDir constants
 pub const VDIR_MAGIC: u32 = 0x56524654; // "VRFT"
-pub const VDIR_VERSION: u32 = 1;
+pub const VDIR_VERSION: u32 = 2; // v2: Added CRC32 checksum
 pub const VDIR_DEFAULT_CAPACITY: usize = 65536;
 pub const VDIR_ENTRY_SIZE: usize = std::mem::size_of::<VDirEntry>();
 pub const VDIR_HEADER_SIZE: usize = std::mem::size_of::<VDirHeader>();
@@ -24,7 +24,8 @@ pub struct VDirHeader {
     pub entry_count: u32,
     pub table_capacity: u32,
     pub table_offset: u32,
-    pub _pad: [u8; 36], // Pad to 64 bytes
+    pub crc32: u32,     // CRC32 checksum of header (computed over fields before crc32)
+    pub _pad: [u8; 32], // Pad to 64 bytes (reduced from 36 to 32)
 }
 
 /// Single VDir entry
@@ -91,9 +92,18 @@ impl VDir {
         // mmap the file
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
 
-        // Initialize header if new
+        // Initialize or validate header
         let header = unsafe { &mut *(mmap.as_mut_ptr() as *mut VDirHeader) };
-        if header.magic != VDIR_MAGIC {
+        let needs_init = header.magic != VDIR_MAGIC || header.version != VDIR_VERSION;
+
+        if needs_init {
+            if header.magic == VDIR_MAGIC && header.version < VDIR_VERSION {
+                info!(
+                    old_version = header.version,
+                    new_version = VDIR_VERSION,
+                    "Upgrading VDir version"
+                );
+            }
             *header = VDirHeader {
                 magic: VDIR_MAGIC,
                 version: VDIR_VERSION,
@@ -101,13 +111,39 @@ impl VDir {
                 entry_count: 0,
                 table_capacity: capacity as u32,
                 table_offset: VDIR_HEADER_SIZE as u32,
-                _pad: [0; 36],
+                crc32: 0,
+                _pad: [0; 32],
             };
+            header.crc32 = Self::compute_header_crc(header);
             mmap.flush()?;
             debug!("Initialized VDir header");
+        } else {
+            // Validate CRC
+            let stored_crc = header.crc32;
+            let computed_crc = Self::compute_header_crc(header);
+            if stored_crc != computed_crc {
+                warn!(
+                    stored = stored_crc,
+                    computed = computed_crc,
+                    "VDir header CRC mismatch - possible corruption"
+                );
+                // Continue anyway, but log warning
+            }
         }
 
         Ok(Self { mmap, capacity })
+    }
+
+    /// Compute CRC32 of header fields (excluding crc32 field itself)
+    fn compute_header_crc(header: &VDirHeader) -> u32 {
+        // CRC32 of first 28 bytes (magic + version + generation + entry_count + table_capacity + table_offset)
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                header as *const VDirHeader as *const u8,
+                28, // Bytes before crc32 field
+            )
+        };
+        crc32fast::hash(bytes)
     }
 
     /// Get header reference
@@ -142,11 +178,15 @@ impl VDir {
         }
     }
 
-    /// Increment generation counter (with release ordering)
+    /// Increment generation counter (with release ordering) and update CRC
     pub fn bump_generation(&mut self) {
-        let gen_ptr = &mut self.header_mut().generation as *mut u64;
+        let header = self.header_mut();
+        let gen_ptr = &mut header.generation as *mut u64;
         let atomic = unsafe { &*(gen_ptr as *const AtomicU64) };
         atomic.fetch_add(1, Ordering::Release);
+
+        // Update CRC after generation change
+        header.crc32 = Self::compute_header_crc(header);
     }
 
     /// Find slot for path hash (linear probing)

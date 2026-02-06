@@ -91,6 +91,60 @@ impl DaemonState {
     }
 }
 
+/// Clean orphan temp files from staging directory
+///
+/// Removes files older than `max_age_secs` to reclaim space after crashes.
+/// Returns the number of files cleaned.
+pub fn cleanup_orphan_staging(staging_base: &Path, max_age_secs: u64) -> io::Result<usize> {
+    use std::time::Duration;
+
+    if !staging_base.exists() {
+        return Ok(0);
+    }
+
+    let threshold = SystemTime::now()
+        .checked_sub(Duration::from_secs(max_age_secs))
+        .unwrap_or(UNIX_EPOCH);
+
+    let mut cleaned = 0;
+
+    for entry in fs::read_dir(staging_base)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let path = entry.path();
+
+        // Skip directories
+        if path.is_dir() {
+            continue;
+        }
+
+        // Check file age
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let modified = match meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if modified < threshold {
+            if let Err(e) = fs::remove_file(&path) {
+                warn!(path = %path.display(), error = %e, "Failed to remove orphan staging file");
+            } else {
+                info!(path = %path.display(), "Removed orphan staging file");
+                cleaned += 1;
+            }
+        }
+    }
+
+    Ok(cleaned)
+}
+
 /// State file path for a project
 pub fn state_path(project_root: &Path) -> PathBuf {
     project_root.join(".vrift").join("daemon_state.bin")
