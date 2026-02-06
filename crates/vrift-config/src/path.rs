@@ -61,6 +61,57 @@ pub fn normalize_or_original(path: impl AsRef<Path>) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Check if a path is within a directory (security check for path traversal).
+///
+/// Both paths are canonicalized before comparison to handle symlinks and `..`.
+/// Returns false if either path cannot be canonicalized.
+///
+/// # Security
+/// Use this to validate user-provided paths don't escape expected directories.
+pub fn is_within_directory(path: impl AsRef<Path>, dir: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    let dir = dir.as_ref();
+
+    match (path.canonicalize(), dir.canonicalize()) {
+        (Ok(canonical_path), Ok(canonical_dir)) => canonical_path.starts_with(&canonical_dir),
+        _ => false,
+    }
+}
+
+/// Compute relative path from base to target.
+///
+/// Returns the relative path from `base` to `target`, or the absolute target
+/// if they don't share a common prefix.
+pub fn compute_relative_path(base: impl AsRef<Path>, target: impl AsRef<Path>) -> PathBuf {
+    let base = base.as_ref();
+    let target = target.as_ref();
+
+    // Try to strip the base prefix
+    if let Ok(relative) = target.strip_prefix(base) {
+        relative.to_path_buf()
+    } else {
+        // No common prefix, return absolute target
+        target.to_path_buf()
+    }
+}
+
+/// Strip a prefix from a path safely.
+///
+/// Returns the relative portion after the prefix, or None if the path
+/// doesn't start with the prefix.
+///
+/// # Example
+/// ```ignore
+/// let rel = strip_prefix_safe("/vfs/project/src/main.rs", "/vfs/project");
+/// assert_eq!(rel, Some(PathBuf::from("src/main.rs")));
+/// ```
+pub fn strip_prefix_safe(path: impl AsRef<Path>, prefix: impl AsRef<Path>) -> Option<PathBuf> {
+    let path = path.as_ref();
+    let prefix = prefix.as_ref();
+
+    path.strip_prefix(prefix).ok().map(|p| p.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +150,52 @@ mod tests {
         let fake_path = Path::new("/nonexistent/path/file.txt");
         let result = normalize_or_original(fake_path);
         assert_eq!(result, fake_path);
+    }
+
+    #[test]
+    fn test_is_within_directory() {
+        let temp = tempdir().unwrap();
+        let subdir = temp.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        let file = subdir.join("file.txt");
+        fs::write(&file, "test").unwrap();
+
+        // File is within temp dir
+        assert!(is_within_directory(&file, temp.path()));
+        // File is within subdir
+        assert!(is_within_directory(&file, &subdir));
+        // Subdir is within temp
+        assert!(is_within_directory(&subdir, temp.path()));
+        // Temp is NOT within subdir
+        assert!(!is_within_directory(temp.path(), &subdir));
+        // Nonexistent path returns false
+        assert!(!is_within_directory("/nonexistent/path", temp.path()));
+    }
+
+    #[test]
+    fn test_compute_relative_path() {
+        let base = Path::new("/home/user/project");
+        let target = Path::new("/home/user/project/src/main.rs");
+
+        let relative = compute_relative_path(base, target);
+        assert_eq!(relative, PathBuf::from("src/main.rs"));
+
+        // No common prefix returns absolute target
+        let other = Path::new("/tmp/file.txt");
+        let result = compute_relative_path(base, other);
+        assert_eq!(result, other);
+    }
+
+    #[test]
+    fn test_strip_prefix_safe() {
+        let path = Path::new("/vfs/project/src/main.rs");
+        let prefix = Path::new("/vfs/project");
+
+        let result = strip_prefix_safe(path, prefix);
+        assert_eq!(result, Some(PathBuf::from("src/main.rs")));
+
+        // No match returns None
+        let other_prefix = Path::new("/other");
+        assert_eq!(strip_prefix_safe(path, other_prefix), None);
     }
 }
