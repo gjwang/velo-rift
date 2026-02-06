@@ -13,7 +13,7 @@
 //!
 //! Clients (InceptionLayer) communicate via Unix Domain Socket:
 //! - Socket path: `~/.vrift/sockets/<project_id>.sock`
-//! - Protocol: bincode-serialized VeloRequest/VeloResponse
+//! - Protocol: rkyv-serialized VeloRequest/VeloResponse
 
 pub mod commands;
 pub mod ignore;

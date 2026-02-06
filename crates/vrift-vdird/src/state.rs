@@ -7,11 +7,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 /// Daemon persistent state
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, Default, Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+#[rkyv(derive(Debug))]
 pub struct DaemonState {
     /// Last compensation scan timestamp (seconds since epoch)
     pub last_scan_secs: u64,
@@ -25,7 +29,7 @@ impl DaemonState {
     /// Load state from file, or return default if not found
     pub fn load(path: &Path) -> Self {
         match fs::read(path) {
-            Ok(data) => match bincode::deserialize(&data) {
+            Ok(data) => match rkyv::from_bytes::<Self, rkyv::rancor::Error>(&data) {
                 Ok(state) => {
                     info!(path = %path.display(), "Loaded daemon state");
                     state
@@ -53,12 +57,12 @@ impl DaemonState {
             fs::create_dir_all(parent)?;
         }
 
-        let data =
-            bincode::serialize(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let data = rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         // Write atomically via temp file
         let temp_path = path.with_extension("tmp");
-        fs::write(&temp_path, &data)?;
+        fs::write(&temp_path, data.as_slice())?;
         fs::rename(&temp_path, path)?;
 
         debug!(path = %path.display(), "Saved daemon state");

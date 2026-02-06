@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 use tempfile::tempdir;
 
-/// Helper to send request and receive response using bincode
+/// Helper to send request and receive response using rkyv
 fn send_request(
     stream: &mut UnixStream,
     request: &vrift_ipc::VeloRequest,
@@ -15,7 +15,7 @@ fn send_request(
     // Ensure blocking mode for reliable read
     stream.set_nonblocking(false).ok();
 
-    let payload = bincode::serialize(request).unwrap();
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(request).unwrap();
     let len = (payload.len() as u32).to_le_bytes();
     stream.write_all(&len).unwrap();
     stream.write_all(&payload).unwrap();
@@ -27,7 +27,7 @@ fn send_request(
     let mut resp_buf = vec![0u8; resp_len];
     stream.read_exact(&mut resp_buf).unwrap();
 
-    bincode::deserialize(&resp_buf).unwrap()
+    rkyv::from_bytes::<vrift_ipc::VeloResponse, rkyv::rancor::Error>(&resp_buf).unwrap()
 }
 
 #[tokio::test]

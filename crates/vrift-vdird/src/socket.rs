@@ -67,16 +67,19 @@ async fn handle_client(mut stream: UnixStream, handler: Arc<RwLock<CommandHandle
         stream.read_exact(&mut payload).await?;
 
         // Deserialize request
-        let request: VeloRequest = match bincode::deserialize(&payload) {
-            Ok(req) => req,
-            Err(e) => {
-                warn!(error = %e, "Failed to deserialize request");
-                let response =
-                    VeloResponse::Error(VeloError::internal(format!("Deserialize error: {}", e)));
-                send_response(&mut stream, &response).await?;
-                continue;
-            }
-        };
+        let request: VeloRequest =
+            match rkyv::from_bytes::<VeloRequest, rkyv::rancor::Error>(&payload) {
+                Ok(req) => req,
+                Err(e) => {
+                    warn!(error = %e, "Failed to deserialize request");
+                    let response = VeloResponse::Error(VeloError::internal(format!(
+                        "Deserialize error: {}",
+                        e
+                    )));
+                    send_response(&mut stream, &response).await?;
+                    continue;
+                }
+            };
 
         debug!(?request, "Received request");
 
@@ -93,7 +96,8 @@ async fn handle_client(mut stream: UnixStream, handler: Arc<RwLock<CommandHandle
 
 /// Send response with length prefix
 async fn send_response(stream: &mut UnixStream, response: &VeloResponse) -> Result<()> {
-    let payload = bincode::serialize(response)?;
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(response)
+        .map_err(|e| anyhow::anyhow!("Serialize error: {}", e))?;
     let len = (payload.len() as u32).to_le_bytes();
     stream.write_all(&len).await?;
     stream.write_all(&payload).await?;

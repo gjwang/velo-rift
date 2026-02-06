@@ -316,7 +316,7 @@ pub(crate) unsafe fn sync_ipc_manifest_get(
 unsafe fn send_request_on_fd(fd: libc::c_int, request: &vrift_ipc::VeloRequest) -> bool {
     use vrift_ipc::{next_seq_id, IpcHeader};
 
-    let payload = match bincode::serialize(request) {
+    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(request) {
         Ok(b) => b,
         Err(_) => return false,
     };
@@ -357,7 +357,7 @@ unsafe fn recv_response_on_fd(fd: libc::c_int) -> Option<vrift_ipc::VeloResponse
         return None;
     }
 
-    bincode::deserialize(&payload).ok()
+    rkyv::from_bytes::<vrift_ipc::VeloResponse, rkyv::rancor::Error>(&payload).ok()
 }
 
 /// Query directory listing from daemon

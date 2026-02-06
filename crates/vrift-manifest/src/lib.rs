@@ -7,7 +7,7 @@
 //!
 //! ## Storage Backends
 //!
-//! - `Manifest`: In-memory HashMap with bincode persistence (legacy)
+//! - `Manifest`: In-memory HashMap with bincode file persistence (legacy)
 //! - `LmdbManifest`: LMDB-backed with ACID transactions (RFC-0039)
 
 pub mod lmdb;

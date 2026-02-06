@@ -2182,11 +2182,11 @@ name = "vrift-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bincode",
  "blake3",
  "clap",
  "libc",
  "nix 0.28.0",
+ "rkyv",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2287,9 +2287,9 @@ dependencies = [
 name = "vrift-shim"
 version = "0.1.0"
 dependencies = [
- "bincode",
  "cc",
  "libc",
+ "rkyv",
  "vrift-ipc",
 ]
 
@@ -2298,7 +2298,6 @@ name = "vrift-vdird"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bincode",
  "blake3",
  "crc32fast",
  "dirs 5.0.1",
@@ -2306,6 +2305,7 @@ dependencies = [
  "libc",
  "memmap2",
  "notify",
+ "rkyv",
  "serde",
  "tempfile",
  "thiserror 1.0.69",

@@ -16,7 +16,7 @@ vrift-cas = { workspace = true }
 vrift-config = { workspace = true }
 vrift-manifest = { workspace = true }
 serde = { workspace = true }
-bincode = { workspace = true }
+rkyv = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 tracing = "0.1.44"

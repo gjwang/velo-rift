@@ -16,7 +16,7 @@ vrift-ipc = { path = "../vrift-ipc" }
 vrift-cas = { path = "../vrift-cas" }
 vrift-manifest = { path = "../vrift-manifest" }
 vrift-config = { path = "../vrift-config" }
-bincode = "1"
+rkyv = "0.8"
 
 # Hashing
 blake3 = "1"

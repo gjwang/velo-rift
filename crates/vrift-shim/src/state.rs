@@ -1356,7 +1356,7 @@ impl ShimState {
             }
 
             // Serialize payload
-            let payload = bincode::serialize(request).ok()?;
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(request).ok()?;
             if payload.len() > vrift_ipc::IpcHeader::MAX_LENGTH {
                 libc::close(fd);
                 return None;
@@ -1391,7 +1391,7 @@ impl ShimState {
             }
 
             libc::close(fd);
-            bincode::deserialize(&resp_buf).ok()
+            rkyv::from_bytes::<vrift_ipc::VeloResponse, rkyv::rancor::Error>(&resp_buf).ok()
         }
     }
 

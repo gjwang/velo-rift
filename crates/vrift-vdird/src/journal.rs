@@ -9,11 +9,13 @@ use std::io::{self, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 /// Journal entry for a pending reingest operation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
 pub struct JournalEntry {
     /// Virtual path being reingested
     pub vpath: String,
@@ -40,7 +42,11 @@ impl ReingestJournal {
             match File::open(path) {
                 Ok(file) => {
                     let reader = BufReader::new(file);
-                    match bincode::deserialize_from(reader) {
+                    let mut data = Vec::new();
+                    std::io::Read::read_to_end(&mut reader.into_inner(), &mut data).ok();
+                    match rkyv::from_bytes::<HashMap<String, JournalEntry>, rkyv::rancor::Error>(
+                        &data,
+                    ) {
                         Ok(entries) => entries,
                         Err(e) => {
                             warn!(error = %e, "Failed to deserialize journal, starting fresh");
@@ -155,9 +161,10 @@ impl ReingestJournal {
         // Write atomically via temp file
         let temp_path = self.path.with_extension("tmp");
         let file = File::create(&temp_path)?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, &self.entries)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut writer = BufWriter::new(file);
+        let data = rkyv::to_bytes::<rkyv::rancor::Error>(&self.entries)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        std::io::Write::write_all(&mut writer, &data)?;
 
         fs::rename(&temp_path, &self.path)?;
         Ok(())
