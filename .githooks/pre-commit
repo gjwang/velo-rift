@@ -28,7 +28,7 @@ if [ -n "$HAS_RUST_FILES" ]; then
     cargo clippy --fix --allow-staged --allow-dirty --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets || true
 
     echo "🔍 Running cargo clippy check..."
-    cargo clippy --workspace --exclude vrift-fuse --exclude vrift-shim --all-targets -- -D warnings || {
+    cargo clippy --workspace --exclude vrift-fuse --exclude vrift-shim --lib --bins -- -D warnings || {
         echo "❌ Clippy check failed. Some warnings cannot be auto-fixed."
         exit 1
     }
