@@ -21,21 +21,14 @@ set -euo pipefail
 export RUST_BACKTRACE=1
 
 # ============================================================================
-# Configuration
+# Configuration (SSOT via test_setup.sh)
 # ============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TEST_WORKSPACE_BASE="/tmp/vdir_cargo_test_$$"
+SKIP_AUTO_SETUP=1  # We'll call setup manually
+source "$SCRIPT_DIR/test_setup.sh"
 
-VRIFT_CLI="$PROJECT_ROOT/target/release/vrift"
-VRIFTD_BIN="$PROJECT_ROOT/target/release/vriftd"
-SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
-
-TEST_WORKSPACE="/tmp/vdir_cargo_test_$$"
-VRIFT_SOCKET_PATH="$TEST_WORKSPACE/vrift.sock"
-export VRIFT_SOCKET_PATH
-VR_THE_SOURCE="$TEST_WORKSPACE/.cas"
-export VR_THE_SOURCE
-
+# Test-specific variables
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0

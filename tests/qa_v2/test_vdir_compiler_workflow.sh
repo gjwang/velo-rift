@@ -16,26 +16,16 @@
 set -euo pipefail
 
 # ============================================================================
-# Configuration
+# Configuration (SSOT via test_setup.sh)
 # ============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TEST_WORKSPACE_BASE="/tmp/vdir_compiler_test_$$"
+SKIP_AUTO_SETUP=1
+source "$SCRIPT_DIR/test_setup.sh"
+
 SAMPLE_PROJECT="$SCRIPT_DIR/lib/sample_project"
 
-# Use release binaries if available, otherwise debug
-if [ -f "$PROJECT_ROOT/target/release/vrift" ]; then
-    VRIFT_CLI="$PROJECT_ROOT/target/release/vrift"
-    SHIM_LIB="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
-else
-    VRIFT_CLI="$PROJECT_ROOT/target/debug/vrift"
-    SHIM_LIB="$PROJECT_ROOT/target/debug/libvrift_inception_layer.dylib"
-fi
-
-TEST_WORKSPACE="/tmp/vdir_compiler_test_$$"
-VRIFT_SOCKET_PATH="$TEST_WORKSPACE/vrift.sock"
-export VRIFT_SOCKET_PATH
-VR_THE_SOURCE="$TEST_WORKSPACE/.cas"
-
+# Test-specific variables
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
