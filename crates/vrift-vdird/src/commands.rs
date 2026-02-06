@@ -7,7 +7,9 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
-use vrift_ipc::{VeloRequest, VeloResponse, VnodeEntry, PROTOCOL_VERSION};
+use vrift_ipc::{
+    VeloError, VeloErrorKind, VeloRequest, VeloResponse, VnodeEntry, PROTOCOL_VERSION,
+};
 
 /// Command handler for vdir_d
 pub struct CommandHandler {
@@ -73,7 +75,7 @@ impl CommandHandler {
             // Not yet implemented - forward to future handlers
             _ => {
                 warn!(?request, "Unhandled request type");
-                VeloResponse::Error("Not implemented".into())
+                VeloResponse::Error(VeloError::internal("Not implemented"))
             }
         }
     }
@@ -117,7 +119,7 @@ impl CommandHandler {
             }
             Err(e) => {
                 error!(error = %e, path = %path, "Upsert failed");
-                VeloResponse::Error(format!("{}", e).into())
+                VeloResponse::Error(VeloError::internal(format!("{}", e)))
             }
         }
     }
@@ -143,7 +145,7 @@ impl CommandHandler {
             Ok(c) => c,
             Err(e) => {
                 error!(error = %e, temp = %temp_path, "Failed to read temp file");
-                return VeloResponse::Error(format!("Read error: {}", e).into());
+                return VeloResponse::Error(VeloError::io_error(format!("Read error: {}", e)));
             }
         };
 
@@ -161,14 +163,17 @@ impl CommandHandler {
         // 3. Ingest to CAS (try reflink, fallback to copy)
         if let Err(e) = self.ingest_to_cas(&temp, &cas_path, &content).await {
             error!(error = %e, "CAS ingestion failed");
-            return VeloResponse::Error(format!("Ingest error: {}", e).into());
+            return VeloResponse::Error(VeloError::new(
+                VeloErrorKind::IngestFailed,
+                format!("Ingest error: {}", e),
+            ));
         }
 
         // 4. Get metadata
         let meta = match fs::metadata(&temp) {
             Ok(m) => m,
             Err(e) => {
-                return VeloResponse::Error(format!("Metadata error: {}", e).into());
+                return VeloResponse::Error(VeloError::io_error(format!("Metadata error: {}", e)));
             }
         };
 
@@ -185,7 +190,7 @@ impl CommandHandler {
         };
 
         if let Err(e) = self.vdir.upsert(entry) {
-            return VeloResponse::Error(format!("VDir update error: {}", e).into());
+            return VeloResponse::Error(VeloError::io_error(format!("VDir update error: {}", e)));
         }
 
         // 6. Cleanup temp file
@@ -322,7 +327,10 @@ impl CommandHandler {
         // 5. Build and write manifest (using vrift_manifest if available)
         // For now, just write a simple binary manifest
         if let Err(e) = self.write_manifest(&manifest_out, &file_paths, &results) {
-            return VeloResponse::Error(format!("Failed to write manifest: {}", e).into());
+            return VeloResponse::Error(VeloError::io_error(format!(
+                "Failed to write manifest: {}",
+                e
+            )));
         }
 
         info!(

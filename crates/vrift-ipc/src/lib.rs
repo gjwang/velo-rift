@@ -675,20 +675,6 @@ impl std::fmt::Display for VeloError {
 
 impl std::error::Error for VeloError {}
 
-/// Allow creating VeloError from String for easy migration
-impl From<String> for VeloError {
-    fn from(message: String) -> Self {
-        Self::internal(message)
-    }
-}
-
-/// Allow creating VeloError from &str for easy migration
-impl From<&str> for VeloError {
-    fn from(message: &str) -> Self {
-        Self::internal(message)
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub enum VeloResponse {
     HandshakeAck {

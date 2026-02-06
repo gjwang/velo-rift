@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
-use vrift_ipc::{VeloRequest, VeloResponse};
+use vrift_ipc::{VeloError, VeloRequest, VeloResponse};
 
 /// Run the UDS listener loop
 pub async fn run_listener(config: ProjectConfig, vdir: VDir) -> Result<()> {
@@ -71,7 +71,8 @@ async fn handle_client(mut stream: UnixStream, handler: Arc<RwLock<CommandHandle
             Ok(req) => req,
             Err(e) => {
                 warn!(error = %e, "Failed to deserialize request");
-                let response = VeloResponse::Error(format!("Deserialize error: {}", e).into());
+                let response =
+                    VeloResponse::Error(VeloError::internal(format!("Deserialize error: {}", e)));
                 send_response(&mut stream, &response).await?;
                 continue;
             }

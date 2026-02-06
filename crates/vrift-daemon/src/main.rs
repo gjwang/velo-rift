@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::{UnixListener, UnixStream};
-use vrift_ipc::{VeloRequest, VeloResponse};
+use vrift_ipc::{VeloError, VeloErrorKind, VeloRequest, VeloResponse};
 use vrift_manifest::lmdb::{AssetTier, LmdbManifest};
 
 // RFC-0043: Minimal registry for workspace discovery
@@ -538,7 +538,7 @@ async fn handle_request(
             tracing::info!("vriftd: Workspace Registration Request for: {}", root_str);
             let project_root = PathBuf::from(&root_str);
             if !project_root.exists() {
-                return VeloResponse::Error("Project root does not exist".into());
+                return VeloResponse::Error(VeloError::not_found("Project root does not exist"));
             }
 
             // Security: In a production system, verify that peer_creds has access to this folder
@@ -550,18 +550,19 @@ async fn handle_request(
                         workspace_id: ws.shm_name.clone(),
                     }
                 }
-                Err(e) => {
-                    VeloResponse::Error(format!("Workspace registration failed: {}", e).into())
-                }
+                Err(e) => VeloResponse::Error(VeloError::internal(format!(
+                    "Workspace registration failed: {}",
+                    e
+                ))),
             }
         }
         VeloRequest::Spawn { command, env, cwd } => {
             if let Some(creds) = peer_creds {
                 if creds.uid != daemon_uid && creds.uid != 0 {
-                    return VeloResponse::Error("Permission denied: UID mismatch".into());
+                    return VeloResponse::Error(VeloError::permission_denied("UID mismatch"));
                 }
             } else {
-                return VeloResponse::Error("Permission denied: verification failed".into());
+                return VeloResponse::Error(VeloError::permission_denied("Verification failed"));
             }
             handle_spawn(command, env, cwd).await
         }
@@ -586,10 +587,12 @@ async fn handle_request(
             // Sandboxing check
             if let Some(ref ws) = current_workspace {
                 if !path.starts_with(ws.project_root.to_str().unwrap_or("")) {
-                    return VeloResponse::Error("Access Denied: Path outside project root".into());
+                    return VeloResponse::Error(VeloError::permission_denied(
+                        "Path outside project root",
+                    ));
                 }
             } else {
-                return VeloResponse::Error("Access Denied: Workspace not registered".into());
+                return VeloResponse::Error(VeloError::workspace_not_registered());
             }
             handle_protect(path, immutable, owner).await
         }
@@ -611,7 +614,7 @@ async fn handle_request(
                 );
                 VeloResponse::ManifestAck { entry }
             } else {
-                VeloResponse::Error("Workspace not registered".into())
+                VeloResponse::Error(VeloError::workspace_not_registered())
             }
         }
         VeloRequest::ManifestUpsert { path, entry } => {
@@ -623,7 +626,7 @@ async fn handle_request(
                 export_mmap_cache(&manifest, &ws.project_root);
                 VeloResponse::ManifestAck { entry: None }
             } else {
-                VeloResponse::Error("Workspace not registered".into())
+                VeloResponse::Error(VeloError::workspace_not_registered())
             }
         }
         // RFC-0047: ManifestRemove for unlink/rmdir operations
@@ -636,7 +639,7 @@ async fn handle_request(
                 tracing::info!("vriftd: ManifestRemove '{}' -> SUCCESS", path);
                 VeloResponse::ManifestAck { entry: None }
             } else {
-                VeloResponse::Error("Workspace not registered".into())
+                VeloResponse::Error(VeloError::workspace_not_registered())
             }
         }
         // RFC-0047: ManifestRename for rename operations
@@ -663,10 +666,13 @@ async fn handle_request(
                     VeloResponse::ManifestAck { entry: None }
                 } else {
                     tracing::warn!("vriftd: ManifestRename '{}' -> NOT FOUND", old_path);
-                    VeloResponse::Error(format!("Entry not found: {}", old_path).into())
+                    VeloResponse::Error(VeloError::not_found(format!(
+                        "Entry not found: {}",
+                        old_path
+                    )))
                 }
             } else {
-                VeloResponse::Error("Workspace not registered".into())
+                VeloResponse::Error(VeloError::workspace_not_registered())
             }
         }
         // RFC-0047: ManifestUpdateMtime for utimes/utimensat operations
@@ -687,10 +693,10 @@ async fn handle_request(
                     VeloResponse::ManifestAck { entry: None }
                 } else {
                     tracing::warn!("vriftd: ManifestUpdateMtime '{}' -> NOT FOUND", path);
-                    VeloResponse::Error(format!("Entry not found: {}", path).into())
+                    VeloResponse::Error(VeloError::not_found(format!("Entry not found: {}", path)))
                 }
             } else {
-                VeloResponse::Error("Workspace not registered".into())
+                VeloResponse::Error(VeloError::workspace_not_registered())
             }
         }
         // RFC-0047: ManifestReingest for CoW close path
@@ -709,7 +715,10 @@ async fn handle_request(
                             e,
                             temp_path
                         );
-                        return VeloResponse::Error(format!("CAS move failed: {}", e).into());
+                        return VeloResponse::Error(VeloError::io_error(format!(
+                            "CAS move failed: {}",
+                            e
+                        )));
                     }
                 };
 
@@ -755,7 +764,7 @@ async fn handle_request(
                 );
                 VeloResponse::ManifestAck { entry: None }
             } else {
-                VeloResponse::Error("Workspace not registered".into())
+                VeloResponse::Error(VeloError::workspace_not_registered())
             }
         }
         // RFC-0049: Flock Virtualization
@@ -763,7 +772,11 @@ async fn handle_request(
             // PID required for locking
             let pid = match peer_creds.and_then(|c| c.pid) {
                 Some(p) => p as u32,
-                None => return VeloResponse::Error("Could not determine PID for lock".into()),
+                None => {
+                    return VeloResponse::Error(VeloError::internal(
+                        "Could not determine PID for lock",
+                    ))
+                }
             };
 
             // Loop until acquired or error
@@ -774,21 +787,30 @@ async fn handle_request(
                         // Blocked
                         if operation & libc::LOCK_NB != 0 {
                             // Non-blocking request
-                            return VeloResponse::Error("EWOULDBLOCK".into());
+                            return VeloResponse::Error(VeloError::new(
+                                VeloErrorKind::LockFailed,
+                                "EWOULDBLOCK",
+                            ));
                         }
                         // Blocking request: wait for notification
                         let notify = state.lock_manager.get_notify(&path);
                         notify.notified().await;
                         // Retry loop after notification
                     }
-                    Err(e) => return VeloResponse::Error(e.into()),
+                    Err(e) => {
+                        return VeloResponse::Error(VeloError::new(VeloErrorKind::LockFailed, e))
+                    }
                 }
             }
         }
         VeloRequest::FlockRelease { path } => {
             let pid = match peer_creds.and_then(|c| c.pid) {
                 Some(p) => p as u32,
-                None => return VeloResponse::Error("Could not determine PID for unlock".into()),
+                None => {
+                    return VeloResponse::Error(VeloError::internal(
+                        "Could not determine PID for unlock",
+                    ))
+                }
             };
             state.lock_manager.release(&path, pid);
             VeloResponse::FlockAck
@@ -813,7 +835,7 @@ async fn handle_request(
                         reclaimed_bytes,
                     }
                 }
-                Err(e) => VeloResponse::Error(format!("Sweep failed: {}", e).into()),
+                Err(e) => VeloResponse::Error(VeloError::internal(format!("Sweep failed: {}", e))),
             }
         }
         VeloRequest::ManifestListDir { path } => {
@@ -845,7 +867,7 @@ async fn handle_request(
                 }
                 VeloResponse::ManifestListAck { entries }
             } else {
-                VeloResponse::Error("Workspace not registered".into())
+                VeloResponse::Error(VeloError::workspace_not_registered())
             }
         }
         // IngestFullScan: Unified ingest architecture
@@ -900,7 +922,12 @@ async fn handle_request(
             .await
             {
                 Ok(r) => r,
-                Err(e) => return VeloResponse::Error(format!("Ingest task failed: {}", e).into()),
+                Err(e) => {
+                    return VeloResponse::Error(VeloError::new(
+                        VeloErrorKind::IngestFailed,
+                        format!("Ingest task failed: {}", e),
+                    ))
+                }
             };
 
             let total_files = results.len() as u64;
@@ -922,7 +949,10 @@ async fn handle_request(
 
             // 6. Write LMDB manifest (RFC-0039 compatible with shim)
             if let Err(e) = write_ingest_manifest(&manifest_out, &source_path, &results, tier1) {
-                return VeloResponse::Error(format!("Failed to write manifest: {}", e).into());
+                return VeloResponse::Error(VeloError::io_error(format!(
+                    "Failed to write manifest: {}",
+                    e
+                )));
             }
 
             tracing::info!(
@@ -1007,7 +1037,7 @@ fn write_ingest_manifest(
 async fn handle_protect(path_str: String, immutable: bool, owner: Option<String>) -> VeloResponse {
     // Security: Path sandboxing - reject suspicious paths
     if path_str.contains("..") || path_str.contains('\0') {
-        return VeloResponse::Error("Invalid path: path traversal detected".into());
+        return VeloResponse::Error(VeloError::invalid_path("Path traversal detected"));
     }
 
     let path = Path::new(&path_str);
@@ -1015,13 +1045,20 @@ async fn handle_protect(path_str: String, immutable: bool, owner: Option<String>
     // Canonicalize to resolve symlinks and validate existence
     let canonical = match path.canonicalize() {
         Ok(p) => p,
-        Err(_) => return VeloResponse::Error(format!("Path not found: {}", path_str).into()),
+        Err(_) => {
+            return VeloResponse::Error(VeloError::not_found(format!(
+                "Path not found: {}",
+                path_str
+            )))
+        }
     };
 
     // Additional check: ensure canonicalized path doesn't escape expected directories
     let canonical_str = canonical.to_string_lossy();
     if canonical_str.contains("..") {
-        return VeloResponse::Error("Invalid path: canonicalized path contains traversal".into());
+        return VeloResponse::Error(VeloError::invalid_path(
+            "Canonicalized path contains traversal",
+        ));
     }
 
     // 1. Set immutable flag via vrift-cas::protection
@@ -1038,10 +1075,16 @@ async fn handle_protect(path_str: String, immutable: bool, owner: Option<String>
             if let Ok(Some(u)) = User::from_name(&user) {
                 if let Err(e) = chown(&canonical, Some(u.uid), Some(u.gid)) {
                     tracing::error!("Failed to chown {} to {}: {}", canonical_str, user, e);
-                    return VeloResponse::Error(format!("chown failed: {}", e).into());
+                    return VeloResponse::Error(VeloError::permission_denied(format!(
+                        "chown failed: {}",
+                        e
+                    )));
                 }
             } else {
-                return VeloResponse::Error(format!("User not found: {}", user).into());
+                return VeloResponse::Error(VeloError::not_found(format!(
+                    "User not found: {}",
+                    user
+                )));
             }
         }
     }
@@ -1055,7 +1098,7 @@ async fn handle_spawn(
     cwd: String,
 ) -> VeloResponse {
     if command.is_empty() {
-        return VeloResponse::Error("Command cannot be empty".into());
+        return VeloResponse::Error(VeloError::internal("Command cannot be empty"));
     }
 
     // For MVP, we just spawn the process and let it run detached
@@ -1088,7 +1131,7 @@ async fn handle_spawn(
 
             VeloResponse::SpawnAck { pid }
         }
-        Err(e) => VeloResponse::Error(format!("Failed to spawn: {}", e).into()),
+        Err(e) => VeloResponse::Error(VeloError::internal(format!("Failed to spawn: {}", e))),
     }
 }
 
