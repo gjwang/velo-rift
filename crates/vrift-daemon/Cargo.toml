@@ -13,6 +13,7 @@ clap = { workspace = true }
 tokio = { workspace = true }
 vrift-ipc = { workspace = true }
 vrift-cas = { workspace = true }
+vrift-config = { workspace = true }
 vrift-manifest = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }

@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::{UnixListener, UnixStream};
+use vrift_config::path::is_within_directory;
 use vrift_ipc::{VeloError, VeloErrorKind, VeloRequest, VeloResponse};
 use vrift_manifest::lmdb::{AssetTier, LmdbManifest};
 
@@ -584,9 +585,9 @@ async fn handle_request(
             immutable,
             owner,
         } => {
-            // Sandboxing check
+            // Sandboxing check using centralized path utilities
             if let Some(ref ws) = current_workspace {
-                if !path.starts_with(ws.project_root.to_str().unwrap_or("")) {
+                if !is_within_directory(&path, &ws.project_root) {
                     return VeloResponse::Error(VeloError::permission_denied(
                         "Path outside project root",
                     ));
