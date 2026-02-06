@@ -523,9 +523,9 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
     }
 }
 
-/// Initialize a Velo Rift project and enter inception mode
+/// Initialize a Velo Rift project
 ///
-/// Usage: eval "$(vrift init)"
+/// Creates .vrift directory structure. Run `vrift` or `vrift inception` to enter VFS mode.
 async fn cmd_init(directory: &Path) -> Result<()> {
     use console::{style, Emoji};
 
@@ -545,8 +545,12 @@ async fn cmd_init(directory: &Path) -> Result<()> {
             style("ℹ").blue(),
             style(vrift_dir.display()).dim()
         );
-        // Already initialized, just enter inception
-        return inception::cmd_inception(directory).await;
+        eprintln!();
+        eprintln!(
+            "{}",
+            style("Run 'vrift' or 'eval $(vrift inception)' to enter VFS mode.").dim()
+        );
+        return Ok(());
     }
 
     // Create .vrift directory structure
@@ -574,9 +578,13 @@ async fn cmd_init(directory: &Path) -> Result<()> {
         style(".vrift/manifest.lmdb").dim()
     );
     eprintln!();
+    eprintln!(
+        "{}",
+        style("Next: Run 'vrift' to enter VFS mode, or 'vrift ingest <dir>' to import files.")
+            .dim()
+    );
 
-    // Now auto-enter inception mode
-    inception::cmd_inception(directory).await
+    Ok(())
 }
 
 /// Configuration management commands

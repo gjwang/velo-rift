@@ -59,7 +59,7 @@ rm "$WORK_DIR/project/src/template.bin"
 echo "⚡ Ingesting project (Solid Mode)..."
 export VR_THE_SOURCE="$WORK_DIR/cas"
 $VRIFT_BIN init "$WORK_DIR/project"
-$VRIFT_BIN ingest "$WORK_DIR/project" --mode solid
+$VRIFT_BIN ingest "$WORK_DIR/project" --mode solid --direct
 
 # 3. Prove Deduplication
 echo "📊 Analyzing CAS Efficiency..."
