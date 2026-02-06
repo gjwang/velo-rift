@@ -22,7 +22,10 @@ enum Commands {
 async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("VRIFT_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -552,25 +555,40 @@ async fn handle_request(
         VeloRequest::RegisterWorkspace {
             project_root: root_str,
         } => {
-            tracing::info!("vriftd: Workspace Registration Request for: {}", root_str);
-            let project_root = PathBuf::from(&root_str);
+            let project_root = PathBuf::from(&root_str)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&root_str));
+            tracing::info!(
+                "vriftd: Workspace Registration (canonicalized): root={:?}",
+                project_root
+            );
             if !project_root.exists() {
+                tracing::error!(
+                    "vriftd: Registration failed - root does not exist: '{:?}'",
+                    project_root
+                );
                 return VeloResponse::Error(VeloError::not_found("Project root does not exist"));
             }
 
-            // Security: In a production system, verify that peer_creds has access to this folder
-            // For now, we allow any local user but bind the connection to this root.
             match get_or_create_workspace(state, project_root).await {
                 Ok(ws) => {
+                    tracing::info!(
+                        "vriftd: Workspace registered: shm={}, root={:?}",
+                        ws.shm_name,
+                        ws.project_root
+                    );
                     *current_workspace = Some(ws.clone());
                     VeloResponse::RegisterAck {
                         workspace_id: ws.shm_name.clone(),
                     }
                 }
-                Err(e) => VeloResponse::Error(VeloError::internal(format!(
-                    "Workspace registration failed: {}",
-                    e
-                ))),
+                Err(e) => {
+                    tracing::error!("vriftd: Workspace registration failed: {}", e);
+                    VeloResponse::Error(VeloError::internal(format!(
+                        "Workspace registration failed: {}",
+                        e
+                    )))
+                }
             }
         }
         VeloRequest::Spawn { command, env, cwd } => {
@@ -616,21 +634,39 @@ async fn handle_request(
         VeloRequest::ManifestGet { path } => {
             if let Some(ref ws) = current_workspace {
                 let manifest = ws.manifest.lock().unwrap();
-                let entry = match manifest.get(&path) {
-                    Ok(Some(manifest_entry)) => Some(manifest_entry.vnode.clone()),
-                    _ => None,
-                };
-                tracing::info!(
-                    "vriftd: ManifestGet lookup for '{}' -> {}",
+                tracing::debug!(
+                    "vriftd: ManifestGet lookup for '{}' in workspace '{}'",
                     path,
-                    if entry.is_some() {
-                        "FOUND"
-                    } else {
-                        "NOT FOUND"
-                    }
+                    ws.shm_name
                 );
+                let entry = match manifest.get(&path) {
+                    Ok(Some(manifest_entry)) => {
+                        tracing::info!(
+                            "vriftd: ManifestGet FOUND for '{}' ({:?})",
+                            path,
+                            manifest_entry.vnode.content_hash
+                        );
+                        Some(manifest_entry.vnode.clone())
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            "vriftd: ManifestGet NOT FOUND for '{}' in manifest with {} entries",
+                            path,
+                            manifest.len().unwrap_or(0)
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::error!("vriftd: ManifestGet ERROR for '{}': {}", path, e);
+                        None
+                    }
+                };
                 VeloResponse::ManifestAck { entry }
             } else {
+                tracing::warn!(
+                    "vriftd: ManifestGet '{}' without registered workspace",
+                    path
+                );
                 VeloResponse::Error(VeloError::workspace_not_registered())
             }
         }
@@ -1025,10 +1061,18 @@ fn write_ingest_manifest(
         };
 
         // Compute manifest path: relative to source_root with leading /
-        let relative_path = result
+        // RFC-0050: Robustly handle macOS /private/tmp symlink duality
+        let canon_source = result
             .source_path
-            .strip_prefix(source_root)
-            .unwrap_or(&result.source_path);
+            .canonicalize()
+            .unwrap_or_else(|_| result.source_path.clone());
+        let canon_root = source_root
+            .canonicalize()
+            .unwrap_or_else(|_| source_root.to_path_buf());
+
+        let relative_path = canon_source
+            .strip_prefix(&canon_root)
+            .unwrap_or(&canon_source);
         let manifest_key = format!("/{}", relative_path.display());
 
         // Extract mtime and mode
@@ -1045,7 +1089,9 @@ fn write_ingest_manifest(
     // Commit delta layer to LMDB base layer (required for persistence!)
     manifest.commit()?;
 
-    // LMDB syncs automatically after commit
+    // RFC-0044: Export mmap cache so shims see the new data immediately
+    export_mmap_cache(&manifest, source_root);
+
     Ok(())
 }
 

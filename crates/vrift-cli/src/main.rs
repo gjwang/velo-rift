@@ -551,6 +551,11 @@ async fn cmd_init(directory: &Path) -> Result<()> {
     static CHECK: Emoji<'_, '_> = Emoji("✔ ", "[ok] ");
     static FOLDER: Emoji<'_, '_> = Emoji("📁 ", "");
 
+    // RFC-0050: Standardize on canonicalized project directory
+    let directory = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+
     let vrift_dir = directory.join(".vrift");
     let project_name = directory
         .file_name()
@@ -966,9 +971,13 @@ async fn cmd_ingest(
     show_excluded: bool,
 ) -> Result<()> {
     // Validate input directory
-    if !directory.exists() {
-        anyhow::bail!("Directory does not exist: {}", directory.display());
-    }
+    let directory = directory.canonicalize().with_context(|| {
+        format!(
+            "Directory does not exist or invalid: {}",
+            directory.display()
+        )
+    })?;
+
     if !directory.is_dir() {
         anyhow::bail!("Not a directory: {}", directory.display());
     }
@@ -1062,7 +1071,7 @@ async fn cmd_ingest(
     scan_spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let mut entry_count = 0u64;
-    let entries: Vec<_> = WalkDir::new(directory)
+    let entries: Vec<_> = WalkDir::new(&directory)
         .into_iter()
         .filter_map(|e| {
             if e.is_ok() {
@@ -1082,7 +1091,7 @@ async fn cmd_ingest(
 
     for entry in &entries {
         let path = entry.path();
-        let relative = path.strip_prefix(directory).unwrap_or(path);
+        let relative = path.strip_prefix(&directory).unwrap_or(path);
 
         // Skip .vrift directory
         if relative.starts_with(".vrift") {
@@ -1277,7 +1286,7 @@ async fn cmd_ingest(
                                     blob_path,
                                     true,
                                     Some("vrift".to_string()),
-                                    directory,
+                                    &directory,
                                 )
                                 .await;
                             }

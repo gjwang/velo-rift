@@ -829,10 +829,14 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
 
     let root_str = std::str::from_utf8(&root_bytes[..final_root_len]).unwrap_or("");
 
+    // RFC-0050: Canonicalize project root for ID consistency (macOS /private/tmp duality)
+    let canon_root = std::fs::canonicalize(root_str).unwrap_or_else(|_| PathBuf::from(root_str));
+    let canon_root_str = canon_root.to_string_lossy();
+
     // RFC-0044: Use standardized VDir mmap path managed by daemon
-    let project_id = vrift_config::path::compute_project_id(root_str);
+    let project_id = vrift_config::path::compute_project_id(canon_root_str.as_ref());
     let mmap_path = vrift_config::path::get_vdir_mmap_path(&project_id)
-        .unwrap_or_else(|| PathBuf::from(format!("{}/.vrift/manifest.mmap", root_str)));
+        .unwrap_or_else(|| PathBuf::from(format!("{}/.vrift/manifest.mmap", canon_root_str)));
 
     let _ = write!(writer, "{}\0", mmap_path.display());
     let mmap_path_ptr = path_buf.as_ptr() as *const libc::c_char;
@@ -1176,7 +1180,13 @@ impl InceptionLayerState {
         let mut vfs_prefix = FixedString::<256>::new();
         let prefix_ptr = unsafe { libc::getenv(c"VRIFT_VFS_PREFIX".as_ptr()) };
         if !prefix_ptr.is_null() {
-            vfs_prefix.set(&unsafe { CStr::from_ptr(prefix_ptr).to_string_lossy() });
+            let raw_prefix = unsafe { CStr::from_ptr(prefix_ptr).to_string_lossy() };
+            // RFC-0050: Canonicalize prefix for macOS /private/tmp stability
+            if let Ok(canon) = std::fs::canonicalize(raw_prefix.as_ref()) {
+                vfs_prefix.set(&canon.to_string_lossy());
+            } else {
+                vfs_prefix.set(&raw_prefix);
+            }
         }
 
         let mut socket_path = FixedString::<1024>::new();
@@ -1200,7 +1210,12 @@ impl InceptionLayerState {
             } else {
                 parent
             };
-            project_root_fs.set(&root.to_string_lossy());
+            // RFC-0050: Canonicalize project root
+            if let Ok(canon) = std::fs::canonicalize(root) {
+                project_root_fs.set(&canon.to_string_lossy());
+            } else {
+                project_root_fs.set(&root.to_string_lossy());
+            }
         }
 
         // RFC-CRIT-001: Bootstrap-Safe Allocation using raw_mmap
@@ -1426,8 +1441,8 @@ impl InceptionLayerState {
 
         // RFC-0050: Tiered Readiness Model
         let current = unsafe { INITIALIZING.load(Ordering::Acquire) };
-        if current != InceptionState::Ready as u8 {
-            // Still in hazardous dyld phase or already initializing, return None to fallback to raw syscalls
+        if current >= InceptionState::EarlyInit as u8 {
+            // Still in hazardous dyld phase or already initializing (Busy), return None to fallback to raw syscalls
             return None;
         }
 
@@ -1483,24 +1498,10 @@ impl InceptionLayerState {
         unsafe { Some(&*ptr) }
     }
 
-    pub(crate) fn query_manifest(&self, path: &str) -> Option<vrift_ipc::VnodeEntry> {
-        // Strip VFS prefix to get relative path for manifest lookup
-        let rel_path = if path.starts_with(&*self.vfs_prefix) {
-            let rel = &path[self.vfs_prefix.len()..];
-            if rel.is_empty() {
-                "/"
-            } else if !rel.starts_with('/') {
-                // Should not happen with normalized paths, but safety first
-                return None;
-            } else {
-                rel
-            }
-        } else {
-            path
-        };
-
+    pub(crate) fn query_manifest(&self, vpath: &VfsPath) -> Option<vrift_ipc::VnodeEntry> {
         // First try Hot Stat Cache (O(1) mmap lookup)
-        if let Some(entry) = mmap_lookup(self.mmap_ptr, self.mmap_size, rel_path) {
+        if let Some(entry) = mmap_lookup(self.mmap_ptr, self.mmap_size, vpath.manifest_key.as_str())
+        {
             return Some(vrift_ipc::VnodeEntry {
                 content_hash: [0u8; 32],
                 size: entry.size,
@@ -1511,7 +1512,7 @@ impl InceptionLayerState {
             });
         }
         // Fall back to IPC query
-        unsafe { sync_ipc_manifest_get(&self.socket_path, rel_path) }
+        unsafe { sync_ipc_manifest_get(&self.socket_path, vpath.manifest_key.as_str()) }
     }
 
     /// Query manifest directly via IPC (bypasses mmap cache)

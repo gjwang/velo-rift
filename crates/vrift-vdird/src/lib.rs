@@ -71,9 +71,13 @@ impl ProjectConfig {
             project_root: project_root.clone(),
             project_id: project_id.clone(),
             vdir_path,
-            socket_path: vrift_home
-                .join("sockets")
-                .join(format!("{}.sock", &project_id[..16])),
+            socket_path: std::env::var("VRIFT_SOCKET_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    vrift_home
+                        .join("sockets")
+                        .join(format!("{}.sock", &project_id[..16]))
+                }),
             staging_base: project_root.join(".vrift").join("staging"),
             cas_path: std::env::var("VR_THE_SOURCE")
                 .map(PathBuf::from)

@@ -237,19 +237,22 @@ pub unsafe fn raw_fstat64(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int 
 #[inline(never)]
 pub unsafe fn raw_close(fd: libc::c_int) -> libc::c_int {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_CLOSE,
         in("x0") fd as i64,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
-    if ret < 0 {
-        -1
-    } else {
-        ret as libc::c_int
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
     }
+    ret as libc::c_int
 }
 
 /// Raw mmap syscall for macOS ARM64.
@@ -264,9 +267,11 @@ pub unsafe fn raw_mmap(
     offset: libc::off_t,
 ) -> *mut libc::c_void {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_MMAP,
         in("x0") addr as i64,
         in("x1") len as i64,
@@ -275,8 +280,13 @@ pub unsafe fn raw_mmap(
         in("x4") fd as i64,
         in("x5") offset,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return libc::MAP_FAILED;
+    }
     ret as *mut libc::c_void
 }
 
@@ -285,20 +295,23 @@ pub unsafe fn raw_mmap(
 #[inline(never)]
 pub unsafe fn raw_munmap(addr: *mut libc::c_void, len: libc::size_t) -> libc::c_int {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_MUNMAP,
         in("x0") addr as i64,
         in("x1") len as i64,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
-    if ret < 0 {
-        -1
-    } else {
-        ret as libc::c_int
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
     }
+    ret as libc::c_int
 }
 
 /// Raw access syscall for macOS ARM64.
@@ -342,16 +355,23 @@ pub unsafe fn raw_read(
     count: libc::size_t,
 ) -> libc::ssize_t {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_READ,
         in("x0") fd as i64,
         in("x1") buf as i64,
         in("x2") count as i64,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
     ret as libc::ssize_t
 }
 
@@ -364,16 +384,23 @@ pub unsafe fn raw_write(
     count: libc::size_t,
 ) -> libc::ssize_t {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_WRITE,
         in("x0") fd as i64,
         in("x1") buf as i64,
         in("x2") count as i64,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
     ret as libc::ssize_t
 }
 
@@ -398,19 +425,22 @@ const SYS_FTRUNCATE: i64 = 201;
 #[inline(never)]
 pub unsafe fn raw_dup(oldfd: libc::c_int) -> libc::c_int {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_DUP,
         in("x0") oldfd as i64,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
-    if ret < 0 {
-        -1
-    } else {
-        ret as libc::c_int
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
     }
+    ret as libc::c_int
 }
 
 /// Raw dup2 syscall for macOS ARM64.
@@ -418,20 +448,23 @@ pub unsafe fn raw_dup(oldfd: libc::c_int) -> libc::c_int {
 #[inline(never)]
 pub unsafe fn raw_dup2(oldfd: libc::c_int, newfd: libc::c_int) -> libc::c_int {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_DUP2,
         in("x0") oldfd as i64,
         in("x1") newfd as i64,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
-    if ret < 0 {
-        -1
-    } else {
-        ret as libc::c_int
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
     }
+    ret as libc::c_int
 }
 
 /// Raw lseek syscall for macOS ARM64.
@@ -439,16 +472,23 @@ pub unsafe fn raw_dup2(oldfd: libc::c_int, newfd: libc::c_int) -> libc::c_int {
 #[inline(never)]
 pub unsafe fn raw_lseek(fd: libc::c_int, offset: libc::off_t, whence: libc::c_int) -> libc::off_t {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_LSEEK,
         in("x0") fd as i64,
         in("x1") offset,
         in("x2") whence as i64,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
     ret as libc::off_t
 }
 
@@ -457,20 +497,23 @@ pub unsafe fn raw_lseek(fd: libc::c_int, offset: libc::off_t, whence: libc::c_in
 #[inline(never)]
 pub unsafe fn raw_ftruncate(fd: libc::c_int, length: libc::off_t) -> libc::c_int {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_FTRUNCATE,
         in("x0") fd as i64,
         in("x1") length,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
-    if ret < 0 {
-        -1
-    } else {
-        ret as libc::c_int
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
     }
+    ret as libc::c_int
 }
 
 /// Raw openat syscall for macOS ARM64.
@@ -518,21 +561,24 @@ pub unsafe fn raw_open(
 #[inline(never)]
 pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: libc::c_int) -> libc::c_int {
     let ret: i64;
+    let err: i64;
     asm!(
         "mov x16, {syscall}",
         "svc #0x80",
+        "cset {err}, cs",
         syscall = in(reg) SYS_FCNTL,
         in("x0") fd as i64,
         in("x1") cmd as i64,
         in("x2") arg as i64,
         lateout("x0") ret,
+        err = out(reg) err,
         options(nostack)
     );
-    if ret < 0 {
-        -1
-    } else {
-        ret as libc::c_int
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
     }
+    ret as libc::c_int
 }
 
 /// Raw chmod syscall for macOS ARM64.

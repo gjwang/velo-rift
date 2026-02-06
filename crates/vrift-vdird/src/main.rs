@@ -21,7 +21,14 @@ async fn main() -> Result<()> {
     // Parse args
     let args: Vec<String> = std::env::args().collect();
     let project_root = if args.len() > 1 {
-        PathBuf::from(&args[1])
+        let first_arg = &args[1];
+        if first_arg == "start" && args.len() > 2 {
+            PathBuf::from(&args[2])
+        } else if first_arg == "start" {
+            std::env::current_dir().context("Failed to get current directory")?
+        } else {
+            PathBuf::from(first_arg)
+        }
     } else {
         std::env::current_dir().context("Failed to get current directory")?
     };

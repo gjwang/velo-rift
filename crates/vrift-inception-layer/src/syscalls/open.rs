@@ -63,7 +63,13 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             let fd = unsafe { raw_open(path, flags, mode) };
             if fd >= 0 {
                 // Track FD for Live Ingest on close() - especially important for writes
-                crate::syscalls::io::track_fd(fd, &vpath.manifest_key, true, None);
+                crate::syscalls::io::track_fd(
+                    fd,
+                    &vpath.manifest_key,
+                    true,
+                    None,
+                    vpath.manifest_key_hash,
+                );
                 return Some(fd);
             }
             return None;
@@ -188,6 +194,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             let entry = Box::into_raw(Box::new(crate::syscalls::io::FdEntry {
                 vpath: vpath.absolute,
                 manifest_key: vpath.manifest_key,
+                manifest_key_hash: vpath.manifest_key_hash,
                 temp_path,
                 is_vfs: true,
                 cached_stat: None,
@@ -214,9 +221,15 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             cached_stat.st_mtime = entry.mtime as _;
             cached_stat.st_dev = 0x52494654; // "RIFT"
             cached_stat.st_nlink = 1;
-            cached_stat.st_ino = vrift_ipc::fnv1a_hash(&vpath.manifest_key) as _;
+            cached_stat.st_ino = vpath.manifest_key_hash as _;
 
-            crate::syscalls::io::track_fd(fd, &vpath.manifest_key, true, Some(cached_stat));
+            crate::syscalls::io::track_fd(
+                fd,
+                &vpath.manifest_key,
+                true,
+                Some(cached_stat),
+                vpath.manifest_key_hash,
+            );
             Some(fd)
         } else {
             None
@@ -330,11 +343,8 @@ pub unsafe extern "C" fn open_inception_c_impl(p: *const c_char, f: c_int, m: mo
             None => return raw_open_internal(p, f, m),
         };
 
-        let fd = velo_open_impl(p, f, m);
-        if fd >= 0 {
-            crate::syscalls::io::OPEN_FD_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
-        fd
+        
+        velo_open_impl(p, f, m)
     };
 
     fd

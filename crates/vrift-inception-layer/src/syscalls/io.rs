@@ -17,6 +17,7 @@ pub static OPEN_FD_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub struct FdEntry {
     pub vpath: crate::state::FixedString<1024>,
     pub manifest_key: crate::state::FixedString<1024>,
+    pub manifest_key_hash: u64,
     pub temp_path: crate::state::FixedString<1024>,
     pub is_vfs: bool,
     pub cached_stat: Option<libc::stat>,
@@ -28,7 +29,13 @@ pub struct FdEntry {
 
 /// Track a new FD opened for a VFS path
 #[inline(always)]
-pub fn track_fd(fd: c_int, path: &str, is_vfs: bool, cached_stat: Option<libc::stat>) {
+pub fn track_fd(
+    fd: c_int,
+    path: &str,
+    is_vfs: bool,
+    cached_stat: Option<libc::stat>,
+    manifest_key_hash: u64,
+) {
     if fd < 0 {
         return;
     }
@@ -39,6 +46,7 @@ pub fn track_fd(fd: c_int, path: &str, is_vfs: bool, cached_stat: Option<libc::s
     let entry = Box::into_raw(Box::new(FdEntry {
         vpath: vpath_fs,
         manifest_key: vpath_fs, // For now assume path is the manifest key if not otherwise specified
+        manifest_key_hash,
         temp_path: crate::state::FixedString::new(),
         is_vfs,
         cached_stat,
@@ -147,7 +155,13 @@ pub unsafe extern "C" fn dup_inception(oldfd: c_int) -> c_int {
     if newfd >= 0 {
         // Copy tracking from oldfd to newfd
         if let Some(entry) = get_fd_entry(oldfd) {
-            track_fd(newfd, entry.vpath.as_str(), entry.is_vfs, entry.cached_stat);
+            track_fd(
+                newfd,
+                entry.vpath.as_str(),
+                entry.is_vfs,
+                entry.cached_stat,
+                entry.manifest_key_hash,
+            );
         }
     }
     newfd
@@ -195,6 +209,7 @@ pub unsafe extern "C" fn dup2_inception(oldfd: c_int, newfd: c_int) -> c_int {
                 entry.vpath.as_str(),
                 entry.is_vfs,
                 entry.cached_stat,
+                entry.manifest_key_hash,
             );
         }
     }
@@ -317,7 +332,6 @@ pub unsafe extern "C" fn close_inception(fd: c_int) -> c_int {
     let cow_info = {
         let entry_ptr = state.open_fds.remove(fd as u32);
         if !entry_ptr.is_null() {
-            crate::syscalls::io::OPEN_FD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             unsafe { Some(*Box::from_raw(entry_ptr)) }
         } else {
             None

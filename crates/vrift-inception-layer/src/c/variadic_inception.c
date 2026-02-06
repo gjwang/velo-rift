@@ -137,11 +137,12 @@ static inline long raw_syscall(long number, long arg1, long arg2, long arg3,
 }
 #endif
 
-/* --- Implementation Functions (called by Rust proxies or direct inception layers) --- */
+/* --- Implementation Functions (called by Rust proxies or direct inception
+ * layers) --- */
 
-// Linux interception is handled in interpose.rs using Rust inception layers to ensure
-// reliable symbol export. macOS inception layerming uses this C bridge to handle variadic
-// ABI.
+// Linux interception is handled in interpose.rs using Rust inception layers to
+// ensure reliable symbol export. macOS inception layerming uses this C bridge
+// to handle variadic ABI.
 #include <fcntl.h>
 #include <stdarg.h>
 
@@ -154,7 +155,7 @@ int c_open_bridge(const char *path, int flags, ...) {
     mode = (mode_t)va_arg(args, int);
     va_end(args);
   }
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_OPEN, (long)path, (long)flags, (long)mode, 0);
   }
   return velo_open_impl(path, flags, mode);
@@ -168,7 +169,7 @@ int c_openat_bridge(int dirfd, const char *path, int flags, ...) {
     mode = (mode_t)va_arg(args, int);
     va_end(args);
   }
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_OPENAT, (long)dirfd, (long)path, (long)flags,
                             (long)mode);
   }
@@ -176,42 +177,42 @@ int c_openat_bridge(int dirfd, const char *path, int flags, ...) {
 }
 
 int c_stat_bridge(const char *path, void *buf) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_STAT64, (long)path, (long)buf, 0, 0);
   }
   return velo_stat_impl(path, buf);
 }
 
 int c_lstat_bridge(const char *path, void *buf) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_LSTAT64, (long)path, (long)buf, 0, 0);
   }
   return velo_lstat_impl(path, buf);
 }
 
 int c_access_bridge(const char *path, int mode) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_ACCESS, (long)path, (long)mode, 0, 0);
   }
   return velo_access_impl(path, mode);
 }
 
 long c_readlink_bridge(const char *path, char *buf, size_t bufsiz) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return raw_syscall(SYS_READLINK, (long)path, (long)buf, (long)bufsiz, 0);
   }
   return velo_readlink_impl(path, buf, bufsiz);
 }
 
 int c_fstat_bridge(int fd, void *buf) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_FSTAT64, (long)fd, (long)buf, 0, 0);
   }
   return velo_fstat_impl(fd, buf);
 }
 
 int c_fstatat_bridge(int dirfd, const char *path, void *buf, int flags) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_FSTATAT64, (long)dirfd, (long)path, (long)buf,
                             (long)flags);
   }
@@ -229,14 +230,14 @@ extern int velo_renameat_impl(int oldfd, const char *old, int newfd,
 
 #if defined(__APPLE__)
 int c_rename_bridge(const char *old, const char *new) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_RENAME, (long)old, (long)new, 0, 0);
   }
   return velo_rename_impl(old, new);
 }
 
 int c_renameat_bridge(int oldfd, const char *old, int newfd, const char *new) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_RENAMEAT, (long)oldfd, (long)old, (long)newfd,
                             (long)new);
   }
@@ -254,7 +255,7 @@ extern int setattrlist_inception(const char *path, void *attrlist,
                                  unsigned long options);
 
 int c_creat_bridge(const char *path, mode_t mode) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_OPEN, (long)path,
                             (long)(O_CREAT | O_WRONLY | O_TRUNC), (long)mode,
                             0);
@@ -278,7 +279,7 @@ extern int velo_fcntl_impl(int fd, int cmd, long arg);
 
 #if defined(__APPLE__)
 int fcntl_inception_c_impl(int fd, int cmd, long arg) {
-  if (INITIALIZING != 0) {
+  if (INITIALIZING >= 2) {
     return (int)raw_syscall(SYS_FCNTL, (long)fd, (long)cmd, (long)arg, 0);
   }
   return velo_fcntl_impl(fd, cmd, arg);

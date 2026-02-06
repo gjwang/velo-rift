@@ -190,8 +190,9 @@ pub fn normalize_relative_to(path: impl AsRef<Path>, root: impl AsRef<Path>) -> 
 /// This ensures consistent project identification across versions and platforms.
 pub fn compute_project_id(project_root: impl AsRef<Path>) -> String {
     let path = project_root.as_ref();
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut hasher = blake3::Hasher::new();
-    hasher.update(path.to_string_lossy().as_bytes());
+    hasher.update(canon.to_string_lossy().as_bytes());
     hasher.finalize().to_hex().to_string()
 }
 

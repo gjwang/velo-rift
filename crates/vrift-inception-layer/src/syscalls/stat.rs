@@ -45,26 +45,17 @@ pub struct statx {
 unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int> {
     let state = InceptionLayerState::get()?;
 
-    // Check if in VFS domain (O(1) prefix check)
-    if !state.inception_applicable(path_str) {
-        return None;
-    }
+    // 1. Resolve path to VFS domain
+    let vpath = state.resolve_path(path_str)?;
 
-    // Strip VFS prefix to get manifest-relative path
-    // e.g., "/vrift/file_1.txt" -> "/file_1.txt"
-    // Manifest stores paths WITH leading slash (e.g., "/file_1.txt")
-    let manifest_path = if let Some(stripped) = path_str.strip_prefix(state.vfs_prefix.as_ref()) {
-        stripped
-    } else {
-        path_str // Fallback if prefix doesn't match
-    };
+    let manifest_path = vpath.manifest_key.as_str();
 
     // DEBUG: Log first 3 lookups
     static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if count < 3 {
         eprintln!(
-            "[DEBUG] stat: path='{}' manifest_path='{}'",
+            "[DEBUG] stat: path='{}' manifest_key='{}'",
             path_str, manifest_path
         );
     }
@@ -86,9 +77,9 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
                 // Virtualize the dev/ino to match VFS expectations
                 unsafe {
                     (*buf).st_dev = 0x52494654; // "RIFT"
-                    (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str) as _;
+                    (*buf).st_ino = vpath.manifest_key_hash as _;
                 }
-                inception_record!(EventType::StatHit, vrift_ipc::fnv1a_hash(path_str), 0);
+                inception_record!(EventType::StatHit, vpath.manifest_key_hash, 0);
                 return Some(0);
             }
         }
@@ -114,8 +105,8 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
             }
             (*buf).st_dev = 0x52494654; // "RIFT"
             (*buf).st_nlink = 1;
-            (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str) as _;
-            inception_record!(EventType::StatHit, vrift_ipc::fnv1a_hash(path_str), 0);
+            (*buf).st_ino = vpath.manifest_key_hash as _;
+            inception_record!(EventType::StatHit, vpath.manifest_key_hash, 0);
             return Some(0);
         }
     }
@@ -125,7 +116,7 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
     }
 
     // Try IPC query (also use manifest path format)
-    if let Some(entry) = state.query_manifest(manifest_path) {
+    if let Some(entry) = state.query_manifest(&vpath) {
         std::ptr::write_bytes(buf, 0, 1);
         (*buf).st_size = entry.size as _;
         #[cfg(target_os = "macos")]
@@ -140,8 +131,8 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
         }
         (*buf).st_dev = 0x52494654; // "RIFT"
         (*buf).st_nlink = 1;
-        (*buf).st_ino = vrift_ipc::fnv1a_hash(path_str) as _;
-        inception_record!(EventType::StatHit, vrift_ipc::fnv1a_hash(path_str), 0);
+        (*buf).st_ino = vpath.manifest_key_hash as _;
+        inception_record!(EventType::StatHit, vpath.manifest_key_hash, 0);
         return Some(0);
     }
 
@@ -241,7 +232,7 @@ pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_in
                 if res == 0 {
                     // Virtualize the dev/ino to match VFS expectations
                     (*buf).st_dev = 0x52494654;
-                    (*buf).st_ino = vrift_ipc::fnv1a_hash(entry.vpath.as_str()) as _;
+                    (*buf).st_ino = entry.manifest_key_hash as _;
                     return 0;
                 }
             }
@@ -254,23 +245,26 @@ pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_in
 
             // Fallback for VFS files without cached stat (rare?)
             if entry.is_vfs {
-                if let Some(vnode) = state.query_manifest(entry.vpath.as_str()) {
-                    std::ptr::write_bytes(buf, 0, 1);
-                    (*buf).st_size = vnode.size as _;
-                    #[cfg(target_os = "macos")]
-                    {
-                        (*buf).st_mode = vnode.mode as u16;
+                // BUG FIX: Use resolve_path to get a VfsPath for query_manifest
+                if let Some(vpath) = state.resolve_path(entry.vpath.as_str()) {
+                    if let Some(vnode) = state.query_manifest(&vpath) {
+                        std::ptr::write_bytes(buf, 0, 1);
+                        (*buf).st_size = vnode.size as _;
+                        #[cfg(target_os = "macos")]
+                        {
+                            (*buf).st_mode = vnode.mode as u16;
+                        }
+                        #[cfg(target_os = "linux")]
+                        {
+                            (*buf).st_mode = vnode.mode as _;
+                        }
+                        (*buf).st_mtime = vnode.mtime as _;
+                        (*buf).st_dev = 0x52494654;
+                        (*buf).st_nlink = 1;
+                        (*buf).st_ino = vpath.manifest_key_hash as _;
+                        inception_record!(EventType::StatHit, vpath.manifest_key_hash, 0);
+                        return 0;
                     }
-                    #[cfg(target_os = "linux")]
-                    {
-                        (*buf).st_mode = vnode.mode as _;
-                    }
-                    (*buf).st_mtime = vnode.mtime as _;
-                    (*buf).st_dev = 0x52494654;
-                    (*buf).st_nlink = 1;
-                    (*buf).st_ino = vrift_ipc::fnv1a_hash(entry.vpath.as_str()) as _;
-                    inception_record!(EventType::StatHit, (*buf).st_ino, 0);
-                    return 0;
                 }
             }
         }

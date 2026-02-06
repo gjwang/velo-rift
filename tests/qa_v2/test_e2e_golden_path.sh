@@ -15,6 +15,8 @@ VFS_PREFIX="/tmp/vrift_gold_$$"
 SRC_DATA="$VFS_PREFIX/src"
 WORK_DIR="$VFS_PREFIX/project"
 CAS_ROOT="$VFS_PREFIX/cas"
+VRIFT_SOCKET_PATH="$VFS_PREFIX/vrift.sock"
+export VRIFT_SOCKET_PATH
 
 # Platform detection
 OS=$(uname -s)
@@ -49,29 +51,27 @@ echo "Nested Data" > "$WORK_DIR/src/subdir/nested.txt"
 echo "🚀 [Phase A] Background Service Installation..."
 pkill vriftd || true
 # Socket might be in VR_THE_SOURCE or default /tmp
-rm -f /tmp/vrift.sock || true
+rm -f "$VRIFT_SOCKET_PATH" || true
 
-# Try service install, but fallback to manual start if it fails (common in Docker)
-if ! $VRIFT_BIN --the-source-root "$CAS_ROOT" service install 2>/dev/null; then
-    echo "⚠️  Service install failed (possibly no systemd). Falling back to manual start..."
-    # Start vriftd in background with stdin detached to prevent exit on parent script termination
-    vriftd_bin="$(dirname "$VRIFT_BIN")/vriftd"
-    VR_THE_SOURCE="$CAS_ROOT" "$vriftd_bin" start </dev/null > /tmp/vriftd.log 2>&1 &
-    disown
-    sleep 2
-fi
+# Force manual start for isolation (service install doesn't inherit environment)
+echo "   Starting vriftd manually for isolation..."
+vriftd_bin="$(dirname "$VRIFT_BIN")/vriftd"
+VR_THE_SOURCE="$CAS_ROOT" VRIFT_LOG=debug "$vriftd_bin" start </dev/null > /tmp/vriftd.log 2>&1 &
+vriftd_pid=$!
+disown
+sleep 2
 
 # Wait for socket to be created (launchd takes a moment to start the daemon)
 echo "   Waiting for service socket..."
 for i in {1..10}; do
-    if [ -S "/tmp/vrift.sock" ]; then
+    if [ -S "$VRIFT_SOCKET_PATH" ]; then
         break
     fi
     sleep 0.5
 done
 
 # Verify service is running
-if ! pgrep vriftd >/dev/null && [ ! -S "/tmp/vrift.sock" ]; then 
+if ! pgrep vriftd >/dev/null && [ ! -S "$VRIFT_SOCKET_PATH" ]; then 
     echo "❌ Service failed to start"
     [ -f /tmp/vriftd.log ] && cat /tmp/vriftd.log
     exit 1
@@ -96,7 +96,7 @@ echo "🌀 [Phase C] VFS Inception & Mutation Audit..."
 MINI_READ="$PROJECT_ROOT/tests/qa_v2/mini_read"
 MINI_MKDIR="$PROJECT_ROOT/tests/qa_v2/mini_mkdir"
 
-VFS_ENV="$VFS_ENV_BASE VRIFT_MANIFEST=$WORK_DIR/.vrift/manifest.lmdb VR_THE_SOURCE=$CAS_ROOT VRIFT_PROJECT_ROOT=$WORK_DIR VRIFT_VFS_PREFIX=$WORK_DIR VRIFT_DEBUG=1"
+VFS_ENV="$VFS_ENV_BASE VRIFT_MANIFEST=$WORK_DIR/.vrift/manifest.lmdb VR_THE_SOURCE=$CAS_ROOT VRIFT_PROJECT_ROOT=$WORK_DIR VRIFT_VFS_PREFIX=$WORK_DIR VRIFT_SOCKET_PATH=$VRIFT_SOCKET_PATH VRIFT_DEBUG=1"
 
 echo "   Testing Virtual Read..."
 # Using mini_read to bypass SIP issues

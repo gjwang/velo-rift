@@ -192,33 +192,42 @@ unsafe fn sync_rpc(
     // Success - reset failure count
     CIRCUIT_BREAKER_FAILED_COUNT.store(0, Ordering::Relaxed);
 
-    /* RFC-0043: Registration is now handled lazily by the daemon or via a persistent connection.
-       Removing redundant round-trip to prevent backlog saturation (Pattern 2682.v3).
+    // RFC-0043: Registration ensures the daemon knows which project manifest to query.
     let project_root = {
-        let env_ptr = libc::getenv(c"VRIFT_PROJECT_ROOT".as_ptr());
+        let env_ptr = unsafe { libc::getenv(c"VRIFT_PROJECT_ROOT".as_ptr()) };
         if !env_ptr.is_null() {
-            std::ffi::CStr::from_ptr(env_ptr)
+            unsafe { std::ffi::CStr::from_ptr(env_ptr) }
                 .to_string_lossy()
                 .to_string()
         } else {
-            let manifest_ptr = libc::getenv(c"VRIFT_MANIFEST".as_ptr());
+            let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
             if !manifest_ptr.is_null() {
-                let manifest = std::ffi::CStr::from_ptr(manifest_ptr).to_string_lossy();
+                let manifest = unsafe { std::ffi::CStr::from_ptr(manifest_ptr).to_string_lossy() };
                 let p = std::path::Path::new(manifest.as_ref());
                 let parent = p.parent().unwrap_or(p);
-                if parent.ends_with(".vrift") {
-                    parent
-                        .parent()
-                        .unwrap_or(parent)
-                        .to_string_lossy()
-                        .to_string()
+                let root = if parent.ends_with(".vrift") {
+                    parent.parent().unwrap_or(parent)
                 } else {
-                    parent.to_string_lossy().to_string()
-                }
+                    parent
+                };
+                root.canonicalize()
+                    .unwrap_or_else(|_| root.to_path_buf())
+                    .to_string_lossy()
+                    .to_string()
             } else {
                 String::new()
             }
         }
+    };
+
+    // Ensure project_root is canonicalized if from VRIFT_PROJECT_ROOT
+    let project_root = if !project_root.is_empty() {
+        std::fs::canonicalize(&project_root)
+            .unwrap_or_else(|_| std::path::PathBuf::from(project_root))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        project_root
     };
 
     if !project_root.is_empty() {
@@ -227,7 +236,6 @@ unsafe fn sync_rpc(
             let _ = recv_response_on_fd(fd);
         }
     }
-    */
 
     // Send original request
     if !send_request_on_fd(fd, request) {

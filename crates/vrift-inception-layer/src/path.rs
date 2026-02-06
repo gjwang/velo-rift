@@ -59,7 +59,19 @@ impl PathResolver {
         let normalized = std::str::from_utf8(&norm_buf[..len]).ok()?;
 
         // 3. Check VFS applicability
-        if !normalized.starts_with(self.vfs_prefix.as_str()) {
+        let prefix = self.vfs_prefix.as_str();
+        let mut applicable = normalized.starts_with(prefix);
+
+        // RFC-0050: Handle macOS /tmp symlink invisibility
+        #[cfg(target_os = "macos")]
+        if !applicable && normalized.starts_with("/tmp/") {
+            let mut alt_buf = [0u8; 1024];
+            let mut aw = crate::macros::StackWriter::new(&mut alt_buf);
+            let _ = write!(aw, "/private{}", normalized);
+            applicable = aw.as_str().starts_with(prefix);
+        }
+
+        if !applicable {
             return None;
         }
 
@@ -76,13 +88,41 @@ impl PathResolver {
         let mut key_fs = FixedString::<1024>::new();
         let proj_root_str = self.project_root.as_str();
 
-        if !self.project_root.is_empty()
-            && normalized.starts_with(proj_root_str)
-            && (normalized.len() == proj_root_str.len()
+        let mut normalized_for_strip = normalized;
+        #[cfg(target_os = "macos")]
+        if !normalized.starts_with(proj_root_str) && normalized.starts_with("/tmp/") {
+            // Try the /private variant for stripping
+            let mut alt_buf = [0u8; 1024];
+            let mut aw = crate::macros::StackWriter::new(&mut alt_buf);
+            let _ = write!(aw, "/private{}", normalized);
+            // We need a way to use aw.as_str() longer than the let binding.
+            // Actually, since we only use it for stripping prefix, we can do it here.
+            let alt_normalized = aw.as_str();
+            if alt_normalized.starts_with(proj_root_str) {
+                let key = alt_normalized.strip_prefix(proj_root_str).unwrap_or("");
+                if !key.starts_with('/') {
+                    let mut key_buf = [0u8; 1024];
+                    let mut kw = crate::macros::StackWriter::new(&mut key_buf);
+                    let _ = write!(kw, "/{}", key);
+                    key_fs.set(kw.as_str());
+                } else {
+                    key_fs.set(key);
+                }
+                // Set flag to skip normal stripping
+                normalized_for_strip = "";
+            }
+        }
+
+        if !normalized_for_strip.is_empty()
+            && !self.project_root.is_empty()
+            && normalized_for_strip.starts_with(proj_root_str)
+            && (normalized_for_strip.len() == proj_root_str.len()
                 || proj_root_str.ends_with('/')
-                || normalized.as_bytes()[proj_root_str.len()] == b'/')
+                || normalized_for_strip.as_bytes()[proj_root_str.len()] == b'/')
         {
-            let key = normalized.strip_prefix(proj_root_str).unwrap_or("");
+            let key = normalized_for_strip
+                .strip_prefix(proj_root_str)
+                .unwrap_or("");
             if !key.starts_with('/') {
                 let mut key_buf = [0u8; 1024];
                 let mut kw = crate::macros::StackWriter::new(&mut key_buf);
