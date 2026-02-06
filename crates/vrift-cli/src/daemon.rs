@@ -134,9 +134,12 @@ pub async fn connect_to_daemon(project_root: &Path) -> Result<UnixStream> {
     send_request(&mut stream, handshake).await?;
     let _ = read_response(&mut stream).await?;
 
-    // 2. Register Workspace
+    // 2. Register Workspace (canonicalize to ensure daemon can find it)
+    let abs_project_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
     let register = VeloRequest::RegisterWorkspace {
-        project_root: project_root.to_string_lossy().to_string(),
+        project_root: abs_project_root.to_string_lossy().to_string(),
     };
     send_request(&mut stream, register).await?;
     let resp = read_response(&mut stream).await?;
@@ -222,14 +225,18 @@ pub async fn send_request(stream: &mut UnixStream, req: VeloRequest) -> Result<(
 }
 
 pub async fn read_response(stream: &mut UnixStream) -> Result<VeloResponse> {
+    tracing::debug!("[CLI] Waiting for response length...");
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
+    tracing::debug!("[CLI] Response length: {} bytes", len);
 
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
+    tracing::debug!("[CLI] Response body received");
 
-    let resp = bincode::deserialize(&buf)?;
+    let resp: VeloResponse = bincode::deserialize(&buf)?;
+    tracing::debug!("[CLI] Response deserialized: {:?}", resp);
     Ok(resp)
 }
 
@@ -266,7 +273,9 @@ pub async fn ingest_via_daemon(
         .unwrap_or_else(|_| manifest_path.to_path_buf());
 
     // Use simple connection - IngestFullScan doesn't need workspace context
+    tracing::info!("[CLI] Connecting to daemon for ingest...");
     let mut stream = connect_simple().await?;
+    tracing::info!("[CLI] Connected to daemon successfully");
 
     let req = VeloRequest::IngestFullScan {
         path: abs_path.to_string_lossy().to_string(),
@@ -277,10 +286,17 @@ pub async fn ingest_via_daemon(
         tier1,
     };
 
-    tracing::info!("Requesting daemon to ingest: {:?}", path);
+    tracing::info!(
+        "[CLI] Sending IngestFullScan request: path={:?}, manifest={:?}, cas={:?}",
+        abs_path,
+        abs_manifest,
+        abs_cas
+    );
     send_request(&mut stream, req).await?;
+    tracing::info!("[CLI] IngestFullScan request sent, waiting for response...");
 
     let resp = read_response(&mut stream).await?;
+    tracing::info!("[CLI] Received ingest response");
     match resp {
         VeloResponse::IngestAck {
             files,

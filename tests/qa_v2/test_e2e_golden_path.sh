@@ -54,9 +54,10 @@ rm -f /tmp/vrift.sock || true
 # Try service install, but fallback to manual start if it fails (common in Docker)
 if ! $VRIFT_BIN --the-source-root "$CAS_ROOT" service install 2>/dev/null; then
     echo "⚠️  Service install failed (possibly no systemd). Falling back to manual start..."
-    # Start vriftd in background
+    # Start vriftd in background with stdin detached to prevent exit on parent script termination
     vriftd_bin="$(dirname "$VRIFT_BIN")/vriftd"
-    VR_THE_SOURCE="$CAS_ROOT" "$vriftd_bin" start > /tmp/vriftd.log 2>&1 &
+    VR_THE_SOURCE="$CAS_ROOT" "$vriftd_bin" start </dev/null > /tmp/vriftd.log 2>&1 &
+    disown
     sleep 2
 fi
 

@@ -458,42 +458,63 @@ async fn start_daemon() -> Result<()> {
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) {
+    tracing::info!("[DAEMON] New connection accepted");
     let peer_creds = PeerCredentials::from_stream(&stream);
     let daemon_uid = unsafe { libc::getuid() };
     let mut current_workspace: Option<Arc<WorkspaceState>> = None;
 
     loop {
+        tracing::debug!("[DAEMON] Waiting for request...");
         let mut len_buf = [0u8; 4];
         if stream.read_exact(&mut len_buf).await.is_err() {
+            tracing::debug!("[DAEMON] Connection closed (read length failed)");
             return;
         }
         let len = u32::from_le_bytes(len_buf) as usize;
+        tracing::debug!("[DAEMON] Request length: {} bytes", len);
 
         if len > MAX_IPC_SIZE {
-            tracing::warn!("IPC message too large: {} bytes", len);
+            tracing::warn!("[DAEMON] IPC message too large: {} bytes", len);
             return;
         }
 
         let mut buf = vec![0u8; len];
         if stream.read_exact(&mut buf).await.is_err() {
+            tracing::debug!("[DAEMON] Connection closed (read body failed)");
             return;
         }
+        tracing::debug!("[DAEMON] Request body received");
 
         let response = match bincode::deserialize::<VeloRequest>(&buf) {
             Ok(req) => {
-                handle_request(req, &state, peer_creds, daemon_uid, &mut current_workspace).await
+                tracing::info!(
+                    "[DAEMON] Processing request: {:?}",
+                    std::mem::discriminant(&req)
+                );
+                let resp =
+                    handle_request(req, &state, peer_creds, daemon_uid, &mut current_workspace)
+                        .await;
+                tracing::info!(
+                    "[DAEMON] Request processed, response: {:?}",
+                    std::mem::discriminant(&resp)
+                );
+                resp
             }
             Err(e) => VeloResponse::Error(format!("Invalid request: {}", e)),
         };
 
+        tracing::debug!("[DAEMON] Sending response...");
         let resp_bytes = bincode::serialize(&response).unwrap();
         let resp_len = (resp_bytes.len() as u32).to_le_bytes();
         if stream.write_all(&resp_len).await.is_err() {
+            tracing::debug!("[DAEMON] Connection closed (write length failed)");
             return;
         }
         if stream.write_all(&resp_bytes).await.is_err() {
+            tracing::debug!("[DAEMON] Connection closed (write body failed)");
             return;
         }
+        tracing::debug!("[DAEMON] Response sent successfully");
     }
 }
 

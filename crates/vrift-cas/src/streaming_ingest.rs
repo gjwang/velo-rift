@@ -26,55 +26,89 @@ pub fn streaming_ingest(
 ) -> Vec<Result<IngestResult, CasError>> {
     use crate::zero_copy_ingest::{ingest_phantom, ingest_solid_tier1, ingest_solid_tier2};
 
+    tracing::info!(
+        "[INGEST] streaming_ingest starting: source={:?}, cas={:?}",
+        source,
+        cas_root
+    );
+
     let (tx, rx): (Sender<PathBuf>, Receiver<PathBuf>) = channel::bounded(CHANNEL_CAP);
 
     let results: Arc<std::sync::Mutex<Vec<Result<IngestResult, CasError>>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let num_threads = threads.unwrap_or_else(|| std::cmp::min(4, num_cpus::get() / 2).max(1));
-    let thread_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .expect("Failed to create thread pool");
+    tracing::info!("[INGEST] Using {} worker threads", num_threads);
 
     // Scanner thread - sends paths, then drops tx to signal completion
     let source_path = source.to_path_buf();
+    tracing::info!("[INGEST] Starting scanner thread for: {:?}", source_path);
     let scanner = std::thread::spawn(move || {
+        let mut file_count = 0;
         for entry in WalkDir::new(&source_path)
             .into_iter()
+            // Skip .vrift and .git directories entirely (avoids flock deadlock on LMDB lock files)
+            .filter_entry(|e| {
+                let name = e.file_name().to_str().unwrap_or("");
+                name != ".vrift" && name != ".git"
+            })
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
         {
             let path = entry.into_path();
+            file_count += 1;
             if tx.send(path).is_err() {
-                break; // Receivers dropped
+                tracing::warn!("[INGEST] Scanner: receivers dropped, stopping");
+                break;
             }
         }
-        // tx dropped here, receivers get Disconnected
+        tracing::info!("[INGEST] Scanner complete: {} files found", file_count);
     });
 
-    // Workers - receive until channel disconnected
-    let cas = cas_root;
-    thread_pool.install(|| {
-        rayon::scope(|s| {
-            for _ in 0..num_threads {
-                let rx = rx.clone();
-                let r = Arc::clone(&results);
-                s.spawn(move |_| {
-                    for path in rx {
-                        let result = match mode {
-                            IngestMode::Phantom => ingest_phantom(&path, cas),
-                            IngestMode::SolidTier1 => ingest_solid_tier1(&path, cas),
-                            IngestMode::SolidTier2 => ingest_solid_tier2(&path, cas),
-                        };
-                        r.lock().unwrap().push(result);
-                    }
-                });
-            }
-        });
-    });
+    // Spawn worker threads using std::thread (more predictable than rayon scope)
+    let cas = cas_root.to_path_buf();
+    tracing::info!("[INGEST] Starting worker threads");
 
+    let workers: Vec<_> = (0..num_threads)
+        .map(|i| {
+            let rx = rx.clone();
+            let r = Arc::clone(&results);
+            let cas = cas.clone();
+            std::thread::spawn(move || {
+                tracing::info!("[INGEST] Worker {} started", i);
+                let mut processed = 0;
+                for path in rx {
+                    tracing::info!("[INGEST] Worker {} processing: {:?}", i, path);
+                    let result = match mode {
+                        IngestMode::Phantom => ingest_phantom(&path, &cas),
+                        IngestMode::SolidTier1 => ingest_solid_tier1(&path, &cas),
+                        IngestMode::SolidTier2 => ingest_solid_tier2(&path, &cas),
+                    };
+                    tracing::info!("[INGEST] Worker {} done: {:?}", i, path);
+                    r.lock().unwrap().push(result);
+                    processed += 1;
+                }
+                tracing::info!(
+                    "[INGEST] Worker {} finished, processed {} files",
+                    i,
+                    processed
+                );
+            })
+        })
+        .collect();
+
+    // Drop original rx so channel disconnects when scanner finishes
+    drop(rx);
+
+    // Wait for scanner to complete first
     scanner.join().expect("Scanner thread panicked");
+    tracing::info!("[INGEST] Scanner thread joined");
+
+    // Wait for all workers to complete
+    for (i, worker) in workers.into_iter().enumerate() {
+        worker.join().unwrap_or_else(|_| panic!("Worker {} panicked", i));
+    }
+    tracing::info!("[INGEST] All workers finished");
 
     Arc::try_unwrap(results)
         .expect("Results still referenced")
