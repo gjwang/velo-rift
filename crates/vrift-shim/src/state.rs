@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::ipc::*;
 // use vrift_cas::CasStore;
@@ -364,6 +364,10 @@ pub static LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
 pub static CIRCUIT_BREAKER_FAILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub static CIRCUIT_BREAKER_THRESHOLD: AtomicUsize = AtomicUsize::new(5);
 pub static CIRCUIT_TRIPPED: AtomicBool = AtomicBool::new(false);
+/// Unix timestamp when circuit was tripped (for auto-recovery)
+pub static CIRCUIT_TRIP_TIME: AtomicU64 = AtomicU64::new(0);
+/// Recovery delay in seconds (default 30s, configurable via VRIFT_CIRCUIT_RECOVERY_DELAY)
+pub static CIRCUIT_RECOVERY_DELAY: AtomicU64 = AtomicU64::new(30);
 
 /// Activate VFS - called when daemon handshake succeeds
 #[inline]

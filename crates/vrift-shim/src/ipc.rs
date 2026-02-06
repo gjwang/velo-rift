@@ -132,18 +132,37 @@ pub(crate) unsafe fn raw_read_exact(fd: c_int, buf: &mut [u8]) -> bool {
 
 /// Send request and receive response using raw libc I/O.
 /// RFC-0043: Ensuring workspace registration for every connection.
+/// RFC-0055: Auto-recovery after CIRCUIT_RECOVERY_DELAY seconds.
 unsafe fn sync_rpc(
     socket_path: &str,
     request: &vrift_ipc::VeloRequest,
 ) -> Option<vrift_ipc::VeloResponse> {
     use crate::state::{
-        EventType, CIRCUIT_BREAKER_FAILED_COUNT, CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_TRIPPED,
+        EventType, CIRCUIT_BREAKER_FAILED_COUNT, CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_RECOVERY_DELAY,
+        CIRCUIT_TRIPPED, CIRCUIT_TRIP_TIME,
     };
     use std::sync::atomic::Ordering;
 
-    // Check circuit breaker first
+    // Check circuit breaker with auto-recovery
     if CIRCUIT_TRIPPED.load(Ordering::Relaxed) {
-        return None;
+        let trip_time = CIRCUIT_TRIP_TIME.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let recovery_delay = CIRCUIT_RECOVERY_DELAY.load(Ordering::Relaxed);
+
+        if now >= trip_time + recovery_delay {
+            // Recovery window: try to reset circuit breaker
+            vfs_info!(
+                "Circuit breaker recovery attempt after {}s",
+                now - trip_time
+            );
+            CIRCUIT_TRIPPED.store(false, Ordering::SeqCst);
+            CIRCUIT_BREAKER_FAILED_COUNT.store(0, Ordering::Relaxed);
+        } else {
+            return None;
+        }
     }
 
     let fd = raw_unix_connect(socket_path);
@@ -152,7 +171,17 @@ unsafe fn sync_rpc(
         let threshold = CIRCUIT_BREAKER_THRESHOLD.load(Ordering::Relaxed);
         vfs_record!(EventType::IpcFail, 0, count as i32);
         if count >= threshold && !CIRCUIT_TRIPPED.swap(true, Ordering::SeqCst) {
-            vfs_error!("DAEMON CONNECTION FAILED {} TIMES. CIRCUIT BREAKER TRIPPED. FALLING BACK TO PASSTHROUGH.", count);
+            // Record trip time for auto-recovery
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            CIRCUIT_TRIP_TIME.store(now, Ordering::Relaxed);
+            vfs_error!(
+                "DAEMON CONNECTION FAILED {} TIMES. CIRCUIT BREAKER TRIPPED. WILL RETRY AFTER {}s.",
+                count,
+                CIRCUIT_RECOVERY_DELAY.load(Ordering::Relaxed)
+            );
             vfs_record!(EventType::CircuitTripped, 0, count as i32);
         }
         return None;

@@ -1,11 +1,10 @@
 #include <fcntl.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 int main(int argc, char **argv) {
-  signal(SIGPIPE, SIG_IGN);
+  // Note: SIGPIPE handled by vrift-shim constructor (variadic_shim.c)
   if (argc < 2) {
     fprintf(stderr, "Usage: %s <file>\n", argv[0]);
     return 1;
