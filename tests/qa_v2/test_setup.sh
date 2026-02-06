@@ -1,31 +1,45 @@
 #!/bin/bash
 # ==============================================================================
-# Velo Rift Test Setup Helper
+# Velo Rift Test Setup Helper (SSOT)
 # ==============================================================================
 # Source this file in test scripts to get standardized test isolation.
 #
 # Usage:
 #   source "$(dirname "${BASH_SOURCE[0]}")/test_setup.sh"
 #
-# Provides:
-#   - Unique VRIFT_SOCKET_PATH per test run
-#   - VR_THE_SOURCE set to isolated CAS root
-#   - VRIFT_PROJECT_ROOT set to test workspace
-#   - Standard cleanup trap
-#   - Helper functions for daemon management
+# Provides (all exported for child processes):
+#   - PROJECT_ROOT: Path to velo-rift repo root
+#   - TEST_WORKSPACE: Unique temp directory for this test
+#   - VR_THE_SOURCE: Isolated CAS root
+#   - VRIFT_SOCKET_PATH: Unique socket path per test
+#   - VRIFT_PROJECT_ROOT: Same as TEST_WORKSPACE
+#   - VRIFT_CLI, VRIFTD_BIN, SHIM_LIB: Standard binary paths
+#   - VFS_ENV_BASE: Platform-specific DYLD/LD env for shim injection
+#
+# Overridable variables (set BEFORE sourcing):
+#   - TEST_WORKSPACE_BASE: Override /tmp/vrift_test_*
+#   - SKIP_AUTO_SETUP: Set to 1 to skip auto setup
+#
+# Helper functions:
+#   - setup_test_workspace: Initialize test workspace
+#   - start_daemon [log_level]: Start daemon with optional log level
+#   - stop_daemon: Stop daemon cleanly
+#   - run_with_shim <cmd>: Run command with shim injected
+#   - test_cleanup: Called automatically on EXIT
 # ==============================================================================
 
 set -euo pipefail
 
 # ============================================================================
-# Configuration (auto-generated, unique per test run)
+# Core Configuration (always set)
 # ============================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[1]:-unknown}")"
 TEST_ID="${SCRIPT_NAME%.sh}_$$"
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Standard paths
-TEST_WORKSPACE="/tmp/vrift_test_${TEST_ID}"
+TEST_WORKSPACE="${TEST_WORKSPACE_BASE:-/tmp/vrift_test_${TEST_ID}}"
 VR_THE_SOURCE="${TEST_WORKSPACE}/.cas"
 VRIFT_SOCKET_PATH="${TEST_WORKSPACE}/vrift.sock"
 
@@ -35,10 +49,21 @@ VRIFTD_BIN="${PROJECT_ROOT}/target/release/vriftd"
 SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_inception_layer.dylib"
 [ ! -f "$SHIM_LIB" ] && SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_inception_layer.so"
 
+# Fallback to debug builds if release not found
+[ ! -f "$VRIFT_CLI" ] && VRIFT_CLI="${PROJECT_ROOT}/target/debug/vrift"
+[ ! -f "$VRIFTD_BIN" ] && VRIFTD_BIN="${PROJECT_ROOT}/target/debug/vriftd"
+[ ! -f "$SHIM_LIB" ] && SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.dylib"
+[ ! -f "$SHIM_LIB" ] && SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.so"
+
 # Export for child processes
+export PROJECT_ROOT
+export TEST_WORKSPACE
 export VR_THE_SOURCE
 export VRIFT_SOCKET_PATH
 export VRIFT_PROJECT_ROOT="${TEST_WORKSPACE}"
+export VRIFT_CLI
+export VRIFTD_BIN
+export SHIM_LIB
 
 # ============================================================================
 # Platform Detection
@@ -49,6 +74,7 @@ if [ "$OS" = "Darwin" ]; then
 else
     VFS_ENV_BASE="LD_PRELOAD=$SHIM_LIB"
 fi
+export VFS_ENV_BASE
 
 # ============================================================================
 # Daemon Management
@@ -60,6 +86,7 @@ start_daemon() {
     
     echo "   Starting vriftd (socket: $VRIFT_SOCKET_PATH)..."
     VRIFT_LOG="$log_level" VR_THE_SOURCE="$VR_THE_SOURCE" \
+        VRIFT_SOCKET_PATH="$VRIFT_SOCKET_PATH" \
         "$VRIFTD_BIN" start </dev/null > "${TEST_WORKSPACE}/vriftd.log" 2>&1 &
     VRIFTD_PID=$!
     
@@ -81,20 +108,20 @@ start_daemon() {
 }
 
 stop_daemon() {
-    if [ -n "$VRIFTD_PID" ]; then
+    if [ -n "${VRIFTD_PID:-}" ]; then
         kill -TERM "$VRIFTD_PID" 2>/dev/null || true
         wait "$VRIFTD_PID" 2>/dev/null || true
         VRIFTD_PID=""
     fi
     
     # Kill any daemon associated with our socket
-    if [ -S "$VRIFT_SOCKET_PATH" ]; then
+    if [ -S "${VRIFT_SOCKET_PATH:-}" ]; then
         rm -f "$VRIFT_SOCKET_PATH"
     fi
 }
 
 # ============================================================================
-# Cleanup
+# Cleanup (trap on EXIT)
 # ============================================================================
 test_cleanup() {
     local exit_code=$?
@@ -102,10 +129,10 @@ test_cleanup() {
     stop_daemon
     
     # Kill any stray processes with our socket path
-    pkill -f "vriftd.*${TEST_WORKSPACE}" 2>/dev/null || true
+    pkill -f "vriftd.*${TEST_WORKSPACE:-nonexistent}" 2>/dev/null || true
     
     # Remove immutable flags (macOS) and cleanup
-    if [ -d "$TEST_WORKSPACE" ]; then
+    if [ -d "${TEST_WORKSPACE:-}" ]; then
         chflags -R nouchg "$TEST_WORKSPACE" 2>/dev/null || true
         rm -rf "$TEST_WORKSPACE"
     fi
@@ -115,7 +142,7 @@ test_cleanup() {
 trap test_cleanup EXIT
 
 # ============================================================================
-# Setup
+# Workspace Setup
 # ============================================================================
 setup_test_workspace() {
     # Cleanup any previous run
@@ -150,11 +177,40 @@ run_with_shim() {
 }
 
 # ============================================================================
-# Auto-setup if sourced
+# Prerequisite Checks
 # ============================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════════════╗"
-echo "║  Velo Rift Test: $SCRIPT_NAME"
-echo "╚══════════════════════════════════════════════════════════════════════╝"
+check_prerequisites() {
+    local missing=0
+    
+    if [ ! -f "$VRIFT_CLI" ]; then
+        echo "❌ vrift CLI not found: $VRIFT_CLI"
+        echo "   Run: cargo build --release"
+        missing=1
+    fi
+    
+    if [ ! -f "$VRIFTD_BIN" ]; then
+        echo "❌ vriftd not found: $VRIFTD_BIN"
+        echo "   Run: cargo build --release"
+        missing=1
+    fi
+    
+    if [ ! -f "$SHIM_LIB" ]; then
+        echo "❌ Shim library not found: $SHIM_LIB"
+        echo "   Run: cargo build --release"
+        missing=1
+    fi
+    
+    return $missing
+}
 
-setup_test_workspace
+# ============================================================================
+# Auto-setup (unless SKIP_AUTO_SETUP=1)
+# ============================================================================
+if [ "${SKIP_AUTO_SETUP:-0}" != "1" ]; then
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════════╗"
+    echo "║  Velo Rift Test: $SCRIPT_NAME"
+    echo "╚══════════════════════════════════════════════════════════════════════╝"
+    
+    setup_test_workspace
+fi
