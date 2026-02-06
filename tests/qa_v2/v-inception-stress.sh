@@ -49,6 +49,7 @@ done
 echo "⚡ Ingesting Project 1 (Phantom Mode)..."
 export VR_THE_SOURCE="$WORK_DIR/cas"
 cd "$WORK_DIR/factory/p1"
+"$VRIFT_BIN" init . >/dev/null 2>&1
 "$VRIFT_BIN" --the-source-root "$VR_THE_SOURCE" ingest . --mode phantom >/dev/null 2>&1
 
 # 3. Diagnostic Layer 1: Physical CAS Audit
