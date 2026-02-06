@@ -20,6 +20,11 @@ use tracing::debug;
 /// Global config instance
 static CONFIG: Lazy<RwLock<Config>> = Lazy::new(|| RwLock::new(Config::load().unwrap_or_default()));
 
+/// Default CAS root path
+pub const DEFAULT_CAS_ROOT: &str = vrift_ipc::DEFAULT_CAS_ROOT;
+/// Default Unix socket path
+pub const DEFAULT_SOCKET_PATH: &str = vrift_ipc::DEFAULT_SOCKET_PATH;
+
 /// Get global config (read-only)
 pub fn config() -> std::sync::RwLockReadGuard<'static, Config> {
     CONFIG.read().unwrap()
@@ -202,7 +207,7 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            the_source: PathBuf::from("~/.vrift/the_source"),
+            the_source: PathBuf::from(DEFAULT_CAS_ROOT),
             default_mode: "solid".to_string(),
         }
     }
@@ -341,7 +346,7 @@ pub struct DaemonConfig {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            socket: PathBuf::from("/tmp/vrift.sock"),
+            socket: PathBuf::from(DEFAULT_SOCKET_PATH),
             registry_dir: dirs::home_dir()
                 .map(|h| h.join(".vrift/registry"))
                 .unwrap_or_else(|| PathBuf::from("/tmp/vrift_registry")),

@@ -14,6 +14,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
 anyhow = "1.0"
 tempfile = "3.14"
+vrift-ipc = { path = "../vrift-ipc" }
 
 [dev-dependencies]
 tempfile = "3.14"

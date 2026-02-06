@@ -44,7 +44,7 @@ struct Cli {
     #[arg(
         long = "the-source-root",
         env = "VR_THE_SOURCE",
-        default_value = "~/.vrift/the_source"
+        default_value = vrift_config::DEFAULT_CAS_ROOT
     )]
     the_source_root: PathBuf,
 

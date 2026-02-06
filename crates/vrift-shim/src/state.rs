@@ -991,7 +991,7 @@ impl ShimState {
         // RFC-0050: VR_THE_SOURCE is the canonical env var (VRIFT_CAS_ROOT is deprecated)
         let cas_ptr = unsafe { libc::getenv(c"VR_THE_SOURCE".as_ptr()) };
         let cas_root: std::borrow::Cow<'static, str> = if cas_ptr.is_null() {
-            std::borrow::Cow::Borrowed("/tmp/vrift/the_source")
+            std::borrow::Cow::Borrowed(vrift_ipc::DEFAULT_CAS_ROOT)
         } else {
             // Environment var found - must allocate (rare case, malloc should be ready by now)
             std::borrow::Cow::Owned(unsafe {
@@ -1012,7 +1012,7 @@ impl ShimState {
 
         let socket_ptr = unsafe { libc::getenv(c"VRIFT_SOCKET_PATH".as_ptr()) };
         let socket_path: std::borrow::Cow<'static, str> = if socket_ptr.is_null() {
-            std::borrow::Cow::Borrowed("/tmp/vrift.sock")
+            std::borrow::Cow::Borrowed(vrift_ipc::DEFAULT_SOCKET_PATH)
         } else {
             std::borrow::Cow::Owned(unsafe {
                 CStr::from_ptr(socket_ptr).to_string_lossy().into_owned()

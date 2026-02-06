@@ -4,7 +4,11 @@ use tokio::net::UnixStream;
 use vrift_config::path::{normalize_nonexistent, normalize_or_original};
 use vrift_ipc::{VeloRequest, VeloResponse, PROTOCOL_VERSION};
 
-const SOCKET_PATH: &str = "/tmp/vrift.sock";
+fn get_socket_path() -> PathBuf {
+    let path = std::env::var("VRIFT_SOCKET_PATH")
+        .unwrap_or_else(|_| vrift_config::DEFAULT_SOCKET_PATH.to_string());
+    PathBuf::from(path)
+}
 
 pub async fn check_status(project_root: &Path) -> Result<()> {
     let mut stream = connect_to_daemon(project_root).await?;
@@ -110,7 +114,8 @@ pub async fn protect_file(
 }
 
 pub async fn connect_to_daemon(project_root: &Path) -> Result<UnixStream> {
-    let mut stream = match UnixStream::connect(SOCKET_PATH).await {
+    let socket_path = get_socket_path();
+    let mut stream = match UnixStream::connect(&socket_path).await {
         Ok(s) => s,
         Err(_) => {
             tracing::info!("Daemon not running. Attempting to start...");
@@ -118,7 +123,7 @@ pub async fn connect_to_daemon(project_root: &Path) -> Result<UnixStream> {
             let mut s = None;
             for _ in 0..10 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                if let Ok(conn) = UnixStream::connect(SOCKET_PATH).await {
+                if let Ok(conn) = UnixStream::connect(&socket_path).await {
                     s = Some(conn);
                     break;
                 }
@@ -153,7 +158,8 @@ pub async fn connect_to_daemon(project_root: &Path) -> Result<UnixStream> {
 /// Simple connection to daemon - only handshake, no workspace registration
 /// Used for standalone operations like IngestFullScan
 async fn connect_simple() -> Result<UnixStream> {
-    let mut stream = match UnixStream::connect(SOCKET_PATH).await {
+    let socket_path = get_socket_path();
+    let mut stream = match UnixStream::connect(&socket_path).await {
         Ok(s) => s,
         Err(_) => {
             tracing::info!("Daemon not running. Attempting to start...");
@@ -161,7 +167,7 @@ async fn connect_simple() -> Result<UnixStream> {
             let mut s = None;
             for _ in 0..10 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                if let Ok(conn) = UnixStream::connect(SOCKET_PATH).await {
+                if let Ok(conn) = UnixStream::connect(&socket_path).await {
                     s = Some(conn);
                     break;
                 }

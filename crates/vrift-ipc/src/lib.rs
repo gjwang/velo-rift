@@ -100,9 +100,11 @@ impl IpcHeader {
         Self::new(FrameType::Heartbeat, 0, seq_id)
     }
 
-    /// Validate the header magic
+    /// Validate the header magic, version, and frame type
     pub fn is_valid(&self) -> bool {
         self.magic == IPC_MAGIC
+            && self.version() == PROTOCOL_VERSION as u8
+            && self.frame_type().is_some()
     }
 
     /// Get frame type from high 4 bits
@@ -539,7 +541,7 @@ pub enum VeloRequest {
         path: String,
         /// Output manifest path
         manifest_path: String,
-        /// CAS root directory (TheSource)
+        /// CAS root directory (TheSource) - kept for testing
         cas_root: String,
         /// Number of threads (None = auto)
         threads: Option<usize>,
@@ -796,7 +798,9 @@ pub fn is_version_compatible(client_version: u32) -> bool {
 
 /// Default socket path (internal fallback for DaemonClient)
 /// Prefer using vrift_config::config().socket_path() when available
-const DEFAULT_SOCKET_PATH: &str = "/tmp/vrift.sock";
+pub const DEFAULT_SOCKET_PATH: &str = "/tmp/vrift.sock";
+/// Default CAS root path
+pub const DEFAULT_CAS_ROOT: &str = "~/.vrift/the_source";
 
 /// Get default socket path (for internal use only)
 fn default_socket_path() -> &'static str {

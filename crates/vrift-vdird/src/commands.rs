@@ -72,7 +72,7 @@ impl CommandHandler {
             VeloRequest::IngestFullScan {
                 path,
                 manifest_path,
-                cas_root: _, // vdird uses config.cas_path instead
+                cas_root: _, // vdird uses config.cas_path instead (cas_root kept for testing Compatibility)
                 threads,
                 phantom,
                 tier1,
@@ -167,44 +167,40 @@ impl CommandHandler {
     async fn handle_reingest(&mut self, vpath: &str, temp_path: &str) -> VeloResponse {
         let temp = PathBuf::from(temp_path);
 
-        // 1. Read and hash temp file
-        let content = match fs::read(&temp) {
-            Ok(c) => c,
+        // 1. Initialize CAS store
+        let store = match vrift_cas::CasStore::new(&self.config.cas_path) {
+            Ok(s) => s,
             Err(e) => {
-                error!(error = %e, temp = %temp_path, "Failed to read temp file");
-                return VeloResponse::Error(VeloError::io_error(format!("Read error: {}", e)));
+                error!(error = %e, "Failed to initialize CAS store");
+                return VeloResponse::Error(VeloError::new(
+                    VeloErrorKind::Internal,
+                    format!("CAS init error: {}", e),
+                ));
             }
         };
 
-        let hash = blake3::hash(&content);
-        let hash_bytes: [u8; 32] = *hash.as_bytes();
-        let hash_hex = hex::encode(&hash_bytes[..8]);
+        // 2. Ingest to CAS via move (atomic & deduplicated)
+        let hash_bytes = match store.store_by_move(&temp) {
+            Ok(h) => h,
+            Err(e) => {
+                error!(error = %e, temp = %temp_path, "CAS ingestion failed");
+                return VeloResponse::Error(VeloError::new(
+                    VeloErrorKind::IngestFailed,
+                    format!("Ingest error: {}", e),
+                ));
+            }
+        };
 
-        // 2. Determine CAS path
-        let cas_path = self
-            .config
-            .cas_path
-            .join(&hash_hex[..2])
-            .join(&hash_hex[2..]);
-
-        // 3. Ingest to CAS (try reflink, fallback to copy)
-        if let Err(e) = self.ingest_to_cas(&temp, &cas_path, &content).await {
-            error!(error = %e, "CAS ingestion failed");
-            return VeloResponse::Error(VeloError::new(
-                VeloErrorKind::IngestFailed,
-                format!("Ingest error: {}", e),
-            ));
-        }
-
-        // 4. Get metadata
-        let meta = match fs::metadata(&temp) {
+        // 3. Get metadata for the committed file
+        let cas_path = store.blob_path_for_hash(&hash_bytes).unwrap();
+        let meta = match fs::metadata(&cas_path) {
             Ok(m) => m,
             Err(e) => {
                 return VeloResponse::Error(VeloError::io_error(format!("Metadata error: {}", e)));
             }
         };
 
-        // 5. Update VDir
+        // 4. Update VDir
         let entry = VDirEntry {
             path_hash: fnv1a_hash(vpath),
             cas_hash: hash_bytes,
@@ -220,10 +216,7 @@ impl CommandHandler {
             return VeloResponse::Error(VeloError::io_error(format!("VDir update error: {}", e)));
         }
 
-        // 6. Cleanup temp file
-        let _ = fs::remove_file(&temp);
-
-        info!(vpath = %vpath, hash = %hash_hex, "Reingest complete");
+        info!(vpath = %vpath, hash = %hex::encode(hash_bytes), "Reingest complete");
 
         VeloResponse::ManifestAck {
             entry: Some(VnodeEntry {
@@ -234,37 +227,6 @@ impl CommandHandler {
                 flags: 0,
                 _pad: 0,
             }),
-        }
-    }
-
-    /// Ingest temp file to CAS using reflink with automatic fallback
-    async fn ingest_to_cas(&self, temp: &Path, cas_path: &Path, _content: &[u8]) -> Result<()> {
-        use vrift_cas::reflink::ingest_with_fallback;
-
-        // Skip if already exists (content-addressed)
-        if cas_path.exists() {
-            debug!(path = %cas_path.display(), "CAS blob already exists");
-            return Ok(());
-        }
-
-        // Use reflink module with automatic fallback chain:
-        // 1. reflink (zero-copy CoW)
-        // 2. hardlink (same inode)
-        // 3. copy (full data copy)
-        match ingest_with_fallback(temp, cas_path) {
-            Ok(method) => {
-                debug!(
-                    src = %temp.display(),
-                    dst = %cas_path.display(),
-                    method = %method,
-                    "CAS ingestion complete"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(error = %e, "CAS ingestion failed");
-                Err(anyhow::anyhow!("Ingestion failed: {}", e))
-            }
         }
     }
 
@@ -733,7 +695,7 @@ mod tests {
 
         match response {
             VeloResponse::Error(err) => {
-                assert!(err.message.contains("Read error"));
+                assert!(err.message.contains("Ingest error"));
             }
             _ => panic!("Expected Error for nonexistent file"),
         }
