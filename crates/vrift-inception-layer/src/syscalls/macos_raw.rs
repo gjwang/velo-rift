@@ -1526,6 +1526,103 @@ pub unsafe fn raw_sendfile(
     ret as libc::c_int
 }
 
+// Gap Fix: chown/lchown/readlinkat syscall numbers
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_CHOWN: i64 = 16;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_LCHOWN: i64 = 364;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const SYS_READLINKAT: i64 = 467;
+
+/// Raw chown syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_chown(
+    path: *const libc::c_char,
+    owner: libc::uid_t,
+    group: libc::gid_t,
+) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_CHOWN,
+        in("x0") path as i64,
+        in("x1") owner as i64,
+        in("x2") group as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
+/// Raw lchown syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_lchown(
+    path: *const libc::c_char,
+    owner: libc::uid_t,
+    group: libc::gid_t,
+) -> libc::c_int {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_LCHOWN,
+        in("x0") path as i64,
+        in("x1") owner as i64,
+        in("x2") group as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::c_int
+}
+
+/// Raw readlinkat syscall for macOS ARM64.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[inline(never)]
+pub unsafe fn raw_readlinkat(
+    dirfd: libc::c_int,
+    path: *const libc::c_char,
+    buf: *mut libc::c_char,
+    bufsiz: libc::size_t,
+) -> libc::ssize_t {
+    let ret: i64;
+    let err: i64;
+    asm!(
+        "mov x16, {syscall}",
+        "svc #0x80",
+        "cset {err}, cs",
+        syscall = in(reg) SYS_READLINKAT,
+        in("x0") dirfd as i64,
+        in("x1") path as i64,
+        in("x2") buf as i64,
+        in("x3") bufsiz as i64,
+        lateout("x0") ret,
+        err = out(reg) err,
+        options(nostack)
+    );
+    if err != 0 {
+        crate::set_errno(ret as libc::c_int);
+        return -1;
+    }
+    ret as libc::ssize_t
+}
+
 // =============================================================================
 // macOS x86_64 implementations
 // =============================================================================

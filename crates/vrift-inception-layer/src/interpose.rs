@@ -31,13 +31,14 @@ extern "C" {
 }
 #[cfg(target_os = "macos")]
 use crate::syscalls::misc::{
-    chflags_inception, chmod_inception, exchangedata_inception, execve_inception,
+    chflags_inception, chmod_inception, chown_inception, exchangedata_inception, execve_inception,
     faccessat_inception, fchflags_inception, fchmod_inception, fchmodat_inception,
-    fchown_inception, fchownat_inception, flock_inception, futimes_inception, link_inception,
-    linkat_inception, mkdir_inception, mkdirat_inception, posix_spawn_inception,
-    posix_spawnp_inception, removexattr_inception, rmdir_inception, setrlimit_inception,
-    setxattr_inception, symlink_inception, symlinkat_inception, truncate_inception,
-    unlink_inception, unlinkat_inception, utimensat_inception, utimes_inception,
+    fchown_inception, fchownat_inception, flock_inception, futimes_inception, lchown_inception,
+    link_inception, linkat_inception, mkdir_inception, mkdirat_inception, posix_spawn_inception,
+    posix_spawnp_inception, readlinkat_inception, removexattr_inception, rmdir_inception,
+    setrlimit_inception, setxattr_inception, symlink_inception, symlinkat_inception,
+    truncate_inception, unlink_inception, unlinkat_inception, utimensat_inception,
+    utimes_inception,
 };
 
 #[cfg(target_os = "macos")]
@@ -231,6 +232,18 @@ extern "C" {
         path2: *const c_char,
         options: libc::c_uint,
     ) -> c_int;
+    // Gap Fix: chown/lchown/readlinkat
+    #[link_name = "chown"]
+    fn real_chown(path: *const c_char, owner: libc::uid_t, group: libc::gid_t) -> c_int;
+    #[link_name = "lchown"]
+    fn real_lchown(path: *const c_char, owner: libc::uid_t, group: libc::gid_t) -> c_int;
+    #[link_name = "readlinkat"]
+    fn real_readlinkat(
+        dirfd: c_int,
+        path: *const c_char,
+        buf: *mut c_char,
+        bufsiz: size_t,
+    ) -> ssize_t;
     #[link_name = "futimes"]
     fn real_futimes(fd: c_int, times: *const timeval) -> c_int;
     #[link_name = "fchflags"]
@@ -493,14 +506,14 @@ pub static IT_UTIMENSAT: Interpose = Interpose {
     old_func: real_utimensat as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_MKDIR: Interpose = Interpose {
     new_func: mkdir_inception as _,
     old_func: real_mkdir as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_SYMLINK: Interpose = Interpose {
     new_func: symlink_inception as _,
@@ -612,7 +625,7 @@ pub static IT_REMOVEXATTR: Interpose = Interpose {
     old_func: real_removexattr as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_UTIMES: Interpose = Interpose {
     new_func: utimes_inception as _,
@@ -731,6 +744,29 @@ pub static IT_FCHOWNAT: Interpose = Interpose {
 pub static IT_EXCHANGEDATA: Interpose = Interpose {
     new_func: exchangedata_inception as _,
     old_func: real_exchangedata as _,
+};
+
+// Gap Fix: chown/lchown/readlinkat interposition
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_CHOWN: Interpose = Interpose {
+    new_func: chown_inception as _,
+    old_func: real_chown as _,
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_LCHOWN: Interpose = Interpose {
+    new_func: lchown_inception as _,
+    old_func: real_lchown as _,
+};
+#[cfg(target_os = "macos")]
+#[link_section = "__DATA,__interpose"]
+#[used]
+pub static IT_READLINKAT: Interpose = Interpose {
+    new_func: readlinkat_inception as _,
+    old_func: real_readlinkat as _,
 };
 
 // =============================================================================
@@ -881,6 +917,37 @@ pub unsafe extern "C" fn futimes(fd: c_int, times: *const libc::timeval) -> c_in
 #[no_mangle]
 pub unsafe extern "C" fn fchown(fd: c_int, owner: libc::uid_t, group: libc::gid_t) -> c_int {
     crate::syscalls::misc::fchown_inception(fd, owner, group)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn chown(
+    path: *const c_char,
+    owner: libc::uid_t,
+    group: libc::gid_t,
+) -> c_int {
+    crate::syscalls::misc::chown_inception(path, owner, group)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn lchown(
+    path: *const c_char,
+    owner: libc::uid_t,
+    group: libc::gid_t,
+) -> c_int {
+    crate::syscalls::misc::lchown_inception(path, owner, group)
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn readlinkat(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut c_char,
+    bufsiz: size_t,
+) -> ssize_t {
+    crate::syscalls::misc::readlinkat_inception(dirfd, path, buf, bufsiz)
 }
 
 #[cfg(target_os = "linux")]
