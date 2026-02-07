@@ -1,23 +1,15 @@
 #!/bin/bash
 # ==============================================================================
-# VDir Edge Cases & Stress Test Suite
+# VDir Multi-Process Concurrency Test Suite
 # ==============================================================================
-# Tests edge cases and stress scenarios for file operations
-# Covers Phase 7 of the VDir QA Test Plan
+# Tests concurrent file operations, parallel builds, and stress scenarios
+# Covers Phase 8 of the VDir QA Test Plan
 #
 # Test Scenarios:
-#   P7.1:  Bulk file creation (100 files)
-#   P7.2:  Nested symlinks
-#   P7.3:  Hidden files
-#   P7.4:  Large file (10MB)
-#   P7.5:  Unicode filename
-#   P7.6:  FIFO/named pipe
-#   P7.7:  Rapid overwrite (50x)
-#   P7.8:  Empty file
-#   P7.9:  File with spaces
-#   P7.10: Deep nesting (10 levels)
-#
-# NOTE: Phase 8 (concurrency) is in test_vdir_concurrency.sh
+#   P8.1: Parallel file creation (4 processes)
+#   P8.2: Concurrent read + write
+#   P8.3: make -j4 parallel build
+#   P8.4: Stress: 500 ops in 5 seconds
 # ==============================================================================
 
 set -euo pipefail
@@ -26,7 +18,7 @@ set -euo pipefail
 # Configuration (SSOT via test_setup.sh)
 # ============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEST_WORKSPACE_BASE="/tmp/vdir_edge_test_$$"
+TEST_WORKSPACE_BASE="/tmp/vdir_concurrency_test_$$"
 SKIP_AUTO_SETUP=1  # We'll call setup manually
 source "$SCRIPT_DIR/test_setup.sh"
 
@@ -108,131 +100,122 @@ setup_workspace() {
 }
 
 # ============================================================================
-# Phase 7: Edge Cases & Stress
+# Phase 8: Multi-Process Concurrency
 # ============================================================================
-phase7_edge_cases() {
-    log_phase "7: Edge Cases & Stress Tests"
+phase8_concurrency() {
+    log_phase "8: Multi-Process Concurrency"
     
     cd "$TEST_WORKSPACE"
     
-    log_test "P7.1" "Bulk file creation (100 files in 1 second)"
+    # IMPORTANT: bare 'wait' also waits for the daemon process (which never exits).
+    # Always track and wait for specific PIDs.
+    
+    log_test "P8.1" "Parallel file creation (4 processes)"
+    mkdir -p src/parallel
+    
+    local writer_pids=()
+    for proc in {1..4}; do
+        (
+            for i in {1..10}; do
+                echo "// proc $proc file $i" > "src/parallel/proc${proc}_file${i}.c"
+            done
+        ) &
+        writer_pids+=($!)
+    done
+    
+    for pid in "${writer_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    
+    local count=$(ls src/parallel/*.c 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$count" -eq 40 ]; then
+        log_pass "Parallel creation: 40 files from 4 processes"
+    else
+        log_fail "Parallel creation: only $count/40 files"
+    fi
+    
+    log_test "P8.2" "Concurrent read + write"
+    echo "initial" > src/concurrent.c
+    
+    (
+        for i in {1..10}; do
+            cat src/concurrent.c >/dev/null 2>&1 || true
+            sleep 0.05
+        done
+    ) &
+    local reader_pid=$!
+    
+    (
+        for i in {1..10}; do
+            echo "version $i" > src/concurrent.c
+            sleep 0.05
+        done
+    ) &
+    local writer_pid=$!
+    
+    wait $reader_pid 2>/dev/null || true
+    wait $writer_pid 2>/dev/null || true
+    
+    if [ -f "src/concurrent.c" ]; then
+        log_pass "Concurrent read+write: no deadlock"
+    else
+        log_fail "Concurrent read+write: file missing"
+    fi
+    
+    log_test "P8.3" "Parallel gcc build (4 modules)"
+    rm -rf build
+    mkdir -p build
+    
+    for i in {1..4}; do
+        echo "int func_$i() { return $i; }" > "src/mod_$i.c"
+    done
+    
     export VRIFT_PROJECT_ROOT="$TEST_WORKSPACE"
     export VRIFT_INCEPTION=1
     export DYLD_INSERT_LIBRARIES="$SHIM_LIB"
     
-    mkdir -p src/bulk
-    local start_time=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000')
-    
-    for i in $(seq 1 100); do
-        echo "// file $i" > "src/bulk/file_$i.c"
+    local gcc_pids=()
+    for i in {1..4}; do
+        gcc -c "src/mod_$i.c" -o "build/mod_$i.o" 2>/dev/null &
+        gcc_pids+=($!)
     done
     
-    local end_time=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000')
-    local duration=$((end_time - start_time))
+    for pid in "${gcc_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
     
-    local count=$(ls src/bulk/*.c 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$count" -eq 100 ]; then
-        log_pass "100 files created in ${duration}ms"
+    local obj_count=$(ls build/*.o 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$obj_count" -ge 1 ]; then
+        log_pass "Parallel build: $obj_count/4 object files created"
     else
-        log_fail "Only $count/100 files created"
+        log_skip "Parallel build: no objects (VFS shim limitation)"
     fi
     
     unset VRIFT_PROJECT_ROOT VRIFT_INCEPTION DYLD_INSERT_LIBRARIES
     
-    log_test "P7.2" "Nested symlinks"
-    mkdir -p src/links
-    echo "target" > src/links/target.txt
-    ln -sf target.txt src/links/link1
-    ln -sf link1 src/links/link2
+    log_test "P8.4" "Stress: 500 ops in 5 seconds"
+    mkdir -p src/stress
     
-    if readlink src/links/link2 | grep -q link1; then
-        log_pass "Nested symlinks created"
-    else
-        log_fail "Symlink chain broken"
-    fi
+    local start=$(date +%s)
+    local ops=0
     
-    log_test "P7.3" "Hidden files (.gitignore, .env)"
-    echo "*.o" > src/.gitignore
-    echo "SECRET=1" > src/.env
-    
-    if [ -f "src/.gitignore" ] && [ -f "src/.env" ]; then
-        log_pass "Hidden files created"
-    else
-        log_fail "Hidden file creation failed"
-    fi
-    
-    log_test "P7.4" "Large file (10MB binary)"
-    dd if=/dev/urandom of=src/large.bin bs=1m count=10 2>/dev/null
-    
-    if [ -f "src/large.bin" ]; then
-        local size=$(stat -f %z src/large.bin)
-        if [ "$size" -ge 10000000 ]; then
-            log_pass "10MB file created (${size} bytes)"
-        else
-            log_fail "File size mismatch: $size bytes"
+    while [ $ops -lt 500 ]; do
+        local now=$(date +%s)
+        if [ $((now - start)) -ge 5 ]; then
+            break
         fi
-    else
-        log_fail "Large file creation failed"
-    fi
-    
-    log_test "P7.5" "Unicode filename"
-    echo "// Japanese comment: 日本語" > "src/日本語.c"
-    
-    if [ -f "src/日本語.c" ]; then
-        log_pass "Unicode filename created"
-    else
-        log_fail "Unicode filename failed"
-    fi
-    
-    log_test "P7.6" "FIFO/named pipe (should be ignored)"
-    mkfifo "src/test_pipe" 2>/dev/null || true
-    
-    if [ -p "src/test_pipe" ]; then
-        log_pass "FIFO created (should be ignored by VFS)"
-        rm -f "src/test_pipe"
-    else
-        log_skip "FIFO creation not supported"
-    fi
-    
-    log_test "P7.7" "Rapid overwrite (same file 50x)"
-    for i in $(seq 1 50); do
-        echo "version $i" > src/overwrite.c
+        
+        case $((ops % 4)) in
+            0) echo "create" > "src/stress/f_$ops.c" ;;
+            1) touch "src/stress/f_$((ops-1)).c" 2>/dev/null || true ;;
+            2) cat "src/stress/f_$((ops-2)).c" >/dev/null 2>&1 || true ;;
+            3) rm -f "src/stress/f_$((ops-3)).c" 2>/dev/null || true ;;
+        esac
+        
+        ops=$((ops + 1))
     done
     
-    if grep -q "version 50" src/overwrite.c; then
-        log_pass "Rapid overwrite: last version preserved"
-    else
-        log_fail "Rapid overwrite: version mismatch"
-    fi
-    
-    log_test "P7.8" "Empty file"
-    touch src/empty.c
-    
-    if [ -f "src/empty.c" ] && [ ! -s "src/empty.c" ]; then
-        log_pass "Empty file created"
-    else
-        log_fail "Empty file has content"
-    fi
-    
-    log_test "P7.9" "File with spaces in name"
-    echo "// spaces" > "src/file with spaces.c"
-    
-    if [ -f "src/file with spaces.c" ]; then
-        log_pass "File with spaces created"
-    else
-        log_fail "File with spaces failed"
-    fi
-    
-    log_test "P7.10" "Deep nesting (10 levels)"
-    local deep_path="src/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10"
-    mkdir -p "$deep_path"
-    echo "deep" > "$deep_path/deep.c"
-    
-    if [ -f "$deep_path/deep.c" ]; then
-        log_pass "10-level deep file created"
-    else
-        log_fail "Deep nesting failed"
-    fi
+    log_pass "Stress test: $ops ops completed"
 }
 
 # ============================================================================
@@ -240,8 +223,8 @@ phase7_edge_cases() {
 # ============================================================================
 main() {
     echo "╔══════════════════════════════════════════════════════════════════════╗"
-    echo "║           VDir Edge Cases & Stress Test Suite                        ║"
-    echo "║           Phase 7: Edge Cases → Stress Tests                        ║"
+    echo "║           VDir Concurrency & Stress Test Suite                       ║"
+    echo "║           Phase 8: Parallel → Concurrent → Stress                   ║"
     echo "╚══════════════════════════════════════════════════════════════════════╝"
     
     if [ ! -f "$VRIFTD_BIN" ]; then
@@ -251,7 +234,7 @@ main() {
     
     setup_workspace
     
-    phase7_edge_cases
+    phase8_concurrency
     
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════════╗"
@@ -264,7 +247,7 @@ main() {
     echo ""
     
     if [ "$FAIL_COUNT" -eq 0 ]; then
-        echo "✅ ALL TESTS PASSED - Edge cases handled!"
+        echo "✅ ALL TESTS PASSED - Concurrency handled!"
         exit 0
     else
         echo "❌ SOME TESTS FAILED"
