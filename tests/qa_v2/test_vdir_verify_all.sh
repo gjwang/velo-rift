@@ -24,31 +24,12 @@ source "$SCRIPT_DIR/test_setup.sh"
 
 # Test-specific variables (not in shared helper)
 VDIR_MMAP="/dev/shm/vrift_vdir_test_$$"
-PASS_COUNT=0
-FAIL_COUNT=0
 DAEMON_PID=""
 FAIL_FAST=true  # Stop on first failure
 
 # ============================================================================
-# Verification Helpers
+# Verification Helpers (test-specific, extend harness verify_pass/verify_fail)
 # ============================================================================
-verify_pass() {
-    echo "      ✓ $1"
-    PASS_COUNT=$((PASS_COUNT + 1))
-}
-
-verify_fail() {
-    echo "      ✗ $1"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-    if $FAIL_FAST; then
-        echo ""
-        echo "   ❌ FAIL-FAST: Stopping on first failure"
-        echo "   $1"
-        cleanup
-        exit 1
-    fi
-}
-
 # Verify file exists at local FS path
 verify_local_exists() {
     local path="$1"

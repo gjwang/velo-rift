@@ -18,40 +18,12 @@ VRIFT_CLI="$PROJECT_ROOT/target/debug/vrift"
 VFS_DIR="/tmp/test_live_ingest_$$"
 VRIFT_DATA="$VFS_DIR/.vrift"
 
-PASS_COUNT=0
-FAIL_COUNT=0
-SKIP_COUNT=0
+# Source shared test harness
+source "$SCRIPT_DIR/lib/test_harness.sh"
 
 # ============================================================================
-# Helpers
+# Test-specific helpers
 # ============================================================================
-log_section() {
-    echo ""
-    echo "================================================================"
-    echo "$1"
-    echo "================================================================"
-}
-
-log_test() {
-    echo ""
-    echo "🧪 Test $1"
-}
-
-log_pass() {
-    echo "   ✅ PASS: $1"
-    PASS_COUNT=$((PASS_COUNT + 1))
-}
-
-log_fail() {
-    echo "   ❌ FAIL: $1"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-}
-
-log_skip() {
-    echo "   ⏭️  SKIP: $1 (not implemented yet)"
-    SKIP_COUNT=$((SKIP_COUNT + 1))
-}
-
 cleanup() {
     # Stop any running daemon
     pkill -f "vriftd.*$VFS_DIR" 2>/dev/null || true

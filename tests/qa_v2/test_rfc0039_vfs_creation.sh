@@ -9,25 +9,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SHIM_PATH="$PROJECT_ROOT/target/debug/libvrift_inception_layer.dylib"
 
+# Source shared test harness
+source "$SCRIPT_DIR/lib/test_harness.sh"
+
 # Test environment
 VFS_DIR="${VRIFT_VFS_PREFIX:-/tmp/test_vfs_creation}"
-PASS_COUNT=0
-FAIL_COUNT=0
 
 cleanup() {
     rm -rf "$VFS_DIR"
 }
 trap cleanup EXIT
-
-log_pass() {
-    echo "   ✅ PASS: $1"
-    PASS_COUNT=$((PASS_COUNT + 1))
-}
-
-log_fail() {
-    echo "   ❌ FAIL: $1"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-}
 
 # Ensure shim exists
 if [[ ! -f "$SHIM_PATH" ]]; then
@@ -237,18 +228,4 @@ fi
 # ============================================================
 # Summary
 # ============================================================
-echo ""
-echo "================================================================"
-echo "Test Summary"
-echo "================================================================"
-echo "Passed: $PASS_COUNT"
-echo "Failed: $FAIL_COUNT"
-echo ""
-
-if [[ $FAIL_COUNT -eq 0 ]]; then
-    echo "✅ ALL TESTS PASSED: VFS creation operations work correctly"
-    exit 0
-else
-    echo "❌ SOME TESTS FAILED"
-    exit 1
-fi
+exit_with_summary

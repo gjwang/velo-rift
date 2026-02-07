@@ -30,6 +30,9 @@
 
 set -euo pipefail
 
+# Source shared test harness (logging, counters, summary)
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/test_harness.sh"
+
 # ============================================================================
 # Core Configuration (always set)
 # ============================================================================

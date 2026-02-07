@@ -24,42 +24,7 @@ SKIP_AUTO_SETUP=1
 source "$SCRIPT_DIR/test_setup.sh"
 
 SAMPLE_PROJECT="$SCRIPT_DIR/lib/sample_project"
-
-# Test-specific variables
-PASS_COUNT=0
-FAIL_COUNT=0
-SKIP_COUNT=0
 DAEMON_PID=""
-
-# ============================================================================
-# Helpers
-# ============================================================================
-log_phase() {
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════════════╗"
-    echo "║  PHASE $1"
-    echo "╚══════════════════════════════════════════════════════════════════════╝"
-}
-
-log_test() {
-    echo ""
-    echo "🧪 [$1] $2"
-}
-
-log_pass() {
-    echo "   ✅ PASS: $1"
-    PASS_COUNT=$((PASS_COUNT + 1))
-}
-
-log_fail() {
-    echo "   ❌ FAIL: $1"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-}
-
-log_skip() {
-    echo "   ⏭️  SKIP: $1"
-    SKIP_COUNT=$((SKIP_COUNT + 1))
-}
 
 cleanup() {
     # Stop our daemon only
@@ -393,24 +358,7 @@ main() {
     phase3_file_operations
     phase4_external_tools
     
-    # Summary
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════════════╗"
-    echo "║                         TEST SUMMARY                                  ║"
-    echo "╚══════════════════════════════════════════════════════════════════════╝"
-    echo ""
-    echo "   Passed:  $PASS_COUNT"
-    echo "   Failed:  $FAIL_COUNT"
-    echo "   Skipped: $SKIP_COUNT"
-    echo ""
-    
-    if [ "$FAIL_COUNT" -eq 0 ]; then
-        echo "✅ ALL TESTS PASSED"
-        exit 0
-    else
-        echo "❌ SOME TESTS FAILED"
-        exit 1
-    fi
+    exit_with_summary
 }
 
 main "$@"

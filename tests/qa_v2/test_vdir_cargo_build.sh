@@ -28,40 +28,15 @@ TEST_WORKSPACE_BASE="/tmp/vdir_cargo_test_$$"
 SKIP_AUTO_SETUP=1  # We'll call setup manually
 source "$SCRIPT_DIR/test_setup.sh"
 
-# Test-specific variables
-PASS_COUNT=0
-FAIL_COUNT=0
-SKIP_COUNT=0
 DAEMON_PID=""
 
 # ============================================================================
-# Helpers
+# Test-specific helpers (not in shared harness)
 # ============================================================================
-log_section() {
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════════════╗"
-    echo "║  $1"
-    echo "╚══════════════════════════════════════════════════════════════════════╝"
-}
-
+# Override log_test with Cargo-specific crab emoji
 log_test() {
     echo ""
     echo "🦀 [$1] $2"
-}
-
-log_pass() {
-    echo "   ✅ PASS: $1"
-    PASS_COUNT=$((PASS_COUNT + 1))
-}
-
-log_fail() {
-    echo "   ❌ FAIL: $1"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-}
-
-log_skip() {
-    echo "   ⏭️  SKIP: $1"
-    SKIP_COUNT=$((SKIP_COUNT + 1))
 }
 
 verify_exists() {
@@ -692,24 +667,7 @@ main() {
         log_skip "VFS tests: vrift CLI or shim not found"
     fi
     
-    # Summary
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════════════╗"
-    echo "║                         TEST SUMMARY                                  ║"
-    echo "╚══════════════════════════════════════════════════════════════════════╝"
-    echo ""
-    echo "   Passed:  $PASS_COUNT"
-    echo "   Failed:  $FAIL_COUNT"
-    echo "   Skipped: $SKIP_COUNT"
-    echo ""
-    
-    if [ "$FAIL_COUNT" -eq 0 ]; then
-        echo "✅ ALL TESTS PASSED"
-        exit 0
-    else
-        echo "❌ SOME TESTS FAILED"
-        exit 1
-    fi
+    exit_with_summary
 }
 
 main "$@"
