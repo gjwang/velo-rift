@@ -1,4 +1,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
+// Phase 4: BUG-007b regression guard — warn on functions with large stack frames.
+// init()/open_manifest_mmap() are already #[inline(never)] #[cold] to keep get()'s
+// stack small. This lint catches NEW functions that might break the invariant.
+#![warn(clippy::large_stack_frames)]
 // #![deny(warnings)] // TODO: Enable strict mode eventually
 //! # velo-inception-layer
 //!
@@ -37,6 +41,7 @@ pub mod macros;
 pub mod interpose;
 pub mod ipc;
 pub mod path;
+pub mod raw_context;
 pub mod reals;
 pub mod state;
 pub mod sync;

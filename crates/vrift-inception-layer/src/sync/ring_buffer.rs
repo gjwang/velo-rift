@@ -204,6 +204,7 @@ impl Default for RingBufferStore {
 }
 
 impl RingBufferStore {
+    #[allow(clippy::large_stack_frames)] // const fn for static init — never on runtime stack
     pub const fn new() -> Self {
         Self {
             inner: UnsafeCell::new(None),

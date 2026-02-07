@@ -5,28 +5,27 @@
 // Any libc call here (access, close, fcntl, stat, etc.) will be re-intercepted
 // by the shim, creating recursive IPC that floods the daemon socket and deadlocks.
 //
-// Allowed:     raw_access, raw_close, raw_fcntl, raw_read, raw_write, raw_mmap
+// ENFORCEMENT: All I/O goes through `RawContext` which only exposes raw syscalls.
+// Allowed:     ctx.access(), ctx.close(), ctx.fcntl(), ctx.read(), ctx.write()
 // Forbidden:   libc::access, libc::close, libc::fcntl, std::fs::*, std::io::*
 // =============================================================================
+use crate::raw_context::RawContext;
 use libc::c_int;
 use std::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// The singleton RawContext for IPC operations.
+/// All raw syscall access must go through this instance.
+const CTX: &RawContext = &RawContext::INSTANCE;
 
 /// BUG-007b: Raw close for IPC socket FDs — avoids interposed close_inception
 /// which would trigger reingest IPC and recursive socket operations.
 #[inline(always)]
 unsafe fn ipc_raw_close(fd: c_int) -> c_int {
-    #[cfg(target_os = "macos")]
-    {
-        crate::syscalls::macos_raw::raw_close(fd)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        crate::syscalls::linux_raw::raw_close(fd)
-    }
+    CTX.close(fd)
 }
 
-/// Raw Unix socket connect using libc syscalls (avoids recursion through inception layer)
+/// Raw Unix socket connect using raw syscalls (avoids recursion through inception layer)
 /// RFC-0053: Adds 5 second timeout to prevent UE process states from blocking IPC
 pub(crate) unsafe fn raw_unix_connect(path: &str) -> c_int {
     // Fast-fail: Check if socket file exists before attempting connect
@@ -34,14 +33,8 @@ pub(crate) unsafe fn raw_unix_connect(path: &str) -> c_int {
         Ok(p) => p,
         Err(_) => return -1,
     };
-    // BUG-007b: Use raw_access, NOT libc::access — access is interposed by the shim
-    // and would trigger recursive IPC (open → sync_rpc → access → access_inception → IPC → deadlock)
-    #[cfg(target_os = "macos")]
-    if crate::syscalls::macos_raw::raw_access(path_cstr.as_ptr(), libc::F_OK) != 0 {
-        return -1;
-    }
-    #[cfg(target_os = "linux")]
-    if crate::syscalls::linux_raw::raw_access(path_cstr.as_ptr(), libc::F_OK) != 0 {
+    // BUG-007b: Use raw_access via RawContext — access is interposed by the shim
+    if CTX.access(path_cstr.as_ptr(), libc::F_OK) != 0 {
         return -1;
     }
 
@@ -55,11 +48,8 @@ pub(crate) unsafe fn raw_unix_connect(path: &str) -> c_int {
         {
             let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
             if s >= 0 {
-                // BUG-007b: Use raw_fcntl to avoid interposed fcntl
-                #[cfg(target_os = "macos")]
-                crate::syscalls::macos_raw::raw_fcntl(s, libc::F_SETFD, libc::FD_CLOEXEC);
-                #[cfg(target_os = "linux")]
-                libc::fcntl(s, libc::F_SETFD, libc::FD_CLOEXEC); // Linux has no fcntl interpose
+                // BUG-007b: Use raw_fcntl via RawContext to avoid interposed fcntl
+                CTX.fcntl(s, libc::F_SETFD, libc::FD_CLOEXEC);
             }
             s
         }
@@ -113,55 +103,17 @@ pub(crate) unsafe fn raw_unix_connect(path: &str) -> c_int {
     fd
 }
 
-/// Raw write using libc (avoids recursion through inception layer)
+/// Raw write using RawContext (avoids recursion through inception layer)
 pub(crate) unsafe fn raw_write_all(fd: c_int, data: &[u8]) -> bool {
-    let mut written = 0;
-    while written < data.len() {
-        #[cfg(target_os = "macos")]
-        let n = crate::syscalls::macos_raw::raw_write(
-            fd,
-            data[written..].as_ptr() as *const libc::c_void,
-            data.len() - written,
-        );
-        #[cfg(target_os = "linux")]
-        let n = crate::syscalls::linux_raw::raw_write(
-            fd,
-            data[written..].as_ptr() as *const libc::c_void,
-            data.len() - written,
-        );
-        if n <= 0 {
-            return false;
-        }
-        written += n as usize;
-    }
-    true
+    CTX.write_all(fd, data)
 }
 
-/// Raw read using syscall (avoids recursion through inception layer)
+/// Raw read using RawContext (avoids recursion through inception layer)
 pub(crate) unsafe fn raw_read_exact(fd: c_int, buf: &mut [u8]) -> bool {
-    let mut read = 0;
-    while read < buf.len() {
-        #[cfg(target_os = "macos")]
-        let n = crate::syscalls::macos_raw::raw_read(
-            fd,
-            buf[read..].as_mut_ptr() as *mut libc::c_void,
-            buf.len() - read,
-        );
-        #[cfg(target_os = "linux")]
-        let n = crate::syscalls::linux_raw::raw_read(
-            fd,
-            buf[read..].as_mut_ptr() as *mut libc::c_void,
-            buf.len() - read,
-        );
-        if n <= 0 {
-            return false;
-        }
-        read += n as usize;
-    }
-    true
+    CTX.read_exact(fd, buf)
 }
 
-/// Send request and receive response using raw libc I/O.
+/// Send request and receive response using raw I/O via RawContext.
 /// RFC-0043: Ensuring workspace registration for every connection.
 /// RFC-0055: Auto-recovery after CIRCUIT_RECOVERY_DELAY seconds.
 unsafe fn sync_rpc(

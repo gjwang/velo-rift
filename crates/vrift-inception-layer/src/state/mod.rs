@@ -1,15 +1,28 @@
+// =============================================================================
+// state/mod.rs — Hot-path code for inception layer state
+// =============================================================================
+//
+// This module contains code that runs on EVERY interposed syscall:
+//   - get() / get_no_spawn() — global state access (small stack frame!)
+//   - query_manifest() / resolve_path() — per-call lookups
+//   - InceptionLayerGuard — recursion prevention
+//   - FlightRecorder / Logger / DirtyTracker — always-hot infrastructure
+//
+// Cold-path init code lives in state/init.rs (behind #[inline(never)])
+// Background worker code lives in state/worker.rs
+// =============================================================================
+
+mod init;
+mod worker;
+
+use crate::ipc::*;
 use crate::path::{PathResolver, VfsPath};
 use crate::sync::RecursiveMutex;
 use libc::{c_int, c_void};
 use std::collections::HashMap;
 use std::ffi::CStr;
-use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-
-use crate::ipc::*;
-// use vrift_cas::CasStore;
-// use vrift_ipc;
 
 // ============================================================================
 // Global State & Recursion Guards
@@ -132,6 +145,7 @@ pub struct FlightRecorder {
 }
 
 impl FlightRecorder {
+    #[allow(clippy::large_stack_frames)] // const fn for static init — never on runtime stack
     pub const fn new() -> Self {
         Self {
             buffer: [FlightEntry {
@@ -148,6 +162,7 @@ impl FlightRecorder {
 }
 
 impl Default for FlightRecorder {
+    #[allow(clippy::large_stack_frames)] // delegates to const fn new() for static init
     fn default() -> Self {
         Self::new()
     }
@@ -359,9 +374,6 @@ fn rdtsc() -> u64 {
     #[cfg(target_arch = "aarch64")]
     /* unsafe */
     {
-        // let mut cntpct: u64;
-        // std::arch::asm!("mrs {0}, cntpct_el0", out(reg) cntpct);
-        // cntpct
         0
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -773,194 +785,8 @@ pub(crate) static SYNTHETIC_DIR_COUNTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 // ============================================================================
-// RFC-0044 Hot Stat Cache: mmap-based O(1) Stat Lookup
+// mmap_lookup / mmap_dir_lookup: O(1) manifest lookups
 // ============================================================================
-
-/// Open mmap'd manifest file for O(1) stat lookup.
-/// Returns (ptr, size) or (null, 0) if unavailable.
-/// Uses raw libc to avoid recursion through inception layer.
-/// BUG-007b: MUST NOT be inlined — allocates large stack buffers (PATH_MAX etc.)
-/// that would overflow the 512KB default pthread stack if merged into get().
-#[inline(never)]
-#[cold]
-pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
-    // Check if mmap is explicitly disabled
-    unsafe {
-        let env_key = c"VRIFT_DISABLE_MMAP";
-        // Use getenv but it's safe as it's not interposed normally,
-        // but we should be careful. getenv is usually safe.
-        let env_val = libc::getenv(env_key.as_ptr());
-        if !env_val.is_null() {
-            let val = CStr::from_ptr(env_val).to_str().unwrap_or("0");
-            if val == "1" || val == "true" {
-                return (ptr::null(), 0);
-            }
-        }
-    }
-
-    // Get VRIFT_MANIFEST to derive project root and hash
-    let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
-    if manifest_ptr.is_null() {
-        return (ptr::null(), 0);
-    }
-    let _manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
-
-    // Construct path on stack: {project_root}/.vrift/manifest.mmap
-    let mut path_buf = [0u8; 1024];
-    let mut writer = crate::macros::StackWriter::new(&mut path_buf);
-    use std::fmt::Write;
-
-    let root_bytes = unsafe { CStr::from_ptr(manifest_ptr).to_bytes() };
-
-    // Naively assume project root is parent of manifest
-    // If manifest is /path/to/.vrift/manifest.lmdb -> root is /path/to
-    // If manifest is /path/to/manifest.lmdb -> root is /path/to
-
-    // Use low-level byte manipulation to find parent
-    let mut last_slash = 0;
-    for (i, &b) in root_bytes.iter().enumerate() {
-        if b == b'/' {
-            last_slash = i;
-        }
-    }
-
-    let root_len = if last_slash > 0 {
-        last_slash
-    } else {
-        root_bytes.len()
-    };
-
-    // If ending in .vrift, strip it too
-    let root_part = &root_bytes[..root_len];
-    let final_root_len = if root_part.ends_with(b"/.vrift") {
-        root_len - 7
-    } else if root_part.ends_with(b".vrift") {
-        // rare case if root is simply ".vrift"
-        root_len - 6
-    } else {
-        root_len
-    };
-
-    let root_str = std::str::from_utf8(&root_bytes[..final_root_len]).unwrap_or("");
-
-    // BUG-007b: Use raw_realpath instead of std::fs::canonicalize()
-    // canonicalize() calls stat/readlink which are interposed by the shim,
-    // causing potential recursion/deadlock during initialization.
-    let canon_root = unsafe {
-        let mut resolved = [0u8; libc::PATH_MAX as usize];
-        let root_cstr = std::ffi::CString::new(root_str).unwrap_or_default();
-        #[cfg(target_os = "macos")]
-        let result = crate::syscalls::macos_raw::raw_realpath(
-            root_cstr.as_ptr(),
-            resolved.as_mut_ptr() as *mut libc::c_char,
-        );
-        #[cfg(target_os = "linux")]
-        let result = libc::realpath(
-            root_cstr.as_ptr(),
-            resolved.as_mut_ptr() as *mut libc::c_char,
-        );
-        if !result.is_null() {
-            let resolved_str = CStr::from_ptr(result).to_string_lossy().to_string();
-            PathBuf::from(resolved_str)
-        } else {
-            PathBuf::from(root_str)
-        }
-    };
-    let canon_root_str = canon_root.to_string_lossy();
-
-    // RFC-0044: Use standardized VDir mmap path managed by daemon
-    let project_id = vrift_config::path::compute_project_id(canon_root_str.as_ref());
-    let mmap_path = vrift_config::path::get_vdir_mmap_path(&project_id)
-        .unwrap_or_else(|| PathBuf::from(format!("{}/.vrift/manifest.mmap", canon_root_str)));
-
-    let _ = write!(writer, "{}\0", mmap_path.display());
-    let mmap_path_ptr = path_buf.as_ptr() as *const libc::c_char;
-
-    #[cfg(target_os = "macos")]
-    let fd = unsafe {
-        crate::syscalls::macos_raw::raw_open(mmap_path_ptr, libc::O_RDONLY | libc::O_CLOEXEC, 0)
-    };
-    #[cfg(target_os = "linux")]
-    let fd = unsafe {
-        crate::syscalls::linux_raw::raw_openat(
-            libc::AT_FDCWD,
-            mmap_path_ptr,
-            libc::O_RDONLY | libc::O_CLOEXEC,
-            0,
-        )
-    };
-    if fd < 0 {
-        return (ptr::null(), 0);
-    }
-
-    // Get file size via fstat
-    let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
-    #[cfg(target_os = "macos")]
-    let fstat_result = unsafe { crate::syscalls::macos_raw::raw_fstat64(fd, &mut stat_buf) };
-    #[cfg(target_os = "linux")]
-    let fstat_result = unsafe { crate::syscalls::linux_raw::raw_fstat(fd, &mut stat_buf) };
-    if fstat_result != 0 {
-        #[cfg(target_os = "macos")]
-        unsafe {
-            crate::syscalls::macos_raw::raw_close(fd)
-        };
-        #[cfg(target_os = "linux")]
-        unsafe {
-            crate::syscalls::linux_raw::raw_close(fd)
-        };
-        return (ptr::null(), 0);
-    }
-    let size = stat_buf.st_size as usize;
-
-    // mmap the file read-only
-    #[cfg(target_os = "macos")]
-    let ptr = unsafe {
-        crate::syscalls::macos_raw::raw_mmap(
-            ptr::null_mut(),
-            size,
-            libc::PROT_READ,
-            libc::MAP_PRIVATE,
-            fd,
-            0,
-        )
-    };
-    #[cfg(target_os = "linux")]
-    let ptr = unsafe {
-        crate::syscalls::linux_raw::raw_mmap(
-            ptr::null_mut(),
-            size,
-            libc::PROT_READ,
-            libc::MAP_PRIVATE,
-            fd,
-            0,
-        )
-    };
-    #[cfg(target_os = "macos")]
-    unsafe {
-        crate::syscalls::macos_raw::raw_close(fd)
-    };
-    #[cfg(target_os = "linux")]
-    unsafe {
-        crate::syscalls::linux_raw::raw_close(fd)
-    };
-
-    if ptr == libc::MAP_FAILED {
-        return (ptr::null(), 0);
-    }
-
-    // Validate header magic
-    if size < vrift_ipc::ManifestMmapHeader::SIZE {
-        unsafe { libc::munmap(ptr, size) };
-        return (ptr::null(), 0);
-    }
-    let header = unsafe { &*(ptr as *const vrift_ipc::ManifestMmapHeader) };
-    if !header.is_valid() {
-        unsafe { libc::munmap(ptr, size) };
-        return (ptr::null(), 0);
-    }
-
-    (ptr as *const u8, size)
-}
 
 /// O(1) mmap-based stat lookup for Hot Stat Cache.
 /// Returns None if entry not found or mmap not available.
@@ -1046,6 +872,10 @@ pub(crate) fn mmap_dir_lookup(
     None
 }
 
+// ============================================================================
+// InceptionLayerState: Core struct & hot-path methods
+// ============================================================================
+
 pub(crate) struct InceptionLayerState {
     pub cas_root: FixedString<1024>,
     pub vfs_prefix: FixedString<256>,
@@ -1064,441 +894,6 @@ pub(crate) struct InceptionLayerState {
 }
 
 impl InceptionLayerState {
-    pub(crate) unsafe fn init_logger() {
-        let debug_ptr = libc::getenv(c"VRIFT_DEBUG".as_ptr());
-        if !debug_ptr.is_null() {
-            DEBUG_ENABLED.store(true, Ordering::Relaxed);
-        }
-
-        // RFC-0050: Read log level
-        let level_ptr = unsafe { libc::getenv(c"VRIFT_LOG_LEVEL".as_ptr()) };
-        if !level_ptr.is_null() {
-            // Zero-allocation parsing
-            let level_bytes = unsafe { CStr::from_ptr(level_ptr).to_bytes() };
-            let level = if level_bytes.eq_ignore_ascii_case(b"trace") {
-                LogLevel::Trace
-            } else if level_bytes.eq_ignore_ascii_case(b"debug") {
-                LogLevel::Debug
-            } else if level_bytes.eq_ignore_ascii_case(b"info") {
-                LogLevel::Info
-            } else if level_bytes.eq_ignore_ascii_case(b"warn") {
-                LogLevel::Warn
-            } else if level_bytes.eq_ignore_ascii_case(b"error") {
-                LogLevel::Error
-            } else if level_bytes.eq_ignore_ascii_case(b"off") {
-                LogLevel::Off
-            } else {
-                LogLevel::Info
-            };
-            LOG_LEVEL.store(level as u8, Ordering::Relaxed);
-        }
-
-        // RFC-0050: Read circuit breaker threshold
-        let threshold_ptr = unsafe { libc::getenv(c"VRIFT_CIRCUIT_BREAKER_THRESHOLD".as_ptr()) };
-        if !threshold_ptr.is_null() {
-            let threshold_bytes = unsafe { CStr::from_ptr(threshold_ptr).to_bytes() };
-            if let Ok(s) = std::str::from_utf8(threshold_bytes) {
-                if let Ok(threshold) = s.parse::<usize>() {
-                    CIRCUIT_BREAKER_THRESHOLD.store(threshold, Ordering::Relaxed);
-                }
-            }
-        }
-    }
-
-    /// Attempt to raise RLIMIT_NOFILE to exactly 80% of the true hard cap.
-    pub(crate) fn boost_fd_limit() -> usize {
-        let mut soft_limit = 1024; // Default
-        let mut rl = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0 {
-            soft_limit = rl.rlim_cur as usize;
-            // Determine the "true" hard cap even if RLIM_INFINITY is returned
-            let hard_cap = if rl.rlim_max == libc::RLIM_INFINITY {
-                #[cfg(target_os = "macos")]
-                {
-                    let mut max_files: libc::c_int = 0;
-                    let mut size = std::mem::size_of_val(&max_files);
-                    if unsafe {
-                        libc::sysctlbyname(
-                            c"kern.maxfilesperproc".as_ptr(),
-                            &mut max_files as *mut _ as *mut _,
-                            &mut size,
-                            std::ptr::null_mut(),
-                            0,
-                        )
-                    } == 0
-                    {
-                        max_files as libc::rlim_t
-                    } else {
-                        10240 // Sane fallback
-                    }
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    1048576
-                }
-                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                {
-                    65536
-                }
-            } else {
-                rl.rlim_max
-            };
-
-            // UX: Explicit guidance if hard limit is dangerously low
-            if hard_cap < 4096 {
-                let msg = "[vrift-inception] ⚠️  WARNING: System FD hard limit is extremely low. This will likely cause build failures.\n\
-                     [vrift-inception] 👉 Action: Run 'ulimit -Hn 65536' or check /etc/security/limits.conf\n";
-                unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
-            }
-
-            // Policy: Boost to EXACTLY 80% of the true hard cap.
-            let target = (hard_cap as f64 * 0.8) as libc::rlim_t;
-
-            if rl.rlim_cur < target {
-                let old_cur = rl.rlim_cur;
-                rl.rlim_cur = target;
-                if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) } == 0 {
-                    // Safe logging without allocation
-                    let mut buf = [0u8; 128];
-                    let mut writer = crate::macros::StackWriter::new(&mut buf);
-                    use std::fmt::Write;
-                    let _ = writeln!(
-                        writer,
-                        "[vrift-inception] 🚀 Optimized FD limit: {} -> {} (target: 80%)",
-                        old_cur, rl.rlim_cur
-                    );
-                    let msg = writer.as_str();
-                    unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
-                    soft_limit = rl.rlim_cur as usize;
-                }
-            }
-        }
-        soft_limit
-    }
-
-    /// BUG-007b: MUST NOT be inlined into get().
-    /// init() + open_manifest_mmap() together allocate ~605KB on stack
-    /// (FixedStrings, PATH_MAX buffers, InceptionLayerState struct).
-    /// macOS pthread stacks default to 512KB → stack overflow in get()'s prologue,
-    /// silently hanging all threads in the stack probe loop.
-    #[inline(never)]
-    #[cold]
-    pub(crate) fn init() -> Option<*mut Self> {
-        let soft_limit = Self::boost_fd_limit();
-        unsafe { Self::init_logger() };
-
-        let mut cas_root = FixedString::<1024>::new();
-        let cas_ptr = unsafe { libc::getenv(c"VR_THE_SOURCE".as_ptr()) };
-
-        // 1. Determine raw path (Env or Default)
-        let raw_path = if !cas_ptr.is_null() {
-            unsafe { CStr::from_ptr(cas_ptr).to_string_lossy() }
-        } else {
-            std::borrow::Cow::Borrowed(vrift_ipc::DEFAULT_CAS_ROOT)
-        };
-
-        // 2. Perform safe tilde expansion
-        if raw_path.starts_with("~/") {
-            let home_ptr = unsafe { libc::getenv(c"HOME".as_ptr()) };
-            if !home_ptr.is_null() {
-                let home = unsafe { CStr::from_ptr(home_ptr).to_string_lossy() };
-
-                // Safe concatenation on stack
-                let mut path_buf = [0u8; 1024];
-                let mut writer = crate::macros::StackWriter::new(&mut path_buf);
-                use std::fmt::Write;
-                let _ = write!(writer, "{}{}", home, &raw_path[1..]); // Skip '~'
-                cas_root.set(writer.as_str());
-            } else {
-                cas_root.set(&raw_path);
-            }
-        } else {
-            cas_root.set(&raw_path);
-        }
-
-        let mut vfs_prefix = FixedString::<256>::new();
-        let prefix_ptr = unsafe { libc::getenv(c"VRIFT_VFS_PREFIX".as_ptr()) };
-        if !prefix_ptr.is_null() {
-            let raw_prefix = unsafe { CStr::from_ptr(prefix_ptr).to_string_lossy() };
-            // RFC-0050 + BUG-007b: Canonicalize prefix using raw_realpath
-            // (std::fs::canonicalize calls interposed stat/readlink)
-            let prefix_cstr = std::ffi::CString::new(raw_prefix.as_ref()).unwrap_or_default();
-            let mut resolved = [0u8; libc::PATH_MAX as usize];
-            #[cfg(target_os = "macos")]
-            let result = unsafe {
-                crate::syscalls::macos_raw::raw_realpath(
-                    prefix_cstr.as_ptr(),
-                    resolved.as_mut_ptr() as *mut libc::c_char,
-                )
-            };
-            #[cfg(target_os = "linux")]
-            let result = unsafe {
-                libc::realpath(
-                    prefix_cstr.as_ptr(),
-                    resolved.as_mut_ptr() as *mut libc::c_char,
-                )
-            };
-            if !result.is_null() {
-                let canon = unsafe { CStr::from_ptr(result).to_string_lossy() };
-                vfs_prefix.set(&canon);
-            } else {
-                vfs_prefix.set(&raw_prefix);
-            }
-        }
-
-        let mut socket_path = FixedString::<1024>::new();
-        let socket_ptr = unsafe { libc::getenv(c"VRIFT_SOCKET_PATH".as_ptr()) };
-        if socket_ptr.is_null() {
-            socket_path.set(vrift_ipc::DEFAULT_SOCKET_PATH);
-        } else {
-            socket_path.set(&unsafe { CStr::from_ptr(socket_ptr).to_string_lossy() });
-        }
-
-        let (mmap_ptr, mmap_size) = open_manifest_mmap();
-
-        let mut project_root_fs = FixedString::<1024>::new();
-        let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
-        if !manifest_ptr.is_null() {
-            let manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
-            let path = Path::new(manifest_path.as_ref());
-            let parent = path.parent().unwrap_or_else(|| Path::new("/"));
-            let root = if parent.ends_with(".vrift") {
-                parent.parent().unwrap_or(parent)
-            } else {
-                parent
-            };
-            // RFC-0050 + BUG-007b: Canonicalize using raw_realpath
-            let root_str_lossy = root.to_string_lossy();
-            let root_cstr = std::ffi::CString::new(root_str_lossy.as_ref()).unwrap_or_default();
-            let mut resolved = [0u8; libc::PATH_MAX as usize];
-            #[cfg(target_os = "macos")]
-            let result = unsafe {
-                crate::syscalls::macos_raw::raw_realpath(
-                    root_cstr.as_ptr(),
-                    resolved.as_mut_ptr() as *mut libc::c_char,
-                )
-            };
-            #[cfg(target_os = "linux")]
-            let result = unsafe {
-                libc::realpath(
-                    root_cstr.as_ptr(),
-                    resolved.as_mut_ptr() as *mut libc::c_char,
-                )
-            };
-            if !result.is_null() {
-                let canon = unsafe { CStr::from_ptr(result).to_string_lossy() };
-                project_root_fs.set(&canon);
-            } else {
-                project_root_fs.set(&root.to_string_lossy());
-            }
-        }
-
-        // RFC-CRIT-001: Bootstrap-Safe Allocation using raw_mmap
-        // Replaces malloc to avoid fstat->shim->malloc deadlock on macOS (BUG-007)
-        let size = std::mem::size_of::<InceptionLayerState>();
-
-        #[cfg(target_os = "macos")]
-        let ptr = unsafe {
-            crate::syscalls::macos_raw::raw_mmap(
-                ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            ) as *mut InceptionLayerState
-        };
-
-        #[cfg(target_os = "linux")]
-        let ptr = unsafe {
-            crate::syscalls::linux_raw::raw_mmap(
-                ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            ) as *mut InceptionLayerState
-        };
-
-        if ptr == libc::MAP_FAILED as *mut InceptionLayerState {
-            return None;
-        }
-
-        unsafe {
-            ptr::write(
-                ptr,
-                InceptionLayerState {
-                    cas_root,
-                    vfs_prefix,
-                    socket_path,
-                    open_fds: crate::sync::FdTable::new(),
-                    active_mmaps: RecursiveMutex::new(HashMap::with_hasher(IdentityBuildHasher)),
-                    open_dirs: RecursiveMutex::new(HashMap::with_hasher(IdentityBuildHasher)),
-                    bloom_ptr: ptr::null(),
-                    mmap_ptr,
-                    mmap_size,
-                    project_root: project_root_fs,
-                    path_resolver: PathResolver::new(vfs_prefix.as_str(), project_root_fs.as_str()),
-                    cached_soft_limit: AtomicUsize::new(soft_limit),
-                    last_usage_alert: std::sync::atomic::AtomicU64::new(0),
-                    tasks: Self::init_reactor(),
-                },
-            );
-        }
-
-        // Perform proactive environment audit (Safe: uses getenv and safe logger)
-        unsafe { Self::audit_environment() };
-
-        Some(ptr)
-    }
-
-    /// RFC-0050: Proactively detect hazardous environment variables
-    /// that might cause conflicts during dyld bootstrap.
-    unsafe fn audit_environment() {
-        #[cfg(target_os = "macos")]
-        let hazardous_vars = [c"DYLD_LIBRARY_PATH", c"DYLD_FALLBACK_LIBRARY_PATH"];
-        #[cfg(target_os = "linux")]
-        let hazardous_vars = [c"LD_LIBRARY_PATH", c"LD_PRELOAD"];
-
-        for &var in &hazardous_vars {
-            let val = libc::getenv(var.as_ptr());
-            if !val.is_null() {
-                let name = var.to_str().unwrap_or("UNKNOWN");
-                inception_warn!("Hazardous env var detected during bootstrap: {}", name);
-            }
-        }
-    }
-
-    fn init_reactor() -> &'static crate::sync::RingBuffer {
-        unsafe {
-            if crate::sync::get_reactor().is_none() {
-                let reactor = crate::sync::Reactor {
-                    fd_table: crate::sync::FdTable::new(),
-                    ring_buffer: crate::sync::RingBuffer::new(),
-                    started: std::sync::atomic::AtomicBool::new(true),
-                };
-                *crate::sync::REACTOR.get() = Some(reactor);
-
-                // Start Worker Thread via pthread LATER
-                // BUG-008: Spawning in ctor causes deadlock with dyld loader lock
-                // Self::spawn_worker(); NO!
-
-                // Now mark as ready for fast path in get_reactor()
-                crate::sync::mark_reactor_ready();
-            }
-
-            // Safety: We just initialized it above if it was missing.
-            // If it's still None, something is catastrophically wrong with memory.
-            // We use unwrap_unchecked to satisfy "no panic" rule (it becomes UB instead of abort,
-            // but conceptually this is unreachable).
-            // OR: We return a valid reference derived from the initialization logic.
-            // Let's use get_reactor() and fallback to strict log if missing.
-            match crate::sync::get_reactor() {
-                Some(r) => &r.ring_buffer,
-                None => {
-                    // Should be unreachable.
-                    // Since we cannot panic, we might loop or abort C-style?
-                    // But strictly speaking, clippy::unwrap_used prevents panic.
-                    // libc::abort is allowed.
-                    libc::abort();
-                }
-            }
-        }
-    }
-
-    /// BUG-007b: Must not inline — pthread_create internally calls mmap (interposed).
-    /// Keeps get()'s stack frame small and isolates pthread_create side effects.
-    #[inline(never)]
-    fn spawn_worker() {
-        // Double-check to ensure we don't spawn multiple times racefully
-        if WORKER_STARTED.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        unsafe {
-            let mut thread: libc::pthread_t = std::mem::zeroed();
-            libc::pthread_create(
-                &mut thread,
-                std::ptr::null(),
-                Self::worker_entry,
-                std::ptr::null_mut(),
-            );
-            libc::pthread_detach(thread);
-        }
-    }
-
-    extern "C" fn worker_entry(_: *mut libc::c_void) -> *mut libc::c_void {
-        // Block all signals in worker thread
-        unsafe {
-            let mut mask: libc::sigset_t = std::mem::zeroed();
-            libc::sigfillset(&mut mask);
-            libc::pthread_sigmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
-        }
-
-        let reactor = match crate::sync::get_reactor() {
-            Some(r) => r,
-            None => return std::ptr::null_mut(),
-        };
-
-        // Worker thread loop with adaptive backoff for CPU efficiency
-        let mut backoff_count = 0u32;
-        loop {
-            if let Some(task) = reactor.ring_buffer.pop() {
-                // Reset backoff on success
-                backoff_count = 0;
-                Self::process_task(task);
-            } else {
-                // No task available - adaptive backoff
-                backoff_count = backoff_count.saturating_add(1).min(1000);
-
-                if backoff_count < 10 {
-                    // Fast spin for very short idle periods
-                    std::hint::spin_loop();
-                } else if backoff_count < 100 {
-                    // Yield CPU for short idle periods
-                    std::thread::yield_now();
-                } else {
-                    // Sleep for prolonged idle (1μs reduces CPU while staying responsive)
-                    std::thread::sleep(std::time::Duration::from_micros(1));
-                }
-            }
-        }
-    }
-
-    fn process_task(task: crate::sync::Task) {
-        // ... (same as before) ...
-        match task {
-            crate::sync::Task::ReclaimFd(_fd, entry) => {
-                if !entry.is_null() {
-                    unsafe { drop(Box::from_raw(entry)) };
-                }
-            }
-            crate::sync::Task::Reingest { vpath, temp_path } => {
-                if let Some(state) = InceptionLayerState::get_no_spawn() {
-                    // Use no_spawn to avoid recursion if we want
-                    unsafe {
-                        if crate::ipc::sync_ipc_manifest_reingest(
-                            &state.socket_path,
-                            &vpath,
-                            &temp_path,
-                        ) {
-                            // M4: Clear dirty status ONLY after the daemon confirms reingest.
-                            // This ensures subsequent reads see the updated manifest data.
-                            DIRTY_TRACKER.clear_dirty(&vpath);
-                        }
-                    }
-                }
-            }
-            crate::sync::Task::Log(msg) => {
-                unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
-            }
-        }
-    }
-
     // Internal helper to avoid infinite recursion when worker needs state
     pub(crate) fn get_no_spawn() -> Option<&'static Self> {
         let ptr = INCEPTION_LAYER_STATE.load(Ordering::Acquire);
@@ -1523,6 +918,14 @@ impl InceptionLayerState {
     ///   `objdump -d libvrift_inception_layer.dylib | grep -A5 'get.*:'`
     ///   Expected: `sub sp, sp, #<small>` (should be < 4096)
     pub(crate) fn get() -> Option<&'static Self> {
+        // Phase 6: Stack size guard (debug builds only)
+        #[cfg(debug_assertions)]
+        {
+            if stack_remaining() < 64 * 1024 {
+                return None; // Bail out to raw passthrough — not enough stack
+            }
+        }
+
         let ptr = INCEPTION_LAYER_STATE.load(Ordering::Acquire);
         if !ptr.is_null() {
             // Lazy spawn worker if not started
@@ -1531,8 +934,6 @@ impl InceptionLayerState {
             }
             return unsafe { Some(&*ptr) };
         }
-
-        // ... (rest of get logic) ...
 
         // RFC-0050: Tiered Readiness Model
         let current = unsafe { INITIALIZING.load(Ordering::Acquire) };
@@ -1573,9 +974,6 @@ impl InceptionLayerState {
         inception_record!(EventType::VfsInit, 0, 0);
 
         // BUG-004: setup_signal_handler and atexit are dangerous during dyld bootstrap.
-        // These can trigger system-level deadlocks (Pattern 2682).
-        // RFC-OPT-003: Attempted two-phase re-enablement still causes SIGKILL on some binaries.
-        // Keeping disabled until a safer approach is found, OR explicitly enabled for testing.
         let enable_handlers = unsafe {
             let env_key = c"VRIFT_ENABLE_SIGNAL_HANDLERS";
             let val = libc::getenv(env_key.as_ptr());
@@ -1583,8 +981,8 @@ impl InceptionLayerState {
         };
 
         if enable_handlers {
-            unsafe { setup_signal_handler() };
-            unsafe { libc::atexit(dump_logs_atexit) };
+            unsafe { init::setup_signal_handler() };
+            unsafe { libc::atexit(init::dump_logs_atexit) };
         }
 
         // Activate VFS - now it's safe to call into Rust from C wrappers.
@@ -1818,22 +1216,53 @@ impl InceptionLayerState {
     }
 }
 
-extern "C" fn dump_logs_atexit() {
-    LOGGER.dump_to_file();
-    // Also dump flight recorder to stderr if debug is enabled
-    if DEBUG_ENABLED.load(Ordering::Relaxed) {
-        vfs_dump_flight_recorder();
-    }
-}
+// ============================================================================
+// Phase 6: Stack size guard (debug builds only)
+// ============================================================================
 
-pub(crate) unsafe fn setup_signal_handler() {
+/// Check remaining stack space for the current thread.
+/// Returns approximate bytes of stack remaining.
+/// Only active in debug builds (#[cfg(debug_assertions)]).
+#[cfg(debug_assertions)]
+fn stack_remaining() -> usize {
+    // Read current stack pointer via inline assembly
+    let sp: usize;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!("mov {}, sp", out(reg) sp);
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::asm!("mov {}, rsp", out(reg) sp);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        return usize::MAX; // Can't check, assume ok
+    }
+
+    // pthread_get_stackaddr_np gives the TOP of the stack (highest address)
+    // Stack grows downward, so remaining = sp - stack_bottom
+    let thread = unsafe { libc::pthread_self() };
     #[cfg(target_os = "macos")]
     {
-        use libc::{signal, SIGUSR1};
-        extern "C" fn handle_sigusr1(_sig: libc::c_int) {
-            vfs_dump_flight_recorder();
+        let stack_addr = unsafe { libc::pthread_get_stackaddr_np(thread) } as usize;
+        let stack_size = unsafe { libc::pthread_get_stacksize_np(thread) };
+        let stack_bottom = stack_addr.saturating_sub(stack_size);
+        sp.saturating_sub(stack_bottom)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut attr: libc::pthread_attr_t = unsafe { std::mem::zeroed() };
+        if unsafe { libc::pthread_getattr_np(thread, &mut attr) } == 0 {
+            let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
+            let mut stack_size: libc::size_t = 0;
+            unsafe { libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size) };
+            unsafe { libc::pthread_attr_destroy(&mut attr) };
+            let stack_bottom = stack_addr as usize;
+            sp.saturating_sub(stack_bottom)
+        } else {
+            usize::MAX // Can't determine, assume ok
         }
-        signal(SIGUSR1, handle_sigusr1 as usize);
     }
 }
 
@@ -1975,8 +1404,6 @@ mod dirty_tracker_tests {
             tracker.clear_dirty(&path);
         }
 
-        // Note: Due to linear probing, cleared slots become "holes" which may
-        // affect count accuracy. We verify only that cleared paths are not dirty.
         for i in 0..250 {
             let path = format!("file_{}.rs", i);
             assert!(
