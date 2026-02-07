@@ -49,7 +49,7 @@ pub(crate) unsafe fn raw_unix_connect(path: &str) -> c_int {
             let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
             if s >= 0 {
                 // BUG-007b: Use raw_fcntl via RawContext to avoid interposed fcntl
-                CTX.fcntl(s, libc::F_SETFD, libc::FD_CLOEXEC);
+                CTX.fcntl(s, libc::F_SETFD, libc::FD_CLOEXEC as i64);
             }
             s
         }

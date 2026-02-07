@@ -131,8 +131,10 @@ const SYS_UNLINKAT: i64 = 472;
 /// SYS_mkdirat = 475 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_MKDIRAT: i64 = 475;
-const SYS_UTIMENSAT: i64 = 476;
-const SYS_FUTIMENS: i64 = 477;
+// NOTE: macOS has NO kernel syscall for utimensat/futimens.
+// SYS 476 = getattrlistat, SYS 477 = proc_trace_log.
+// These functions are libc wrappers over setattrlist.
+// We use dlsym-based passthrough instead (see raw_utimensat / raw_futimens below).
 
 /// SYS_symlinkat = 474 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -161,10 +163,7 @@ const SYS_RENAMEAT: i64 = 465;
 /// SYS_readlink = 58 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_READLINK: i64 = 58;
-
-/// SYS_realpath = 462 on macOS
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SYS_REALPATH: i64 = 462;
+// No SYS_REALPATH syscall on macOS
 
 /// Raw stat64 syscall for macOS ARM64.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -566,7 +565,7 @@ pub unsafe fn raw_open(
 /// Raw fcntl syscall for macOS ARM64.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[inline(never)]
-pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: libc::c_int) -> libc::c_int {
+pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: i64) -> libc::c_int {
     let ret: i64;
     let err: i64;
     asm!(
@@ -576,7 +575,7 @@ pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: libc::c_int) -> 
         syscall = in(reg) SYS_FCNTL,
         in("x0") fd as i64,
         in("x1") cmd as i64,
-        in("x2") arg as i64,
+        in("x2") arg,
         lateout("x0") ret,
         err = out(reg) err,
         options(nostack)
@@ -737,30 +736,47 @@ pub unsafe fn raw_readlink(
 }
 
 /// Raw realpath syscall for macOS ARM64.
+/// Raw realpath proxy for macOS ARM64.
+/// NOTE: There is no direct realpath syscall on macOS.
+/// We fallback to the real libc function via dlsym to avoid interposition recursion.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[inline(never)]
 pub unsafe fn raw_realpath(
     path: *const libc::c_char,
     resolved: *mut libc::c_char,
 ) -> *mut libc::c_char {
-    let ret: i64;
-    let err: i64;
-    asm!(
-        "mov x16, {syscall}",
-        "svc #0x80",
-        "cset {err}, cs",
-        syscall = in(reg) SYS_REALPATH,
-        in("x0") path as i64,
-        in("x1") resolved as i64,
-        lateout("x0") ret,
-        err = out(reg) err,
-        options(nostack)
-    );
-    if err != 0 {
-        crate::set_errno(ret as libc::c_int);
+    use std::sync::atomic::Ordering;
+
+    // BUG-007 check: If we are still initializing or in bootstrap phase,
+    // WE CANNOT CALL dlsym(RTLD_NEXT, "realpath") as it deadlocks.
+    let init_state = crate::state::INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2 {
+        // Bootstrap fallback: Just copy the path if absolute, or handle as-is.
+        // realpath is not critical during dyld/malloc initialization.
+        if path.is_null() {
+            return std::ptr::null_mut();
+        }
+        let len = libc::strlen(path);
+        if !resolved.is_null() {
+            libc::memcpy(
+                resolved as *mut libc::c_void,
+                path as *const libc::c_void,
+                len + 1,
+            );
+            return resolved;
+        } else {
+            // Cannot allocate with malloc if it's not initialized!
+            // But realpath is not supposed to be called here.
+            return std::ptr::null_mut();
+        }
+    }
+
+    let real_func = crate::reals::REAL_REALPATH.get();
+    if real_func.is_null() {
         return std::ptr::null_mut();
     }
-    ret as *mut libc::c_char
+    let func: unsafe extern "C" fn(*const libc::c_char, *mut libc::c_char) -> *mut libc::c_char =
+        std::mem::transmute(real_func);
+    func(path, resolved)
 }
 
 /// Raw mkdir syscall for macOS ARM64.
@@ -1265,47 +1281,44 @@ pub unsafe fn raw_fchdir(fd: libc::c_int) -> libc::c_int {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[inline(never)]
 pub unsafe fn raw_getcwd(buf: *mut libc::c_char, size: libc::size_t) -> *mut libc::c_char {
-    let ret: i64;
-    let err: i64;
-    asm!(
-        "mov x16, {syscall}",
-        "svc #0x80",
-        "cset {err}, cs",
-        syscall = in(reg) SYS_GETCWD,
-        in("x0") buf as i64,
-        in("x1") size as i64,
-        lateout("x0") ret,
-        err = out(reg) err,
-        options(nostack)
-    );
-    if err != 0 {
-        crate::set_errno(ret as libc::c_int);
+    use std::sync::atomic::Ordering;
+
+    // BUG-007 check: Bootstrap safety
+    let init_state = crate::state::INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2 {
+        // During early bootstrap, we cannot call dlsym.
+        // realpath/getcwd are not typically needed by dyld itself for malloc init.
+        // Return null to signal "not available yet" or handle specially.
         return std::ptr::null_mut();
     }
-    buf
+
+    let real_func = crate::reals::REAL_GETCWD.get();
+    if real_func.is_null() {
+        return std::ptr::null_mut();
+    }
+    let func: unsafe extern "C" fn(*mut libc::c_char, libc::size_t) -> *mut libc::c_char =
+        std::mem::transmute(real_func);
+    func(buf, size)
 }
 
 /// Raw chdir syscall for macOS ARM64.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[inline(never)]
 pub unsafe fn raw_chdir(path: *const libc::c_char) -> libc::c_int {
-    let ret: i64;
-    let err: i64;
-    asm!(
-        "mov x16, {syscall}",
-        "svc #0x80",
-        "cset {err}, cs",
-        syscall = in(reg) SYS_CHDIR,
-        in("x0") path as i64,
-        lateout("x0") ret,
-        err = out(reg) err,
-        options(nostack)
-    );
-    if err != 0 {
-        crate::set_errno(ret as libc::c_int);
+    use std::sync::atomic::Ordering;
+
+    // BUG-007 check: Bootstrap safety
+    let init_state = crate::state::INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2 {
         return -1;
     }
-    ret as libc::c_int
+
+    let real_func = crate::reals::REAL_CHDIR.get();
+    if real_func.is_null() {
+        return -1;
+    }
+    let func: unsafe extern "C" fn(*const libc::c_char) -> libc::c_int =
+        std::mem::transmute(real_func);
+    func(path)
 }
 
 /// Raw setrlimit syscall for macOS ARM64.
@@ -2017,7 +2030,7 @@ pub unsafe fn raw_openat(
 /// Raw fcntl syscall for macOS x86_64.
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 #[inline(never)]
-pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: libc::c_int) -> libc::c_int {
+pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: i64) -> libc::c_int {
     let ret: i64;
     std::arch::asm!(
         "syscall",
@@ -2481,7 +2494,7 @@ pub unsafe fn raw_openat(
 }
 
 #[cfg(target_os = "linux")]
-pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: libc::c_int) -> libc::c_int {
+pub unsafe fn raw_fcntl(fd: libc::c_int, cmd: libc::c_int, arg: i64) -> libc::c_int {
     crate::syscalls::linux_raw::raw_fcntl(fd, cmd, arg)
 }
 
@@ -2535,6 +2548,9 @@ pub unsafe fn raw_fchownat(
 ) -> libc::c_int {
     crate::syscalls::linux_raw::raw_fchownat(dirfd, path, owner, group, flags)
 }
+/// raw_utimensat — dlsym-based passthrough for macOS.
+/// macOS has NO kernel syscall for utimensat; it is a libc wrapper over setattrlist.
+/// We resolve the real libc function via dlsym(RTLD_NEXT) to avoid interposition recursion.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub unsafe fn raw_utimensat(
     dirfd: c_int,
@@ -2542,27 +2558,43 @@ pub unsafe fn raw_utimensat(
     times: *const libc::timespec,
     flags: c_int,
 ) -> c_int {
-    let ret: i64;
-    asm!(
-        "svc #0x80",
-        in("x16") SYS_UTIMENSAT,
-        in("x0") dirfd as i64,
-        in("x1") path as i64,
-        in("x2") times as i64,
-        in("x3") flags as i64,
-        lateout("x0") ret,
-    );
-    if ret < 0 {
-        crate::set_errno(-(ret as i32));
-        -1
-    } else {
-        ret as c_int
+    use std::sync::atomic::Ordering;
+
+    // Bootstrap safety: during early init, skip timestamp operations (non-critical)
+    let init_state = crate::state::INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2 {
+        return 0;
     }
+
+    let real_func = crate::reals::REAL_UTIMENSAT.get();
+    if real_func.is_null() {
+        crate::set_errno(libc::ENOSYS);
+        return -1;
+    }
+    let func: unsafe extern "C" fn(c_int, *const c_char, *const libc::timespec, c_int) -> c_int =
+        std::mem::transmute(real_func);
+    func(dirfd, path, times, flags)
 }
 
+/// raw_futimens — delegates to raw_utimensat with AT_FDCWD and null path.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub unsafe fn raw_futimens(fd: c_int, times: *const libc::timespec) -> c_int {
-    raw_utimensat(fd, std::ptr::null(), times, 0)
+    use std::sync::atomic::Ordering;
+
+    // Bootstrap safety: during early init, skip timestamp operations (non-critical)
+    let init_state = crate::state::INITIALIZING.load(Ordering::Relaxed);
+    if init_state >= 2 {
+        return 0;
+    }
+
+    let real_func = crate::reals::REAL_FUTIMENS.get();
+    if real_func.is_null() {
+        crate::set_errno(libc::ENOSYS);
+        return -1;
+    }
+    let func: unsafe extern "C" fn(c_int, *const libc::timespec) -> c_int =
+        std::mem::transmute(real_func);
+    func(fd, times)
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

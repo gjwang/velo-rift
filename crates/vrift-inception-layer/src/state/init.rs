@@ -19,7 +19,7 @@ use crate::sync::RecursiveMutex;
 use libc::c_void;
 use std::collections::HashMap;
 use std::ffi::CStr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::Ordering;
 
@@ -187,30 +187,18 @@ impl InceptionLayerState {
         let mut vfs_prefix = FixedString::<256>::new();
         let prefix_ptr = unsafe { libc::getenv(c"VRIFT_VFS_PREFIX".as_ptr()) };
         if !prefix_ptr.is_null() {
-            let raw_prefix = unsafe { CStr::from_ptr(prefix_ptr).to_string_lossy() };
-            // RFC-0050 + BUG-007b: Canonicalize prefix using raw_realpath
-            // (std::fs::canonicalize calls interposed stat/readlink)
-            let prefix_cstr = std::ffi::CString::new(raw_prefix.as_ref()).unwrap_or_default();
-            let mut resolved = [0u8; libc::PATH_MAX as usize];
-            #[cfg(target_os = "macos")]
-            let result = unsafe {
-                crate::syscalls::macos_raw::raw_realpath(
-                    prefix_cstr.as_ptr(),
-                    resolved.as_mut_ptr() as *mut libc::c_char,
-                )
-            };
-            #[cfg(target_os = "linux")]
-            let result = unsafe {
-                libc::realpath(
-                    prefix_cstr.as_ptr(),
-                    resolved.as_mut_ptr() as *mut libc::c_char,
-                )
-            };
-            if !result.is_null() {
-                let canon = unsafe { CStr::from_ptr(result).to_string_lossy() };
-                vfs_prefix.set(&canon);
-            } else {
-                vfs_prefix.set(&raw_prefix);
+            let raw_prefix_cstr = unsafe { CStr::from_ptr(prefix_ptr) };
+            if let Ok(raw_prefix) = raw_prefix_cstr.to_str() {
+                // BUG-007 + RFC-0050: Avoid raw_realpath/realpath during init to prevent deadlocks.
+                // We use raw_path_normalize which is a pure string function (zero syscalls).
+                let mut norm_buf = [0u8; 1024];
+                if let Some(len) =
+                    unsafe { crate::path::raw_path_normalize(raw_prefix, &mut norm_buf) }
+                {
+                    vfs_prefix.set(std::str::from_utf8(&norm_buf[..len]).unwrap_or(raw_prefix));
+                } else {
+                    vfs_prefix.set(raw_prefix);
+                }
             }
         }
 
@@ -227,37 +215,32 @@ impl InceptionLayerState {
         let mut project_root_fs = FixedString::<1024>::new();
         let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
         if !manifest_ptr.is_null() {
-            let manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
-            let path = Path::new(manifest_path.as_ref());
-            let parent = path.parent().unwrap_or_else(|| Path::new("/"));
-            let root = if parent.ends_with(".vrift") {
-                parent.parent().unwrap_or(parent)
-            } else {
-                parent
-            };
-            // RFC-0050 + BUG-007b: Canonicalize using raw_realpath
-            let root_str_lossy = root.to_string_lossy();
-            let root_cstr = std::ffi::CString::new(root_str_lossy.as_ref()).unwrap_or_default();
-            let mut resolved = [0u8; libc::PATH_MAX as usize];
-            #[cfg(target_os = "macos")]
-            let result = unsafe {
-                crate::syscalls::macos_raw::raw_realpath(
-                    root_cstr.as_ptr(),
-                    resolved.as_mut_ptr() as *mut libc::c_char,
-                )
-            };
-            #[cfg(target_os = "linux")]
-            let result = unsafe {
-                libc::realpath(
-                    root_cstr.as_ptr(),
-                    resolved.as_mut_ptr() as *mut libc::c_char,
-                )
-            };
-            if !result.is_null() {
-                let canon = unsafe { CStr::from_ptr(result).to_string_lossy() };
-                project_root_fs.set(&canon);
-            } else {
-                project_root_fs.set(&root.to_string_lossy());
+            let manifest_path_cstr = unsafe { CStr::from_ptr(manifest_ptr) };
+            if let Ok(manifest_path) = manifest_path_cstr.to_str() {
+                // Manual derivation of project root from manifest path (parent of .vrift)
+                // Replaces PathBuf/std::fs to avoid interposition & allocations.
+                let mut root_path = manifest_path;
+                if let Some(idx) = manifest_path.find("/.vrift/") {
+                    root_path = &manifest_path[..idx];
+                } else if let Some(stripped) = manifest_path.strip_suffix("/.vrift") {
+                    root_path = stripped;
+                } else if let Some(idx) = manifest_path.rfind('/') {
+                    root_path = &manifest_path[..idx];
+                }
+
+                if root_path.is_empty() {
+                    root_path = "/";
+                }
+
+                // Normalize manually
+                let mut norm_buf = [0u8; 1024];
+                if let Some(len) =
+                    unsafe { crate::path::raw_path_normalize(root_path, &mut norm_buf) }
+                {
+                    project_root_fs.set(std::str::from_utf8(&norm_buf[..len]).unwrap_or(root_path));
+                } else {
+                    project_root_fs.set(root_path);
+                }
             }
         }
 

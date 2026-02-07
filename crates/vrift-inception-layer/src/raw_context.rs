@@ -72,7 +72,7 @@ impl RawContext {
 
     /// Raw fcntl syscall. Avoids interposed `fcntl`.
     #[inline(always)]
-    pub unsafe fn fcntl(&self, fd: c_int, cmd: c_int, arg: c_int) -> c_int {
+    pub unsafe fn fcntl(&self, fd: c_int, cmd: c_int, arg: i64) -> c_int {
         #[cfg(target_os = "macos")]
         {
             crate::syscalls::macos_raw::raw_fcntl(fd, cmd, arg)
@@ -80,7 +80,7 @@ impl RawContext {
         #[cfg(target_os = "linux")]
         {
             // Linux fcntl is not interposed, but use raw for consistency
-            libc::fcntl(fd, cmd, arg)
+            libc::fcntl(fd, cmd, arg as i32)
         }
     }
 

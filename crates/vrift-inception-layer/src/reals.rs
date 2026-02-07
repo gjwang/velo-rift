@@ -85,6 +85,7 @@ pub static REAL_SETXATTR: RealSymbol = RealSymbol::new("setxattr\0");
 pub static REAL_REMOVEXATTR: RealSymbol = RealSymbol::new("removexattr\0");
 pub static REAL_UTIMES: RealSymbol = RealSymbol::new("utimes\0");
 pub static REAL_UTIMENSAT: RealSymbol = RealSymbol::new("utimensat\0");
+pub static REAL_FUTIMENS: RealSymbol = RealSymbol::new("futimens\0");
 pub static REAL_OPENDIR: RealSymbol = RealSymbol::new("opendir\0");
 pub static REAL_READDIR: RealSymbol = RealSymbol::new("readdir\0");
 pub static REAL_CLOSEDIR: RealSymbol = RealSymbol::new("closedir\0");

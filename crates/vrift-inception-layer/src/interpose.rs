@@ -500,8 +500,10 @@ pub static IT_RMDIR: Interpose = Interpose {
     new_func: rmdir_inception as _,
     old_func: real_rmdir as _,
 };
+// NOTE: utimensat is a libc wrapper on macOS (no kernel syscall).
+// Using __nointerpose to avoid dlsym-triggered infinite recursion.
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__interpose"]
+#[link_section = "__DATA,__nointerpose"]
 #[used]
 pub static IT_UTIMENSAT: Interpose = Interpose {
     new_func: utimensat_inception as _,
@@ -684,8 +686,10 @@ pub static IT_MKDIRAT: Interpose = Interpose {
     old_func: real_mkdirat as _,
 };
 
+// NOTE: futimens is a libc wrapper on macOS (no kernel syscall).
+// Using __nointerpose to avoid dlsym-triggered infinite recursion.
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__interpose"]
+#[link_section = "__DATA,__nointerpose"]
 #[used]
 pub static IT_FUTIMENS: Interpose = Interpose {
     new_func: futimens_inception as _,

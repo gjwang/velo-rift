@@ -252,6 +252,19 @@ pub unsafe extern "C" fn futimes_inception(fd: c_int, times: *const libc::timeva
 
 #[no_mangle]
 pub unsafe extern "C" fn futimens_inception(fd: c_int, times: *const libc::timespec) -> c_int {
+    // Early-init guard: during bootstrap, passthrough to real libc
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state != 0
+        || crate::state::INCEPTION_LAYER_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_futimens(fd, times);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_utimensat(fd, std::ptr::null(), times, 0);
+    }
+
     let _guard = match InceptionLayerGuard::enter() {
         Some(g) => g,
         None => {
@@ -279,6 +292,22 @@ pub unsafe extern "C" fn utimensat_inception(
     times: *const libc::timespec,
     flags: c_int,
 ) -> c_int {
+    // Early-init guard: during bootstrap, passthrough to real libc
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state != 0
+        || crate::state::INCEPTION_LAYER_STATE
+            .load(std::sync::atomic::Ordering::Acquire)
+            .is_null()
+    {
+        if let Some(err) = quick_block_vfs_mutation(path) {
+            return err;
+        }
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_utimensat(dirfd, path, times, flags);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_utimensat(dirfd, path, times, flags);
+    }
+
     let _guard = match InceptionLayerGuard::enter() {
         Some(g) => g,
         None => {
@@ -288,16 +317,13 @@ pub unsafe extern "C" fn utimensat_inception(
             return crate::syscalls::linux_raw::raw_utimensat(dirfd, path, times, flags);
         }
     };
-    // RFC-0039: Block mutation of existing VFS entries
-    if let Some(res) = block_existing_vfs_entry_at(dirfd, path) {
-        inception_log!("blocking utimensat on VFS entry");
-        return res;
-    }
-
-    #[cfg(target_os = "macos")]
-    return crate::syscalls::macos_raw::raw_utimensat(dirfd, path, times, flags);
-    #[cfg(target_os = "linux")]
-    return crate::syscalls::linux_raw::raw_utimensat(dirfd, path, times, flags);
+    // RFC-0039: Block timestamp mutation on VFS-managed files (returns EPERM)
+    block_vfs_mutation(path).unwrap_or_else(|| {
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_utimensat(dirfd, path, times, flags);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_utimensat(dirfd, path, times, flags);
+    })
 }
 
 #[no_mangle]
@@ -896,7 +922,12 @@ pub(crate) unsafe fn block_existing_vfs_entry_at(
         // Resolve dirfd
         let mut dir_path_buf = [0i8; 1024];
         #[cfg(target_os = "macos")]
-        if libc::fcntl(dirfd, libc::F_GETPATH, dir_path_buf.as_mut_ptr()) == 0 {
+        if crate::syscalls::macos_raw::raw_fcntl(
+            dirfd,
+            libc::F_GETPATH,
+            dir_path_buf.as_mut_ptr() as i64,
+        ) == 0
+        {
             let mut abs_buf = [0u8; 1024];
             let mut aw = crate::macros::StackWriter::new(&mut abs_buf);
             let dir_path_ptr = dir_path_buf.as_ptr() as *const u8;
