@@ -77,7 +77,10 @@ impl InceptionLayerState {
         match task {
             crate::sync::Task::ReclaimFd(_fd, entry) => {
                 if !entry.is_null() {
-                    unsafe { drop(Box::from_raw(entry)) };
+                    let e = unsafe { Box::from_raw(entry) };
+                    if e.lock_fd >= 0 {
+                        unsafe { libc::close(e.lock_fd) };
+                    }
                 }
             }
             crate::sync::Task::Reingest { vpath, temp_path } => {

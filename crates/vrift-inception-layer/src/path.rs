@@ -132,16 +132,30 @@ impl PathResolver {
                 key_fs.set(key);
             }
         } else {
-            let key = normalized
-                .strip_prefix(self.vfs_prefix.as_str())
-                .unwrap_or("");
-            if !key.starts_with('/') {
-                let mut key_buf = [0u8; 1024];
-                let mut kw = crate::macros::StackWriter::new(&mut key_buf);
-                let _ = write!(kw, "/{}", key);
-                key_fs.set(kw.as_str());
+            // Check if normalized matches the prefix.
+            // If the prefix is a virtual namespace (like /myvirt), and we ARE that path,
+            // we should probably use the full path as the key if it matches what's in the manifest.
+            // RFC-0050: In most cases (ingest --prefix), the full path IS the key.
+            // If the prefix is just a local mount point, we strip it.
+            // Strategy: if vfs_prefix starts with / and looks like a virtual path,
+            // we use the full normalized path as the key.
+            let prefix_str = self.vfs_prefix.as_str();
+            if prefix_str.starts_with('/')
+                && (self.project_root.is_empty() || !prefix_str.starts_with(proj_root_str))
+            {
+                // Virtual prefix (e.g. /myvirt) - keep it in the key
+                key_fs.set(normalized);
             } else {
-                key_fs.set(key);
+                // Physical prefix (e.g. project root) - strip it
+                let key = normalized.strip_prefix(prefix_str).unwrap_or("");
+                if !key.starts_with('/') {
+                    let mut key_buf = [0u8; 1024];
+                    let mut kw = crate::macros::StackWriter::new(&mut key_buf);
+                    let _ = write!(kw, "/{}", key);
+                    key_fs.set(kw.as_str());
+                } else {
+                    key_fs.set(key);
+                }
             }
         };
 

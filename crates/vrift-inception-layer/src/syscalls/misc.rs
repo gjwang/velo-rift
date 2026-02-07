@@ -1553,7 +1553,89 @@ pub unsafe extern "C" fn setrlimit_inception(resource: c_int, rlp: *const libc::
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn flock_inception(fd: c_int, op: c_int) -> c_int {
-    libc::flock(fd, op)
+    let _guard = match InceptionLayerGuard::enter() {
+        Some(g) => g,
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_flock(fd, op);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_flock(fd, op);
+        }
+    };
+
+    let state = match InceptionLayerState::get() {
+        Some(s) => s,
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_flock(fd, op);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_flock(fd, op);
+        }
+    };
+
+    let entry_ptr = state.open_fds.get(fd as u32);
+    if entry_ptr.is_null() {
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_flock(fd, op);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_flock(fd, op);
+    }
+
+    let entry = &mut *entry_ptr;
+    if !entry.is_vfs || entry.manifest_key.is_empty() {
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_flock(fd, op);
+        #[cfg(target_os = "linux")]
+        return crate::syscalls::linux_raw::raw_flock(fd, op);
+    }
+
+    // RFC-0049: Logical flock implementation
+    // Use a shared lockfile based on the manifest key hash
+    let mut lock_path_buf = [0u8; 1024];
+    let mut writer = crate::macros::StackWriter::new(&mut lock_path_buf);
+    use std::fmt::Write;
+
+    let key_hash = vrift_ipc::fnv1a_hash(entry.manifest_key.as_str());
+    let _ = write!(
+        writer,
+        "{}/.vrift/locks/{:016x}.lock",
+        state.project_root.as_str(),
+        key_hash
+    );
+    let lock_path = writer.as_str();
+
+    // Open lock FD if not already held for this FD
+    if entry.lock_fd < 0 {
+        let lock_path_cstr = std::ffi::CString::new(lock_path).unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let lfd = crate::syscalls::macos_raw::raw_openat(
+            libc::AT_FDCWD,
+            lock_path_cstr.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
+            0o666,
+        );
+        #[cfg(target_os = "linux")]
+        let lfd = crate::syscalls::linux_raw::raw_open(
+            lock_path_cstr.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
+            0o666,
+        );
+
+        if lfd < 0 {
+            // Fallback to original FD if we can't open lockfile
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_flock(fd, op);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_flock(fd, op);
+        }
+        entry.lock_fd = lfd;
+    }
+
+    // Call flock on the logical lockfile
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_flock(entry.lock_fd, op);
+    #[cfg(target_os = "linux")]
+    return crate::syscalls::linux_raw::raw_flock(entry.lock_fd, op);
 }
 
 #[no_mangle]

@@ -2064,3 +2064,43 @@ pub unsafe fn raw_realpath(path: *const c_char, resolved: *mut c_char) -> *mut c
 }
 
 use libc::c_uint;
+/// Raw flock syscall
+#[inline(always)]
+pub unsafe fn raw_flock(fd: c_int, operation: c_int) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "syscall",
+            in("rax") 73i64, // SYS_flock
+            in("rdi") fd as i64,
+            in("rsi") operation as i64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: i64;
+        std::arch::asm!(
+            "svc #0",
+            in("x8") 32i64, // SYS_flock
+            in("x0") fd as i64,
+            in("x1") operation as i64,
+            lateout("x0") ret,
+        );
+        if ret < 0 {
+            set_errno_from_ret(ret);
+            -1
+        } else {
+            ret as c_int
+        }
+    }
+}

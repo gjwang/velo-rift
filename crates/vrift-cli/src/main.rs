@@ -407,6 +407,7 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
                 let vrift_dir = directory.join(".vrift");
                 if !vrift_dir.exists() {
                     let _ = std::fs::create_dir_all(&vrift_dir);
+                    let _ = std::fs::create_dir_all(vrift_dir.join("locks"));
                 }
                 vrift_dir.join("manifest.lmdb")
             } else {
@@ -584,6 +585,7 @@ async fn cmd_init(directory: &Path) -> Result<()> {
     // Create .vrift directory structure
     fs::create_dir_all(&vrift_dir)?;
     fs::create_dir_all(vrift_dir.join("bin"))?;
+    fs::create_dir_all(vrift_dir.join("locks"))?;
 
     // Create manifest.lmdb directory and initialize LMDB database
     let project_id = vrift_config::path::compute_project_id(directory);
@@ -1018,6 +1020,7 @@ async fn cmd_ingest(
     } else {
         let vrift_dir = directory.join(".vrift");
         std::fs::create_dir_all(&vrift_dir)?;
+        let _ = std::fs::create_dir_all(vrift_dir.join("locks"));
         vrift_dir.join("manifest.lmdb")
     };
 

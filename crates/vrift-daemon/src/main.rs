@@ -1279,6 +1279,12 @@ async fn get_or_create_workspace(
         std::fs::create_dir_all(&staging_dir)?;
     }
 
+    // RFC-0049: Ensure locks directory exists for logical flock
+    let locks_dir = vrift_dir.join("locks");
+    if !locks_dir.exists() {
+        std::fs::create_dir_all(&locks_dir)?;
+    }
+
     let manifest_path = vrift_dir.join("manifest.lmdb");
     let manifest = LmdbManifest::open(manifest_path.to_str().unwrap())?;
 

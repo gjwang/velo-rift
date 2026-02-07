@@ -201,6 +201,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
                 is_vfs: true,
                 cached_stat: None,
                 mmap_count: 0,
+                lock_fd: -1,
             }));
 
             let old = state.open_fds.set(fd as u32, entry);

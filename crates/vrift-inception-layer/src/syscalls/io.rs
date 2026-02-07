@@ -22,6 +22,7 @@ pub struct FdEntry {
     pub is_vfs: bool,
     pub cached_stat: Option<libc::stat>,
     pub mmap_count: usize,
+    pub lock_fd: i32, // -1 if no lock FD held
 }
 
 // RFC-0051 / Pattern 2648: Using Mutex for FD_TABLE to avoid RwLock hazards during dyld bootstrap.
@@ -51,6 +52,7 @@ pub fn track_fd(
         is_vfs,
         cached_stat,
         mmap_count: 0,
+        lock_fd: -1,
     }));
 
     if let Some(state) = crate::state::InceptionLayerState::get() {

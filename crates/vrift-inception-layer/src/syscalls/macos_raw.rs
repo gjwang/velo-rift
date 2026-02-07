@@ -60,6 +60,7 @@
 //! - ARM64 ABI: Apple ARM64 Function Calling Conventions
 //! - Pattern 2682: Raw Assembly Syscall Wrappers (linux_raw.rs)
 
+use libc::c_int;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::arch::asm;
 
@@ -98,6 +99,10 @@ const SYS_OPENAT: i64 = 463;
 /// SYS_fcntl = 92 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_FCNTL: i64 = 92;
+
+/// SYS_flock = 131 on macOS
+#[cfg(target_os = "macos")]
+const SYS_FLOCK: i64 = 131;
 
 /// SYS_chmod = 15 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2527,4 +2532,21 @@ pub unsafe fn raw_fchownat(
     flags: libc::c_int,
 ) -> libc::c_int {
     crate::syscalls::linux_raw::raw_fchownat(dirfd, path, owner, group, flags)
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub unsafe fn raw_flock(fd: c_int, operation: c_int) -> c_int {
+    let ret: i64;
+    asm!(
+        "svc #0x80",
+        in("x16") SYS_FLOCK,
+        in("x0") fd as i64,
+        in("x1") operation as i64,
+        lateout("x0") ret,
+    );
+    if ret < 0 {
+        crate::set_errno(-(ret as i32));
+        -1
+    } else {
+        ret as c_int
+    }
 }
