@@ -10,8 +10,18 @@ pub enum Task {
     // Metadata reclamation (High Priority)
     ReclaimFd(u32, *mut crate::syscalls::io::FdEntry),
     // IPC/Telemetry (Low Priority)
-    Reingest { vpath: String, temp_path: String },
+    Reingest {
+        vpath: String,
+        temp_path: String,
+    },
     Log(String),
+    /// Phase 3: Fire-and-forget IPC — pre-serialized request bytes pushed to worker.
+    /// The worker connects to the socket and sends the request without blocking the caller.
+    IpcFireAndForget {
+        socket_path: String,
+        /// Pre-serialized VeloRequest bytes (rkyv format) + IPC header
+        payload: Vec<u8>,
+    },
 }
 
 // Power of 2 for fast modulo via bitwise AND

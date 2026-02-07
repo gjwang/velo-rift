@@ -97,6 +97,16 @@ impl InceptionLayerState {
             crate::sync::Task::Log(msg) => {
                 unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
             }
+            crate::sync::Task::IpcFireAndForget {
+                socket_path,
+                payload,
+            } => {
+                // Phase 3: Worker-side fire-and-forget IPC
+                // Connect, register workspace, send pre-serialized payload
+                unsafe {
+                    crate::ipc::send_fire_and_forget_sync(&socket_path, &payload);
+                }
+            }
         }
     }
 }

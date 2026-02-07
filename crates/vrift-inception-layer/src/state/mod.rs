@@ -1035,8 +1035,12 @@ impl InceptionLayerState {
     }
 
     /// RFC-0047: Remove entry from manifest (for unlink/rmdir)
+    /// Phase 3: Fire-and-forget — queued to worker thread
     pub(crate) fn manifest_remove(&self, path: &str) -> Result<(), ()> {
-        if unsafe { sync_ipc_manifest_remove(&self.socket_path, path) } {
+        let request = vrift_ipc::VeloRequest::ManifestRemove {
+            path: path.to_string(),
+        };
+        if unsafe { fire_and_forget_ipc(&self.socket_path, &request) } {
             Ok(())
         } else {
             Err(())
@@ -1044,8 +1048,13 @@ impl InceptionLayerState {
     }
 
     /// RFC-0047: Rename/move entry in manifest
+    /// Phase 3: Fire-and-forget — queued to worker thread
     pub(crate) fn manifest_rename(&self, old: &str, new: &str) -> Result<(), ()> {
-        if unsafe { sync_ipc_manifest_rename(&self.socket_path, old, new) } {
+        let request = vrift_ipc::VeloRequest::ManifestRename {
+            old_path: old.to_string(),
+            new_path: new.to_string(),
+        };
+        if unsafe { fire_and_forget_ipc(&self.socket_path, &request) } {
             Ok(())
         } else {
             Err(())
@@ -1053,9 +1062,25 @@ impl InceptionLayerState {
     }
 
     /// RFC-0047: Create directory entry in manifest
+    /// Phase 3: Fire-and-forget — queued to worker thread
     #[allow(clippy::unnecessary_cast)] // mode_t is u16 on macOS, u32 on Linux
     pub(crate) fn manifest_mkdir(&self, path: &str, mode: libc::mode_t) -> Result<(), ()> {
-        if unsafe { sync_ipc_manifest_mkdir(&self.socket_path, path, mode as u32) } {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let request = vrift_ipc::VeloRequest::ManifestUpsert {
+            path: path.to_string(),
+            entry: vrift_ipc::VnodeEntry {
+                content_hash: [0u8; 32],
+                size: 0,
+                mtime: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                mode: mode as u32,
+                flags: 1, // is_dir flag
+                _pad: 0,
+            },
+        };
+        if unsafe { fire_and_forget_ipc(&self.socket_path, &request) } {
             Ok(())
         } else {
             Err(())
@@ -1063,8 +1088,24 @@ impl InceptionLayerState {
     }
 
     /// RFC-0039: Create symlink entry in manifest for Live Ingest
-    pub(crate) fn manifest_symlink(&self, path: &str, target: &str) -> Result<(), ()> {
-        if unsafe { crate::ipc::sync_ipc_manifest_symlink(&self.socket_path, path, target) } {
+    /// Phase 3: Fire-and-forget — queued to worker thread
+    pub(crate) fn manifest_symlink(&self, path: &str, _target: &str) -> Result<(), ()> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let request = vrift_ipc::VeloRequest::ManifestUpsert {
+            path: path.to_string(),
+            entry: vrift_ipc::VnodeEntry {
+                content_hash: [0u8; 32],
+                size: 0,
+                mtime: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                mode: 0o777,
+                flags: 2, // is_symlink pseudo-flag
+                _pad: 0,
+            },
+        };
+        if unsafe { fire_and_forget_ipc(&self.socket_path, &request) } {
             Ok(())
         } else {
             Err(())

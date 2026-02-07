@@ -326,6 +326,99 @@ pub(crate) unsafe fn sync_ipc_manifest_reingest(
     )
 }
 
+/// Phase 3: Fire-and-forget IPC — push a VeloRequest to the ring buffer
+/// for background processing by the worker thread. This avoids blocking
+/// the hot-path interposed syscall while the daemon processes the request.
+///
+/// The request is serialized upfront (small cost on caller thread) and
+/// the worker handles connection + send. If the ring buffer is full,
+/// falls back to synchronous IPC to avoid data loss.
+///
+/// Returns true if the request was successfully queued or sent synchronously.
+pub(crate) unsafe fn fire_and_forget_ipc(
+    socket_path: &str,
+    request: &vrift_ipc::VeloRequest,
+) -> bool {
+    // Serialize upfront so the worker only needs to connect + write
+    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(request) {
+        Ok(bytes) => bytes.to_vec(),
+        Err(_) => return false,
+    };
+
+    // Try to push to ring buffer for async processing
+    if let Some(reactor) = crate::sync::get_reactor() {
+        let task = crate::sync::Task::IpcFireAndForget {
+            socket_path: socket_path.to_string(),
+            payload,
+        };
+        match reactor.ring_buffer.push(task) {
+            Ok(()) => return true,
+            Err(crate::sync::Task::IpcFireAndForget {
+                socket_path: sp,
+                payload: pl,
+            }) => {
+                // Ring buffer full — fall back to synchronous send
+                inception_warn!("Ring buffer full, falling back to sync IPC");
+                return send_fire_and_forget_sync(&sp, &pl);
+            }
+            Err(_) => return false, // unreachable, but satisfy exhaustive match
+        }
+    }
+
+    // No reactor available — send synchronously
+    send_fire_and_forget_sync(socket_path, &payload)
+}
+
+/// Synchronous fallback for fire-and-forget: connect, register, send, close.
+/// Does not read the response — the daemon processes the request asynchronously.
+pub(crate) unsafe fn send_fire_and_forget_sync(socket_path: &str, payload: &[u8]) -> bool {
+    let fd = raw_unix_connect(socket_path);
+    if fd < 0 {
+        return false;
+    }
+
+    // Workspace registration (same as sync_rpc)
+    let project_root = get_project_root();
+    if !project_root.is_empty() {
+        let register_req = vrift_ipc::VeloRequest::RegisterWorkspace { project_root };
+        if send_request_on_fd(fd, &register_req) {
+            let _ = recv_response_on_fd(fd);
+        }
+    }
+
+    // Send the pre-serialized request
+    let seq_id = vrift_ipc::next_seq_id();
+    let header = vrift_ipc::IpcHeader::new_request(payload.len() as u32, seq_id);
+    let success = raw_write_all(fd, &header.to_bytes()) && raw_write_all(fd, payload);
+    ipc_raw_close(fd);
+    success
+}
+
+/// Extract project root from env vars (shared between sync_rpc and fire-and-forget).
+fn get_project_root() -> String {
+    let env_ptr = unsafe { libc::getenv(c"VRIFT_PROJECT_ROOT".as_ptr()) };
+    if !env_ptr.is_null() {
+        return unsafe { std::ffi::CStr::from_ptr(env_ptr) }
+            .to_string_lossy()
+            .to_string();
+    }
+
+    let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
+    if !manifest_ptr.is_null() {
+        let manifest = unsafe { std::ffi::CStr::from_ptr(manifest_ptr).to_string_lossy() };
+        let p = std::path::Path::new(manifest.as_ref());
+        let parent = p.parent().unwrap_or(p);
+        let root = if parent.ends_with(".vrift") {
+            parent.parent().unwrap_or(parent)
+        } else {
+            parent
+        };
+        return root.to_string_lossy().to_string();
+    }
+
+    String::new()
+}
+
 pub(crate) unsafe fn sync_ipc_flock(socket_path: &str, path: &str, op: i32) -> bool {
     let request = if op & libc::LOCK_UN != 0 {
         vrift_ipc::VeloRequest::FlockRelease {
