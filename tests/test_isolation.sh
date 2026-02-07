@@ -99,6 +99,9 @@ echo "   ✅ Daemon running"
 # 5. Verify VFS Isolation (Shim)
 echo "🛡️ Verifying Shim Isolation..."
 
+# Use a unique prefix to avoid collision with real filesystem paths
+VFS_PREFIX="/vrift_isolation_test_$$"
+
 # Compile test_stat
 TEST_STAT_SRC="$PROJECT_ROOT/tests/helpers/test_stat.c"
 if [ ! -f "$TEST_STAT_SRC" ]; then
@@ -112,12 +115,12 @@ echo "   Testing Project A view..."
 cd "$PROJECT_A"
 OUTPUT_A=$(env DYLD_INSERT_LIBRARIES="$SHIM_LIB" DYLD_FORCE_FLAT_NAMESPACE=1 \
     VRIFT_SOCKET_PATH="$VRIFT_SOCKET_PATH" VR_THE_SOURCE="$VR_THE_SOURCE" \
-    VRIFT_VFS_PREFIX="/vrift" VRIFT_PROJECT_ROOT="$PROJECT_A" \
+    VRIFT_VFS_PREFIX="$VFS_PREFIX" VRIFT_PROJECT_ROOT="$PROJECT_A" \
     VRIFT_MANIFEST="$PROJECT_A/.vrift/manifest.lmdb" \
     "$TEST_ROOT/test_stat" 2>&1) || true
 echo "$OUTPUT_A" | tee "$TEST_ROOT/test_a.log"
 
-if echo "$OUTPUT_A" | grep -q 'SUCCESS: stat("/vrift/file_a.txt") worked!'; then
+if echo "$OUTPUT_A" | grep -q "SUCCESS: stat(\"${VFS_PREFIX}/file_a.txt\") worked!"; then
     echo "   ✅ Project A file visible"
 else
     echo -e "${RED}   ❌ Project A verification failed${NC}"
@@ -129,12 +132,12 @@ echo "   Testing Project B view (should NOT see A's file if we change manifest).
 cd "$PROJECT_B"
 OUTPUT_B=$(env DYLD_INSERT_LIBRARIES="$SHIM_LIB" DYLD_FORCE_FLAT_NAMESPACE=1 \
     VRIFT_SOCKET_PATH="$VRIFT_SOCKET_PATH" VR_THE_SOURCE="$VR_THE_SOURCE" \
-    VRIFT_VFS_PREFIX="/vrift" VRIFT_PROJECT_ROOT="$PROJECT_B" \
+    VRIFT_VFS_PREFIX="$VFS_PREFIX" VRIFT_PROJECT_ROOT="$PROJECT_B" \
     VRIFT_MANIFEST="$PROJECT_B/.vrift/manifest.lmdb" \
     "$TEST_ROOT/test_stat" 2>&1) || true
 echo "$OUTPUT_B" | tee "$TEST_ROOT/test_b.log"
 
-if echo "$OUTPUT_B" | grep -q 'SUCCESS: stat("/vrift/file_b.txt") worked!'; then
+if echo "$OUTPUT_B" | grep -q "SUCCESS: stat(\"${VFS_PREFIX}/file_b.txt\") worked!"; then
     echo "   ✅ Project B file visible"
 else
     echo -e "${RED}   ❌ Project B verification failed${NC}"
@@ -144,3 +147,4 @@ fi
 
 echo -e "${GREEN}✅ Phase 6 Isolation Test PASSED${NC}"
 exit 0
+

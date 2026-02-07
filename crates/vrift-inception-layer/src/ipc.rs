@@ -8,10 +8,7 @@
 // Allowed:     raw_access, raw_close, raw_fcntl, raw_read, raw_write, raw_mmap
 // Forbidden:   libc::access, libc::close, libc::fcntl, std::fs::*, std::io::*
 // =============================================================================
-#![allow(unused_imports)]
 use libc::c_int;
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
 

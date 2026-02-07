@@ -1410,6 +1410,9 @@ impl InceptionLayerState {
         }
     }
 
+    /// BUG-007b: Must not inline — pthread_create internally calls mmap (interposed).
+    /// Keeps get()'s stack frame small and isolates pthread_create side effects.
+    #[inline(never)]
     fn spawn_worker() {
         // Double-check to ensure we don't spawn multiple times racefully
         if WORKER_STARTED.swap(true, Ordering::SeqCst) {
