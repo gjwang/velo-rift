@@ -14,13 +14,15 @@ members = [
     "crates/vrift-ipc",
     "crates/vrift-vdird",
 ]
-# Exclude vrift-inception-layer from default cargo commands
+# Note: vrift-inception-layer has test=false/doctest=false in its Cargo.toml
+# to prevent hangs from its DYLD constructor, so it's safe in default-members.
 default-members = [
     "crates/vrift-cas",
     "crates/vrift-config",
     "crates/vrift-manifest",
     "crates/vrift-pack",
     "crates/vrift-runtime",
+    "crates/vrift-inception-layer",
     "crates/vrift-fuse",
     "crates/vrift-lock",
     "crates/vrift-cli",
