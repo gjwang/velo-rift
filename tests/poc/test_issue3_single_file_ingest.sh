@@ -15,7 +15,8 @@ export VR_THE_SOURCE="/tmp/test_issue3_cas"
 MANIFEST="/tmp/test_issue3.manifest"
 TEST_FILE="/tmp/test_issue3_file.txt"
 
-# Setup
+# Setup - clear immutable flags on CAS blobs from previous runs
+chflags -R nouchg "$VR_THE_SOURCE" 2>/dev/null || true
 rm -rf "$VR_THE_SOURCE" "$MANIFEST" "$TEST_FILE"
 mkdir -p "$VR_THE_SOURCE"
 echo "test content" > "$TEST_FILE"
@@ -32,7 +33,7 @@ echo "[RUN] $VELO_BIN --the-source-root $VR_THE_SOURCE ingest $TEST_FILE --outpu
 OUTPUT=$("$VELO_BIN" --the-source-root "$VR_THE_SOURCE" ingest "$TEST_FILE" --output "$MANIFEST" --prefix / 2>&1) || true
 
 # Check results
-if [ -f "$MANIFEST" ]; then
+if [ -d "$MANIFEST" ] || [ -f "$MANIFEST" ]; then
     echo "[PASS] Manifest was created."
     ls -l "$MANIFEST"
     EXIT_CODE=0
@@ -46,5 +47,6 @@ else
 fi
 
 # Cleanup
+chflags -R nouchg "$VR_THE_SOURCE" 2>/dev/null || true
 rm -rf "$VR_THE_SOURCE" "$MANIFEST" "$TEST_FILE"
 exit $EXIT_CODE

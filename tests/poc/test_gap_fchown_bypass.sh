@@ -86,10 +86,10 @@ echo ""
 echo "Running fchown test with VFS shim..."
 if "$WORK_DIR/test_fchown" "$WORK_DIR/project/target.txt"; then
     echo -e "${RED}❌ GAP CONFIRMED: fchown bypasses VFS protection via FD${NC}"
-    EXIT_CODE=0
+    EXIT_CODE=1
 else
     echo -e "${GREEN}✅ PROTECTED: fchown is blocked by VFS${NC}"
-    EXIT_CODE=1
+    EXIT_CODE=0
 fi
 
 # Cleanup

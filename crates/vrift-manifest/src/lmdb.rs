@@ -105,6 +105,12 @@ impl LmdbManifest {
     pub fn open<P: AsRef<Path>>(path: P) -> LmdbResult<Self> {
         let path = path.as_ref();
 
+        // If path exists as a regular file (e.g., legacy flat manifest),
+        // remove it first — LMDB needs a directory.
+        if path.is_file() {
+            std::fs::remove_file(path)?;
+        }
+
         // Create directory if needed
         std::fs::create_dir_all(path)?;
 

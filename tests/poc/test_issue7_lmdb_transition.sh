@@ -29,8 +29,8 @@ if [ $INGEST_STATUS -eq 0 ] && echo "$OUTPUT" | grep -q "VRift Complete"; then
     
     # Verify we can read it back via status or inspect
     # (Assuming we have a command to inspect manifest contents)
-    if [ -f "$VRIFT_MANIFEST" ]; then
-        echo "✅ PASS: Manifest file exists on disk"
+    if [ -d "$VRIFT_MANIFEST" ] || [ -f "$VRIFT_MANIFEST" ]; then
+        echo "✅ PASS: Manifest exists on disk"
         rm -rf "$VRIFT_MANIFEST" "$TEST_DIR"
         exit 0
     fi

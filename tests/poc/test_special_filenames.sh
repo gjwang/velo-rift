@@ -78,12 +78,12 @@ if [ -d "$LMDB_MANIFEST" ]; then
     fi
 fi
 
-# Fallback: check if bincode manifest exists
-if [ -f "$VRIFT_MANIFEST" ]; then
-    MF_SIZE=$(wc -c < "$VRIFT_MANIFEST")
-    if [ "$MF_SIZE" -gt 50 ]; then
+# Fallback: check if LMDB manifest directory exists at output path
+if [ -d "$VRIFT_MANIFEST" ]; then
+    MF_SIZE=$(du -sk "$VRIFT_MANIFEST" | cut -f1)
+    if [ "$MF_SIZE" -gt 0 ]; then
         echo "✅ PASS: Special filenames handled correctly"
-        echo "    Manifest size: $MF_SIZE bytes"
+        echo "    LMDB Manifest size: ${MF_SIZE}KB"
         echo "    Files ingested: $PASS_COUNT"
         exit 0
     fi

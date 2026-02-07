@@ -55,11 +55,11 @@ if [ -d "$LMDB_MANIFEST" ]; then
     fi
 fi
 
-# Fallback: check if bincode manifest exists
-if [ -f "$VRIFT_MANIFEST" ]; then
-    MANIFEST_SIZE=$(wc -c < "$VRIFT_MANIFEST")
-    if [ "$MANIFEST_SIZE" -gt 100 ]; then
-        echo "    Manifest size: $MANIFEST_SIZE bytes"
+# Fallback: check if LMDB manifest directory exists at output path
+if [ -d "$VRIFT_MANIFEST" ]; then
+    MANIFEST_SIZE=$(du -sk "$VRIFT_MANIFEST" | cut -f1)
+    if [ "$MANIFEST_SIZE" -gt 0 ]; then
+        echo "    LMDB Manifest size: ${MANIFEST_SIZE}KB"
         echo "✅ PASS: Deep path successfully ingested"
         exit 0
     fi

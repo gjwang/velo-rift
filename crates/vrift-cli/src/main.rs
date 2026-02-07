@@ -400,18 +400,14 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
             let is_phantom = mode.to_lowercase() == "phantom";
             let is_tier1 = tier.to_lowercase() == "tier1";
 
-            // RFC-0039: Use standardized manifest path for initialized projects
+            // RFC-0039: Always use LMDB manifest in target project directory
+            // Must match daemon workspace path at get_or_create_workspace()
             let output = if output.to_string_lossy() == "vrift.manifest" {
-                // Check if project has .vrift directory
                 let vrift_dir = directory.join(".vrift");
-                if vrift_dir.exists() {
-                    let project_id = vrift_config::path::compute_project_id(&directory);
-                    vrift_config::path::get_manifest_db_path(&project_id)
-                        .unwrap_or_else(|| vrift_dir.join("manifest.lmdb"))
-                } else {
-                    // Legacy fallback
-                    output
+                if !vrift_dir.exists() {
+                    let _ = std::fs::create_dir_all(&vrift_dir);
                 }
+                vrift_dir.join("manifest.lmdb")
             } else {
                 output
             };
