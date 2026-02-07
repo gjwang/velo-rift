@@ -119,29 +119,29 @@ const SYS_MKDIR: i64 = 136;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_TRUNCATE: i64 = 200;
 
-/// SYS_unlinkat = 438 on macOS
+/// SYS_unlinkat = 472 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SYS_UNLINKAT: i64 = 438;
+const SYS_UNLINKAT: i64 = 472;
 
-/// SYS_mkdirat = 464 on macOS
+/// SYS_mkdirat = 475 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SYS_MKDIRAT: i64 = 464;
+const SYS_MKDIRAT: i64 = 475;
 
-/// SYS_symlinkat = 465 on macOS
+/// SYS_symlinkat = 474 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SYS_SYMLINKAT: i64 = 465;
+const SYS_SYMLINKAT: i64 = 474;
 
 /// SYS_fchmod = 124 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_FCHMOD: i64 = 124;
 
-/// SYS_fchmodat = 468 on macOS
+/// SYS_fchmodat = 467 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SYS_FCHMODAT: i64 = 468;
+const SYS_FCHMODAT: i64 = 467;
 
-/// SYS_fstatat64 = 466 on macOS
+/// SYS_fstatat64 = 470 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SYS_FSTATAT64: i64 = 466;
+const SYS_FSTATAT64: i64 = 470;
 
 /// SYS_rename = 128 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -977,9 +977,9 @@ pub unsafe fn raw_fstatat64(
     ret as libc::c_int
 }
 
-/// SYS_linkat = 469 on macOS
+/// SYS_linkat = 471 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SYS_LINKAT: i64 = 469;
+const SYS_LINKAT: i64 = 471;
 
 /// SYS_chflags = 34 on macOS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1532,7 +1532,7 @@ const SYS_CHOWN: i64 = 16;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SYS_LCHOWN: i64 = 364;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const SYS_READLINKAT: i64 = 467;
+const SYS_READLINKAT: i64 = 473;
 
 /// Raw chown syscall for macOS ARM64.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2070,23 +2070,23 @@ const SYS_MKDIR_X64: i64 = 136;
 const SYS_TRUNCATE_X64: i64 = 200;
 /// SYS_unlinkat on macOS x86_64 = 438
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const SYS_UNLINKAT_X64: i64 = 438;
+const SYS_UNLINKAT_X64: i64 = 472;
 /// SYS_mkdirat on macOS x86_64 = 464
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const SYS_MKDIRAT_X64: i64 = 464;
+const SYS_MKDIRAT_X64: i64 = 475;
 /// SYS_symlinkat on macOS x86_64 = 465
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const SYS_SYMLINKAT_X64: i64 = 465;
+const SYS_SYMLINKAT_X64: i64 = 474;
 /// SYS_fchmod on macOS x86_64 = 124
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const SYS_FCHMOD_X64: i64 = 124;
 /// SYS_fchmodat on macOS x86_64 = 468
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const SYS_FCHMODAT_X64: i64 = 468;
+const SYS_FCHMODAT_X64: i64 = 467;
 
 /// SYS_fstatat64 on macOS x86_64 = 466
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const SYS_FSTATAT64_X64: i64 = 466;
+const SYS_FSTATAT64_X64: i64 = 470;
 
 /// Raw unlink syscall for macOS x86_64.
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]

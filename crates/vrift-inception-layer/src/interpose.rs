@@ -611,14 +611,14 @@ pub static IT_CHFLAGS: Interpose = Interpose {
     old_func: real_chflags as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_SETXATTR: Interpose = Interpose {
     new_func: setxattr_inception as _,
     old_func: real_setxattr as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_REMOVEXATTR: Interpose = Interpose {
     new_func: removexattr_inception as _,

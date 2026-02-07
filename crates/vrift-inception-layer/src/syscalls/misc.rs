@@ -1558,7 +1558,28 @@ pub unsafe extern "C" fn flock_inception(fd: c_int, op: c_int) -> c_int {
 
 #[no_mangle]
 pub unsafe extern "C" fn symlink_inception(p1: *const c_char, p2: *const c_char) -> c_int {
-    block_vfs_mutation(p2).unwrap_or_else(|| libc::symlink(p1, p2))
+    // Note: IT_SYMLINK is now in __DATA,__interpose, so libc::symlink would
+    // recurse back into this function. Must use raw syscall.
+    let init_state = INITIALIZING.load(Ordering::Relaxed);
+    if init_state != 0
+        || crate::state::INCEPTION_LAYER_STATE
+            .load(Ordering::Acquire)
+            .is_null()
+    {
+        // During early init: use raw syscall via symlinkat(target, AT_FDCWD, linkpath)
+        #[cfg(target_os = "macos")]
+        return crate::syscalls::macos_raw::raw_symlinkat(p1, libc::AT_FDCWD, p2);
+        #[cfg(target_os = "linux")]
+        return libc::symlink(p1, p2);
+    }
+    // RFC-0039: Only block if path EXISTS in manifest, allow new symlink creation
+    if let Some(err) = block_existing_vfs_entry(p2) {
+        return err;
+    }
+    #[cfg(target_os = "macos")]
+    return crate::syscalls::macos_raw::raw_symlinkat(p1, libc::AT_FDCWD, p2);
+    #[cfg(target_os = "linux")]
+    return libc::symlink(p1, p2);
 }
 
 #[no_mangle]
