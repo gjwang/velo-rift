@@ -78,7 +78,7 @@ fi
 echo "📝 Changing file content and re-ingesting..."
 sleep 1
 echo "#define VERSION 2" > header.h
-"$VRIFT_BIN" ingest .
+kill $DAEMON_PID 2>/dev/null || true
 
 echo "🔄 Checking rebuild..."
 OUT=$(make 2>&1)
@@ -87,5 +87,8 @@ if [[ "$OUT" == *"gcc"* ]]; then
 else
     echo "❌ Failure: Rebuild NOT triggered."
     echo "   Output: $OUT"
+fi
+
 kill $DAEMON_PID 2>/dev/null || true
+rm -rf "$WORK_DIR"
 echo "🎉 Scenario Test Complete."

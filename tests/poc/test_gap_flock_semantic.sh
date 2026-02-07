@@ -73,7 +73,8 @@ echo "[2] Starting Daemon..."
 export VELO_PROJECT_ROOT="${SCRIPT_DIR}/test_flock_root"
 mkdir -p "$VELO_PROJECT_ROOT/.vrift"
 rm -rf "$VELO_PROJECT_ROOT/.vrift/socket"
-DAEMON_BIN="${PROJECT_ROOT}/target/debug/vriftd"
+DAEMON_BIN="${PROJECT_ROOT}/target/release/vriftd"
+[ ! -f "$DAEMON_BIN" ] && DAEMON_BIN="${PROJECT_ROOT}/target/debug/vriftd"
 # Start Daemon (isolate from shim injection)
 (
     unset DYLD_INSERT_LIBRARIES
@@ -100,7 +101,7 @@ sleep 2
 # Or: Daemon checks `load_registered_workspaces`.
 # We can write to ~/.vrift/registry/manifests.json
 
-export VRIFT_REGISTRY_DIR="$TEST_DIR/registry"
+export VRIFT_REGISTRY_DIR="$VELO_PROJECT_ROOT/registry"
 mkdir -p "$VRIFT_REGISTRY_DIR"
 echo "{\"version\": 1, \"manifests\": {\"test\": {\"source_path\": \"/tmp/test_flock.manifest\", \"source_path_hash\": \"none\", \"project_root\": \"$VELO_PROJECT_ROOT\", \"registered_at\": \"2026-02-03T00:00:00Z\", \"last_verified\": \"2026-02-03T00:00:00Z\", \"status\": \"active\"}}}" > "$VRIFT_REGISTRY_DIR/manifests.json"
 kill $DAEMON_PID || true

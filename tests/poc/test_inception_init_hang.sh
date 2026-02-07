@@ -50,8 +50,8 @@ codesign -s - -f "$TEST_DIR/echo" 2>/dev/null || true
 codesign -s - -f "$TEST_DIR/chmod" 2>/dev/null || true
 
 # Prefer release inception, fallback to debug
-RELEASE_INCEPTION="${PROJECT_ROOT}/target/release/libvrift_inception.dylib"
-DEBUG_INCEPTION="${PROJECT_ROOT}/target/debug/libvrift_inception.dylib"
+RELEASE_INCEPTION="${PROJECT_ROOT}/target/release/libvrift_inception_layer.dylib"
+DEBUG_INCEPTION="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.dylib"
 
 if [[ -f "$RELEASE_INCEPTION" ]]; then
     INCEPTION_PATH="$RELEASE_INCEPTION"

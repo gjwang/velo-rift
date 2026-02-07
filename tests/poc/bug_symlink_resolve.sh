@@ -22,8 +22,9 @@ export VRIFT_VFS_PREFIX="$WORK_DIR/vfs"
 export DYLD_INSERT_LIBRARIES="$SHIM_LIB"
 export DYLD_FORCE_FLAT_NAMESPACE=1
 
-# Use local 'ls' or 'readlink' to bypass SIP
+# Use local 'readlink' to bypass SIP
 cp /usr/bin/readlink "$WORK_DIR/readlink"
+codesign -s - -f "$WORK_DIR/readlink" 2>/dev/null || true
 
 echo "🧪 Case: readlink on virtual symlink"
 OUT=$("$WORK_DIR/readlink" "$WORK_DIR/vfs/link.txt")
@@ -39,6 +40,7 @@ fi
 
 echo "🧪 Case: stat -L (follow link)"
 cp /usr/bin/stat "$WORK_DIR/stat"
+codesign -s - -f "$WORK_DIR/stat" 2>/dev/null || true
 OUT=$("$WORK_DIR/stat" -L "$WORK_DIR/vfs/link.txt")
 
 if echo "$OUT" | grep -q "TARGET CONTENT"; then

@@ -12,10 +12,10 @@ VRIFTD_BIN="${PROJECT_ROOT}/target/release/vriftd"
 
 # OS Detection
 if [ "$(uname -s)" == "Darwin" ]; then
-    INCEPTION_LIB="${PROJECT_ROOT}/target/release/libvrift_inception.dylib"
+    INCEPTION_LIB="${PROJECT_ROOT}/target/release/libvrift_inception_layer.dylib"
     PRELOAD_VAR="DYLD_INSERT_LIBRARIES"
 else
-    INCEPTION_LIB="${PROJECT_ROOT}/target/release/libvrift_inception.so"
+    INCEPTION_LIB="${PROJECT_ROOT}/target/release/libvrift_inception_layer.so"
     PRELOAD_VAR="LD_PRELOAD"
 fi
 

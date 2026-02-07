@@ -7,7 +7,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-INCEPTION_PATH="$PROJECT_ROOT/target/release/libvrift_inception.dylib"
+INCEPTION_PATH="$PROJECT_ROOT/target/release/libvrift_inception_layer.dylib"
 
 if [[ ! -f "$INCEPTION_PATH" ]]; then
     echo "ERROR: Shim not found at $INCEPTION_PATH"

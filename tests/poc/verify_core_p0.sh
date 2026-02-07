@@ -9,7 +9,7 @@ echo "🚀 [CORE P0] Starting Pre-flight Verification..."
 
 # 1. Check Initialization Hang (BUG-004 / Deadlock)
 echo "--- Step 1: Initialization Integrity ---"
-bash "${SCRIPT_DIR}/test_shim_init_hang.sh" || {
+bash "${SCRIPT_DIR}/test_inception_init_hang.sh" || {
     echo "❌ FATAL: Initialization Deadlock detected."
     exit 1
 }
@@ -17,7 +17,7 @@ bash "${SCRIPT_DIR}/test_shim_init_hang.sh" || {
 # 2. Check Ingestion Bypass (BUG-001 / Race)
 echo ""
 echo "--- Step 2: Interception Reliability ---"
-bash "${SCRIPT_DIR}/repro_shim_init_race.sh" || {
+bash "${SCRIPT_DIR}/repro_inception_init_race.sh" || {
     echo "❌ FATAL: VFS Interception Bypass detected (Init Race)."
     exit 1
 }
