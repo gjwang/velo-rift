@@ -735,10 +735,16 @@ pub unsafe fn raw_readlink(
     ret as libc::ssize_t
 }
 
-/// Raw realpath syscall for macOS ARM64.
 /// Raw realpath proxy for macOS ARM64.
-/// NOTE: There is no direct realpath syscall on macOS.
-/// We fallback to the real libc function via dlsym to avoid interposition recursion.
+/// NOTE: There is no direct realpath syscall on macOS (SYS 462 = clonefileat).
+///
+/// Under DYLD_FORCE_FLAT_NAMESPACE, ANY dlsym-based resolution of "realpath"
+/// (including RTLD_NEXT, RTLD_DEFAULT, or even specific library handles)
+/// resolves to our own `realpath_inception`, causing infinite recursion.
+///
+/// Solution: Use raw kernel syscalls only — open(path) + fcntl(F_GETPATH) + close.
+/// fcntl(F_GETPATH) is a macOS kernel operation that returns the canonical
+/// filesystem path for an open file descriptor, equivalent to realpath.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub unsafe fn raw_realpath(
     path: *const libc::c_char,
@@ -746,12 +752,9 @@ pub unsafe fn raw_realpath(
 ) -> *mut libc::c_char {
     use std::sync::atomic::Ordering;
 
-    // BUG-007 check: If we are still initializing or in bootstrap phase,
-    // WE CANNOT CALL dlsym(RTLD_NEXT, "realpath") as it deadlocks.
+    // Bootstrap safety: during early init, just copy the path.
     let init_state = crate::state::INITIALIZING.load(Ordering::Relaxed);
     if init_state >= 2 {
-        // Bootstrap fallback: Just copy the path if absolute, or handle as-is.
-        // realpath is not critical during dyld/malloc initialization.
         if path.is_null() {
             return std::ptr::null_mut();
         }
@@ -764,19 +767,58 @@ pub unsafe fn raw_realpath(
             );
             return resolved;
         } else {
-            // Cannot allocate with malloc if it's not initialized!
-            // But realpath is not supposed to be called here.
             return std::ptr::null_mut();
         }
     }
 
-    let real_func = crate::reals::REAL_REALPATH.get();
-    if real_func.is_null() {
+    if path.is_null() {
+        crate::set_errno(libc::EINVAL);
         return std::ptr::null_mut();
     }
-    let func: unsafe extern "C" fn(*const libc::c_char, *mut libc::c_char) -> *mut libc::c_char =
-        std::mem::transmute(real_func);
-    func(path, resolved)
+
+    // Open the path read-only (O_RDONLY). For directories, this works.
+    // For files, we only need the fd to get the canonical path.
+    let fd = raw_open(path, libc::O_RDONLY | libc::O_CLOEXEC, 0);
+    if fd < 0 {
+        // open failed — errno is already set by raw_open
+        return std::ptr::null_mut();
+    }
+
+    // Use a stack buffer if caller didn't provide one, or use caller's buffer
+    let mut stack_buf = [0u8; libc::PATH_MAX as usize];
+    let buf_ptr = if !resolved.is_null() {
+        resolved
+    } else {
+        stack_buf.as_mut_ptr() as *mut libc::c_char
+    };
+
+    // fcntl(fd, F_GETPATH, buf) — kernel resolves the canonical path
+    let ret = raw_fcntl(fd, libc::F_GETPATH, buf_ptr as i64);
+    raw_close(fd);
+
+    if ret < 0 {
+        crate::set_errno(libc::ENOENT);
+        return std::ptr::null_mut();
+    }
+
+    if !resolved.is_null() {
+        // Caller provided buffer — just return it
+        resolved
+    } else {
+        // Need to allocate: use libc::malloc + copy from stack buffer
+        let len = libc::strlen(buf_ptr);
+        let alloc = libc::malloc(len + 1) as *mut libc::c_char;
+        if alloc.is_null() {
+            crate::set_errno(libc::ENOMEM);
+            return std::ptr::null_mut();
+        }
+        libc::memcpy(
+            alloc as *mut libc::c_void,
+            buf_ptr as *const libc::c_void,
+            len + 1,
+        );
+        alloc
+    }
 }
 
 /// Raw mkdir syscall for macOS ARM64.
