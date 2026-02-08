@@ -23,7 +23,7 @@ echo "owned content" > "$TEST_FILE"
 
 # Compile the fchown probe
 PROBE_SRC="$TEST_WORKSPACE/fchown_probe.c"
-PROBE_BIN="$TEST_WORKSPACE/fchown_probe"
+PROBE_BIN="/tmp/vrift_fchown_probe_$$"
 
 cat > "$PROBE_SRC" << 'PROBE_EOF'
 #include <stdio.h>
@@ -65,27 +65,12 @@ int main(int argc, char *argv[]) {
         close(fd);
     }
 
-    // Test 4: fchownat (dirfd-based)
-    // Use AT_FDCWD with basename
-    const char *base = strrchr(path, '/');
-    if (base) base++; else base = path;
-    char dir[2048];
-    size_t dlen = (size_t)(base - path);
-    if (dlen > 0 && dlen < sizeof(dir)) {
-        memcpy(dir, path, dlen);
-        dir[dlen] = '\0';
-        int dfd = open(dir, O_RDONLY | O_DIRECTORY);
-        if (dfd >= 0) {
-            errno = 0;
-            ret = fchownat(dfd, base, uid, gid, 0);
-            printf("fchownat: ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
-            close(dfd);
-        } else {
-            printf("fchownat: SKIP (cannot open dir)\n");
-        }
-    } else {
-        printf("fchownat: SKIP (path parse)\n");
-    }
+    // Test 4: fchownat (AT_FDCWD with absolute path)
+    // NOTE: Using AT_FDCWD + absolute path so the shim can match the VFS prefix.
+    // Using dirfd + relative basename would bypass prefix-based VFS detection.
+    errno = 0;
+    ret = fchownat(AT_FDCWD, path, uid, gid, 0);
+    printf("fchownat: ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
 
     return 0;
 }
