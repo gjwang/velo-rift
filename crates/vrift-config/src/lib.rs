@@ -98,6 +98,20 @@ impl Config {
             }
         }
 
+        // 5. Validate socket path: if parent dir doesn't exist and can't
+        //    be created, fall back to default /tmp/vrift.sock so all
+        //    components (CLI, daemon, tests) resolve to the same socket.
+        if let Some(parent) = config.daemon.socket.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists()
+                && std::fs::create_dir_all(parent).is_err() {
+                    debug!(
+                        "Socket directory {:?} unavailable, falling back to /tmp/vrift.sock",
+                        parent
+                    );
+                    config.daemon.socket = PathBuf::from("/tmp/vrift.sock");
+                }
+        }
+
         Ok(config)
     }
 

@@ -385,15 +385,22 @@ async fn start_daemon() -> Result<()> {
     tracing::info!("vriftd: Starting multi-tenant daemon...");
 
     let cfg = vrift_config::Config::load().unwrap_or_default();
-    let socket_path = cfg.socket_path().to_string_lossy().to_string();
-    let path = Path::new(&socket_path);
+    let socket_str = cfg.socket_path().to_string_lossy().to_string();
+    let path = Path::new(&socket_str);
+
+    // Ensure socket parent directory exists
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
 
     if path.exists() {
         tokio::fs::remove_file(path).await?;
     }
 
     let listener = UnixListener::bind(path)?;
-    tracing::info!("vriftd: Listening on {}", socket_path);
+    tracing::info!("vriftd: Listening on {}", socket_str);
 
     // Initialize shared state
     // RFC-0050: VR_THE_SOURCE via unified Config SSOT

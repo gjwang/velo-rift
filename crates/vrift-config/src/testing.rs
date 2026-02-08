@@ -113,7 +113,6 @@ impl TestEnvironment {
         cfg.project.root = self.project_root.clone();
         cfg.project.manifest = self.manifest_path();
 
-        
         // Daemon also needs VRIFT_SOCKET_PATH explicitly (shim_env includes it)
         // Add any daemon-only vars here if needed in the future
         cfg.shim_env()
