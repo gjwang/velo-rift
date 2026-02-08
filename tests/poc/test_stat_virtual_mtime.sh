@@ -39,13 +39,15 @@ echo "=== Test: stat Virtual Metadata (Runtime) ==="
 echo "Ingesting source..."
 export VR_THE_SOURCE="$TEST_DIR/cas"
 echo -n "test content" > "$TEST_DIR/source/test_file.txt"
-# Use --prefix "" for correct /test_file.txt mapping
-"$VELO_BIN" ingest "$TEST_DIR/source" --prefix "" -o "$TEST_DIR/source/vrift.manifest" > "$TEST_DIR/ingest.log" 2>&1
+# Use --prefix "/vrift" to match VRIFT_VFS_PREFIX so manifest keys align
+"$VELO_BIN" ingest "$TEST_DIR/source" --prefix "/vrift" > "$TEST_DIR/ingest.log" 2>&1
 
 # 2. Start daemon with isolated socket
 echo "Starting daemon..."
 export VRIFT_SOCKET_PATH="$TEST_DIR/vrift.sock"
-export VRIFT_MANIFEST="$TEST_DIR/source/vrift.manifest"
+# Use LMDB manifest from ingest output
+export VRIFT_MANIFEST="$TEST_DIR/source/.vrift/manifest.lmdb"
+export VRIFT_PROJECT_ROOT="$TEST_DIR/source"
 "$VRIFTD_BIN" start > "$TEST_DIR/daemon.log" 2>&1 &
 VRIFTD_PID=$!
 sleep 2
@@ -80,7 +82,9 @@ set +e
 DYLD_INSERT_LIBRARIES="$SHIM_LIB" \
 DYLD_FORCE_FLAT_NAMESPACE=1 \
 VRIFT_SOCKET_PATH="$TEST_DIR/vrift.sock" \
+VRIFT_PROJECT_ROOT="$TEST_DIR/source" \
 VRIFT_VFS_PREFIX="/vrift" \
+VR_THE_SOURCE="$TEST_DIR/cas" \
 VRIFT_DEBUG=1 \
 "$TEST_DIR/test_stat" "/vrift/test_file.txt" > "$TEST_DIR/test_output.log" 2>&1
 RET=$?

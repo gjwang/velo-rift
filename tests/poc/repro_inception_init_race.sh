@@ -49,7 +49,7 @@ export VR_THE_SOURCE="$TEST_DIR/cas"
 export VRIFT_SOCKET_PATH="$TEST_DIR/vrift.sock"
 export VRIFT_MANIFEST="$TEST_DIR/source/.vrift/manifest.lmdb"
 
-"$VELO_BIN" ingest "$TEST_DIR/source" --prefix "" > "$TEST_DIR/ingest.log" 2>&1
+"$VELO_BIN" ingest "$TEST_DIR/source" --prefix "/vrift" > "$TEST_DIR/ingest.log" 2>&1
 echo "CAS contents after ingest:"
 ls -R "$TEST_DIR/cas" || echo "CAS directory missing!"
 cat "$TEST_DIR/ingest.log"
@@ -89,6 +89,8 @@ set +e
 env "$PRELOAD_VAR"="$INCEPTION_LIB" \
 DYLD_FORCE_FLAT_NAMESPACE=1 \
 VRIFT_SOCKET_PATH="$TEST_DIR/vrift.sock" \
+VRIFT_PROJECT_ROOT="$TEST_DIR/source" \
+VR_THE_SOURCE="$TEST_DIR/cas" \
 VRIFT_VFS_PREFIX="/vrift" \
 "$TEST_DIR/cat" /vrift/file.txt > "$TEST_DIR/output.txt" 2>&1
 RET=$?

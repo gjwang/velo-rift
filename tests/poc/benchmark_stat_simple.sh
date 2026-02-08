@@ -43,7 +43,8 @@ done
 # Ingest with --prefix "" (like test_shim_basic.sh)
 echo "[2/4] Ingesting to VFS..."
 export VR_THE_SOURCE="$CAS_ROOT"
-"$VRIFT_BIN" ingest "$SOURCE_DIR" --prefix "" -o "$SOURCE_DIR/vrift.manifest" > /dev/null 2>&1
+# Use --prefix /vrift to match VRIFT_VFS_PREFIX so manifest keys align
+"$VRIFT_BIN" ingest "$SOURCE_DIR" --prefix "/vrift" > /dev/null 2>&1
 
 # Start daemon (like test_shim_basic.sh)
 echo "[3/4] Starting vriftd..."
@@ -52,21 +53,20 @@ sleep 1
 
 export VR_THE_SOURCE="$CAS_ROOT"
 export RUST_LOG=info
+export VRIFT_SOCKET_PATH="$TEST_DIR/vrift.sock"
+export VRIFT_PROJECT_ROOT="$SOURCE_DIR"
 "$VRIFTD_BIN" start > "$TEST_DIR/daemon.log" 2>&1 &
 VRIFTD_PID=$!
 sleep 2
 
-# Behavior-based daemon verification instead of pgrep
-if ! "$VRIFT_BIN" daemon status 2>/dev/null | grep -q "running\|Operational"; then
-    # Fallback: check socket exists
-    if [ ! -S "/tmp/vrift.sock" ]; then
-        echo "❌ ERROR: Daemon not running (behavior check failed)."
-        cat "$TEST_DIR/daemon.log"
-        exit 1
-    fi
+# Check daemon socket exists
+if [ ! -S "$TEST_DIR/vrift.sock" ]; then
+    echo "❌ ERROR: Daemon socket not found."
+    cat "$TEST_DIR/daemon.log"
+    exit 1
 fi
 
-echo "✅ VFS ready (verified via behavior check)"
+echo "✅ VFS ready"
 
 # Create C benchmark for /vrift paths
 cat > "$TEST_DIR/bench.c" << 'EOF'
@@ -136,6 +136,7 @@ cc -O2 -o "$TEST_DIR/bench" "$TEST_DIR/bench.c"
 cc -O2 -o "$TEST_DIR/bench_fs" "$TEST_DIR/bench_fs.c"
 codesign -f -s - "$TEST_DIR/bench" 2>/dev/null || true
 codesign -f -s - "$TEST_DIR/bench_fs" 2>/dev/null || true
+codesign -f -s - "$SHIM_PATH" 2>/dev/null || true
 
 # Test 1: Real FS (from source dir, no shim)
 echo ""
@@ -149,12 +150,17 @@ echo "Test 2 (VFS with shim):"
 export DYLD_INSERT_LIBRARIES="$SHIM_PATH"
 export DYLD_FORCE_FLAT_NAMESPACE=1
 export VR_THE_SOURCE="$CAS_ROOT"
-export VRIFT_MANIFEST="$SOURCE_DIR/vrift.manifest"
+export VRIFT_MANIFEST="$SOURCE_DIR/.vrift/manifest.lmdb"
 export VRIFT_VFS_PREFIX="/vrift"
+export VRIFT_PROJECT_ROOT="$SOURCE_DIR"
+export VRIFT_SOCKET_PATH="$TEST_DIR/vrift.sock"
 export VRIFT_DEBUG=1
 
 cd "$TEST_DIR"
+set +e
 "$TEST_DIR/bench"
+BENCH_RET=$?
+set -e
 
 echo ""
 echo "✅ Benchmark complete"

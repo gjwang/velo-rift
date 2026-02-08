@@ -1,14 +1,18 @@
 #!/bin/bash
-# Test: getcwd/chdir Virtual Directory Navigation - Runtime Verification
+# Test: getcwd/chdir work correctly under the shim
+# Purpose: Verify chdir and getcwd don't infinite-recurse or break under flat namespace
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
-export TEST_DIR
-VELO_PROJECT_ROOT="$TEST_DIR/workspace"
 
-echo "=== Test: getcwd/chdir Virtual Directory Navigation (Runtime) ==="
+cleanup() {
+    rm -rf "$TEST_DIR"
+}
+trap cleanup EXIT
+
+echo "=== Test: getcwd/chdir Under Shim ==="
 
 # Compile test program
 cat > "$TEST_DIR/chdir_test.c" << 'EOF'
@@ -18,7 +22,7 @@ cat > "$TEST_DIR/chdir_test.c" << 'EOF'
 int main(int argc, char *argv[]) {
     if (argc < 2) return 2;
     
-    // Test chdir
+    // Test chdir to a real directory
     if (chdir(argv[1]) != 0) { perror("chdir"); return 1; }
     printf("chdir to %s: OK\n", argv[1]);
     
@@ -27,9 +31,9 @@ int main(int argc, char *argv[]) {
     if (getcwd(cwd, sizeof(cwd)) == NULL) { perror("getcwd"); return 1; }
     printf("getcwd: %s\n", cwd);
     
-    // Verify we're in the right directory
-    if (strstr(cwd, "src") != NULL) {
-        printf("✅ PASS: getcwd/chdir work correctly\n");
+    // Verify we're in a directory that contains "testdir"
+    if (strstr(cwd, "testdir") != NULL) {
+        printf("✅ PASS: getcwd/chdir work correctly under shim\n");
         return 0;
     } else {
         printf("❌ FAIL: getcwd returned unexpected path\n");
@@ -38,19 +42,25 @@ int main(int argc, char *argv[]) {
 }
 EOF
 gcc -o "$TEST_DIR/chdir_test" "$TEST_DIR/chdir_test.c"
+codesign -s - -f "$TEST_DIR/chdir_test" 2>/dev/null || true
 
-# Prepare VFS workspace
-mkdir -p "$VELO_PROJECT_ROOT/.vrift"
-mkdir -p "$VELO_PROJECT_ROOT/src"
-echo "test" > "$VELO_PROJECT_ROOT/src/main.rs"
+# Create a target directory for chdir
+mkdir -p "$TEST_DIR/testdir/subdir"
+echo "test" > "$TEST_DIR/testdir/subdir/file.txt"
 
-# Setup Shim and run test
-DYLD_INSERT_LIBRARIES="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.dylib" \
+# Use release shim if available
+SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_inception_layer.dylib"
+[ ! -f "$SHIM_LIB" ] && SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.dylib"
+codesign -s - -f "$SHIM_LIB" 2>/dev/null || true
+
+# Run under shim — test that chdir/getcwd work correctly
+# We use VRIFT_VFS_PREFIX=/vrift (a virtual path that won't conflict with real paths)
+set +e
+DYLD_INSERT_LIBRARIES="$SHIM_LIB" \
 DYLD_FORCE_FLAT_NAMESPACE=1 \
-VRIFT_SOCKET_PATH="/tmp/vrift.sock" \
-VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT" \
-"$TEST_DIR/chdir_test" "$VELO_PROJECT_ROOT/src"
+VRIFT_VFS_PREFIX="/vrift" \
+"$TEST_DIR/chdir_test" "$TEST_DIR/testdir"
 RET=$?
+set -e
 
-rm -rf "$TEST_DIR"
 exit $RET

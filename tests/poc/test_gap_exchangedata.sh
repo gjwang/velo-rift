@@ -103,13 +103,13 @@ echo "  External: $EXT_AFTER"
 
 if [ "$VFS_AFTER" = "$EXT_BEFORE" ] && [ "$EXT_AFTER" = "$VFS_BEFORE" ]; then
     echo -e "${RED}❌ GAP CONFIRMED: exchangedata swapped VFS file content!${NC}"
-    EXIT_CODE=0
+    EXIT_CODE=1
 elif [ "$VFS_AFTER" = "$VFS_BEFORE" ]; then
     echo -e "${GREEN}✅ PROTECTED: VFS file content unchanged${NC}"
-    EXIT_CODE=1
+    EXIT_CODE=0
 else
     echo -e "${YELLOW}⚠️  UNEXPECTED: Content changed but not swapped${NC}"
-    EXIT_CODE=2
+    EXIT_CODE=1
 fi
 
 # Cleanup
