@@ -77,6 +77,24 @@ impl VDir {
                 );
                 // Continue anyway, but log warning
             }
+
+            // Recovery: If generation is odd, previous writer crashed mid-write.
+            // Reset to even (generation + 1) so seqlock readers don't spin forever.
+            if header.generation & 1 != 0 {
+                let stale_gen = header.generation;
+                let recovered_gen = stale_gen + 1; // next even number
+                warn!(
+                    stale_gen = stale_gen,
+                    recovered_gen = recovered_gen,
+                    "VDir generation stuck at odd value (previous writer crashed). Recovering."
+                );
+                let gen_ptr = &header.generation as *const u64;
+                let atomic = unsafe { &*(gen_ptr as *const AtomicU64) };
+                atomic.store(recovered_gen, Ordering::Release);
+                // Recompute CRC with updated generation
+                header.crc32 = Self::compute_header_crc(header);
+                mmap.flush()?;
+            }
         }
 
         Ok(Self { mmap, capacity })
@@ -750,5 +768,189 @@ mod tests {
         // Basic sanity: writer did work, readers succeeded
         assert!(write_rounds > 0, "writer did no work");
         assert!(total_reads > 0, "readers did no reads");
+    }
+
+    // ==================== Seqlock Integration Tests ====================
+
+    /// Test seqlock reader protocol: writer does begin_write/upsert/end_write,
+    /// reader threads use raw pointer + seqlock protocol and verify no torn reads.
+    #[test]
+    fn test_seqlock_reader_writer_consistency() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Barrier;
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("seqlock_rw.vdir");
+
+        // Create VDir and seed initial entries
+        let mut vdir = VDir::create_or_open(&path).unwrap();
+        for i in 0u64..10 {
+            vdir.upsert(VDirEntry {
+                path_hash: fnv1a_hash(&format!("file_{}", i)),
+                size: 0,
+                mtime_sec: 0,
+                mode: 0o644,
+                ..Default::default()
+            })
+            .unwrap();
+        }
+
+        // Share raw pointer from VDir's MmapMut (same physical pages via MAP_SHARED)
+        let mmap_addr = vdir.mmap.as_ptr() as usize;
+        let mmap_len = vdir.mmap.len();
+
+        let done = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(5)); // 1 writer + 4 readers
+
+        // Spawn 4 reader threads using seqlock protocol
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let d = done.clone();
+                let b = barrier.clone();
+                thread::spawn(move || {
+                    b.wait();
+                    let mut reads = 0u64;
+                    let mut retries = 0u64;
+
+                    while !d.load(Ordering::Relaxed) {
+                        let mmap_ptr = mmap_addr as *const u8;
+
+                        // Seqlock protocol: read gen, read data, read gen again
+                        let gen_ptr = unsafe { &*((mmap_ptr as usize + 8) as *const AtomicU64) };
+                        let g1 = gen_ptr.load(Ordering::Acquire);
+                        if g1 & 1 != 0 {
+                            retries += 1;
+                            core::hint::spin_loop();
+                            continue;
+                        }
+
+                        let table_capacity =
+                            unsafe { *((mmap_ptr as usize + 20) as *const u32) } as usize;
+                        let table_offset =
+                            unsafe { *((mmap_ptr as usize + 24) as *const u32) } as usize;
+
+                        if table_capacity == 0 {
+                            continue;
+                        }
+
+                        // Lookup file_0
+                        let target_hash = vrift_ipc::fnv1a_hash("file_0");
+                        let start = (target_hash as usize) % table_capacity;
+                        let mut found: Option<(u64, i64)> = None;
+
+                        for j in 0..table_capacity {
+                            let slot = (start + j) % table_capacity;
+                            let off = table_offset + slot * VDIR_ENTRY_SIZE;
+                            if off + VDIR_ENTRY_SIZE > mmap_len {
+                                break;
+                            }
+                            let e = unsafe { &*(mmap_ptr.add(off) as *const VDirEntry) };
+                            if e.path_hash == 0 {
+                                break;
+                            }
+                            if e.path_hash == target_hash {
+                                found = Some((e.size, e.mtime_sec));
+                                break;
+                            }
+                        }
+
+                        let g2 = gen_ptr.load(Ordering::Acquire);
+                        if g1 != g2 {
+                            retries += 1;
+                            continue;
+                        }
+
+                        // Verify consistency: size = round * 1000, mtime_sec = round
+                        if let Some((size, mtime)) = found {
+                            assert_eq!(
+                                size % 1000,
+                                0,
+                                "Torn read: size={} not multiple of 1000",
+                                size
+                            );
+                            assert_eq!(
+                                mtime,
+                                (size / 1000) as i64,
+                                "Inconsistent: size={} mtime={}",
+                                size,
+                                mtime
+                            );
+                        }
+
+                        reads += 1;
+                    }
+                    (reads, retries)
+                })
+            })
+            .collect();
+
+        // Writer runs in main thread (owns VDir)
+        barrier.wait();
+        let mut rounds = 0u64;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            for i in 0u64..10 {
+                vdir.upsert(VDirEntry {
+                    path_hash: fnv1a_hash(&format!("file_{}", i)),
+                    size: rounds * 1000,
+                    mtime_sec: rounds as i64,
+                    mode: 0o644,
+                    ..Default::default()
+                })
+                .unwrap();
+            }
+            rounds += 1;
+        }
+        done.store(true, Ordering::Relaxed);
+
+        let mut total_reads = 0u64;
+        for r in readers {
+            let (reads, _retries) = r.join().unwrap();
+            total_reads += reads;
+        }
+        assert!(rounds > 0, "writer did no work");
+        assert!(total_reads > 0, "readers got no consistent reads");
+    }
+
+    /// Test generation recovery: simulate a crash by writing odd generation directly,
+    /// then reopen and verify recovery to even.
+    #[test]
+    fn test_generation_recovery_after_crash() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("crash_recovery.vdir");
+
+        // Create a valid VDir with one entry
+        {
+            let mut vdir = VDir::create_or_open(&path).unwrap();
+            vdir.upsert(VDirEntry {
+                path_hash: fnv1a_hash("orphan_file"),
+                size: 42,
+                ..Default::default()
+            })
+            .unwrap();
+            vdir.flush().unwrap();
+
+            // Simulate crash: force odd generation via direct atomic write
+            let gen_ptr = &vdir.header().generation as *const u64;
+            let atomic = unsafe { &*(gen_ptr as *const AtomicU64) };
+            let current = atomic.load(Ordering::Relaxed);
+            assert!(current & 1 == 0, "Should be even before crash sim");
+            atomic.store(current + 1, Ordering::Release);
+            vdir.flush().unwrap();
+        }
+
+        // Reopen — should recover generation to even
+        {
+            let vdir = VDir::create_or_open(&path).unwrap();
+            let gen = vdir.header().generation;
+            assert!(
+                gen & 1 == 0,
+                "Generation should be even after recovery, got {}",
+                gen
+            );
+            let entry = vdir.lookup(fnv1a_hash("orphan_file"));
+            assert!(entry.is_some(), "Entry should survive crash recovery");
+            assert_eq!(entry.unwrap().size, 42);
+        }
     }
 }

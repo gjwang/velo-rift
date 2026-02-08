@@ -803,6 +803,7 @@ pub(crate) struct VDirStatResult {
     pub mtime_nsec: u32,
     pub mode: u32,
     pub flags: u16,
+    pub cas_hash: [u8; 32],
 }
 
 /// Maximum seqlock spins before giving up and falling back to IPC.
@@ -881,6 +882,7 @@ pub(crate) fn vdir_lookup(
                     mtime_nsec: entry.mtime_nsec,
                     mode: entry.mode,
                     flags: entry.flags,
+                    cas_hash: entry.cas_hash,
                 });
                 break;
             }
@@ -1075,7 +1077,7 @@ impl InceptionLayerState {
         if let Some(entry) = vdir_lookup(self.mmap_ptr, self.mmap_size, vpath.manifest_key.as_str())
         {
             return Some(vrift_ipc::VnodeEntry {
-                content_hash: [0u8; 32],
+                content_hash: entry.cas_hash,
                 size: entry.size,
                 mtime: entry.mtime_sec as u64,
                 mode: entry.mode,
