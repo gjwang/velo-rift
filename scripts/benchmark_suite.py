@@ -223,7 +223,7 @@ def run_dataset_benchmark(name: str, config: dict[str, str], work_dir: Path) -> 
     code, _, stderr = run_cmd(
         ["npm", "install", "--legacy-peer-deps", "--silent"],
         cwd=dataset_dir,
-        timeout=300,
+        timeout=900,
     )
     if code != 0:
         print(f"  npm install failed: {stderr[:100]}")

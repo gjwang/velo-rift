@@ -6,15 +6,15 @@ Generated: 2026-02-09
 
 Fresh CAS, real file I/O (hash + link + manifest write):
 
-| Dataset | Files | Blobs | Dedup | Speed | Total Time |
-|---------|-------|-------|-------|-------|------------|
-| XSmall | 16,667 | 13,772 | 17.4% | 3,424/s | 4.87s |
-| Small | 23,982 | 20,574 | 14.2% | 3,795/s | 6.32s |
-| Medium | 61,865 | 51,545 | 16.7% | 3,870/s | 15.99s |
-| Large | 68,308 | 50,691 | 25.8% | 3,722/s | 18.35s |
-| XLarge | 86,358 | 63,666 | 26.3% | 4,148/s | 20.82s |
+| Dataset | Files | Size | Blobs | Dedup | Speed |
+|---------|-------|------|-------|-------|-------|
+| XSmall | 16,667 | 222 MB | 13,772 | 17.3% | 3,587/s |
+| Small | 23,982 | 346 MB | 20,574 | 14.2% | 3,873/s |
+| Medium | 61,756 | 507 MB | 51,545 | 16.5% | 3,116/s |
+| Large | 68,383 | 465 MB | 50,691 | 25.9% | 3,639/s |
+| XXLarge | 193,851 | 2.0 GB | ~136k | 29.7% | 4,090/s |
 
-Consistent throughput: **~3,400-4,200 files/sec** across all dataset sizes.
+Consistent throughput: **~3,100-4,100 files/sec** across all dataset sizes (16k-194k files).
 
 ## Re-ingest Performance (CAS Hit)
 
@@ -22,22 +22,25 @@ When CAS already contains all content (100% deduplication):
 
 | Dataset | Files | Re-ingest Speed | Speedup |
 |---------|-------|-----------------|---------|
-| XSmall | 16,667 | 6,595/s | 1.9x |
-| Small | 23,982 | 6,399/s | 1.7x |
+| XSmall | 16,667 | 5,719/s | 1.6x |
+| Small | 23,982 | 4,423/s | 1.1x |
+| Medium | 61,756 | 4,892/s | 1.6x |
+| Large | 68,383 | 5,364/s | 1.5x |
+| XXLarge | 193,851 | 6,238/s | 1.5x |
 
-Re-ingest skips all file writes (hash-only + existence check), achieving **~1.7-1.9x** speedup.
+Re-ingest skips all file writes (hash-only + existence check), achieving **~1.1-1.6x** speedup.
 
-## Deduplication Efficiency
+## Deduplication & Space Savings
 
-Space savings from content-addressable storage (BLAKE3 + 3-level sharding):
+| Dataset | Original | After CAS | Saved | Rate |
+|---------|----------|-----------|-------|------|
+| XSmall | 222 MB | 219 MB | 3.1 MB | 1% |
+| Small | 346 MB | 341 MB | 4.8 MB | 1% |
+| Medium | 507 MB | 482 MB | 25 MB | 5% |
+| Large | 465 MB | 416 MB | 48 MB | 10% |
+| XXLarge | 2.0 GB | 1.7 GB | 324 MB | 16% |
 
-| Dataset | Original Size | Unique Blobs | Dedup Rate | Space Saved |
-|---------|---------------|--------------|------------|-------------|
-| XSmall | 222.3 MB | 13,772 | 17.4% | 38.6 MB |
-| Small | 345.8 MB | 20,574 | 14.2% | 49.1 MB |
-| Medium | 505.9 MB | 51,545 | 16.7% | 24.8 MB |
-| Large | 464.5 MB | 50,691 | 25.8% | 38.9 MB |
-| XLarge | ~600 MB | 63,666 | 26.3% | 51.8 MB |
+Larger datasets show higher dedup rates due to more shared transitive dependencies.
 
 ## Architecture
 
@@ -61,7 +64,7 @@ CAS root precedence: `CLI arg > env (VR_THE_SOURCE) > config.toml > default (~/.
 # Quick (XSmall + Small)
 python3 scripts/benchmark_suite.py --quick
 
-# Full (all datasets)
+# Full (all datasets including XXLarge ~194k files)
 python3 scripts/benchmark_suite.py
 
 # Shell script (single run, no re-ingest)
