@@ -105,12 +105,17 @@ impl Config {
         }
 
         // 2. Load project config (<project_root>/.vrift/config.toml)
+        //    Use key-presence detection: only override fields that are
+        //    explicitly present in the project TOML (fixes default-value trap).
         let project_config_path = project_root.join(".vrift/config.toml");
         if project_config_path.exists() {
             debug!("Loading project config from {:?}", project_config_path);
             let contents = std::fs::read_to_string(&project_config_path)?;
+            // Parse as raw TOML table for key-presence detection
+            let raw: toml::Value = toml::from_str(&contents)?;
+            // Parse as typed Config for values
             let project_config: Config = toml::from_str(&contents)?;
-            config.merge(project_config);
+            config.merge_with_presence(project_config, &raw);
         }
 
         // 3. Apply environment variable overrides
@@ -149,51 +154,59 @@ impl Config {
         dirs::home_dir().map(|h| h.join(".vrift/config.toml"))
     }
 
-    /// Merge another config (project overrides global).
-    /// Non-default values from `other` replace values in `self`.
-    fn merge(&mut self, other: Config) {
+    /// Merge project config over global config using TOML key-presence detection.
+    /// Only fields explicitly present in the project TOML override global values.
+    /// This fixes the "default-value trap" where setting a value TO the default
+    /// in the project config would be silently ignored.
+    fn merge_with_presence(&mut self, other: Config, raw: &toml::Value) {
+        // Helper: check if a key exists in a TOML table section
+        let has_key = |section: &str, key: &str| -> bool {
+            raw.get(section).and_then(|s| s.get(key)).is_some()
+        };
+        let has_section = |section: &str| -> bool { raw.get(section).is_some() };
+
         // Project
-        let default_project = ProjectConfig::default();
-        if other.project.vfs_prefix != default_project.vfs_prefix {
+        if has_key("project", "vfs_prefix") {
             self.project.vfs_prefix = other.project.vfs_prefix;
         }
-        if other.project.root != default_project.root {
+        if has_key("project", "root") {
             self.project.root = other.project.root;
         }
-        if other.project.manifest != default_project.manifest {
+        if has_key("project", "manifest") {
             self.project.manifest = other.project.manifest;
         }
 
         // Storage
-        let default_storage = StorageConfig::default();
-        if other.storage.the_source != default_storage.the_source {
+        if has_key("storage", "the_source") {
             self.storage.the_source = other.storage.the_source;
         }
-        if other.storage.default_mode != default_storage.default_mode {
+        if has_key("storage", "default_mode") {
             self.storage.default_mode = other.storage.default_mode;
         }
 
         // Daemon
-        let default_daemon = DaemonConfig::default();
-        if other.daemon.socket != default_daemon.socket {
+        if has_key("daemon", "socket") {
             self.daemon.socket = other.daemon.socket;
         }
-        if other.daemon.debug != default_daemon.debug {
+        if has_key("daemon", "debug") {
             self.daemon.debug = other.daemon.debug;
         }
 
-        // Tiers
-        if !other.tiers.tier1_patterns.is_empty() {
-            self.tiers.tier1_patterns = other.tiers.tier1_patterns;
-        }
-        if !other.tiers.tier2_patterns.is_empty() {
-            self.tiers.tier2_patterns = other.tiers.tier2_patterns;
+        // Tiers (replace entire list if section is present)
+        if has_section("tiers") {
+            if has_key("tiers", "tier1_patterns") {
+                self.tiers.tier1_patterns = other.tiers.tier1_patterns;
+            }
+            if has_key("tiers", "tier2_patterns") {
+                self.tiers.tier2_patterns = other.tiers.tier2_patterns;
+            }
         }
 
-        // Security
-        if !other.security.exclude_patterns.is_empty() {
-            self.security.exclude_patterns = other.security.exclude_patterns;
-        }
+        // Security (replace entire list if section is present)
+        if has_section("security")
+            && has_key("security", "exclude_patterns") {
+                self.security.exclude_patterns = other.security.exclude_patterns;
+            }
     }
 
     /// Apply environment variable overrides (highest priority)
@@ -310,15 +323,6 @@ the_source = "{the_source}"
             the_source = default.storage.the_source.display(),
             socket = default.daemon.socket.display(),
         )
-    }
-
-    /// Generate default config TOML string
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use Config::init_toml() for human-readable template"
-    )]
-    pub fn default_toml() -> String {
-        toml::to_string_pretty(&Config::default()).unwrap()
     }
 
     // ========== Convenience Accessors ==========
@@ -611,14 +615,15 @@ mod tests {
     // ========== TOML Serialization Tests ==========
 
     #[test]
-    fn test_default_toml_generation_includes_all_sections() {
-        let toml_str = Config::default_toml();
+    fn test_init_toml_generation_includes_key_sections() {
+        let toml_str = Config::init_toml();
 
+        assert!(toml_str.contains("config_version"));
+        assert!(toml_str.contains("[project]"));
         assert!(toml_str.contains("[storage]"));
-        assert!(toml_str.contains("[ingest]"));
-        assert!(toml_str.contains("[tiers]"));
-        assert!(toml_str.contains("[security]"));
         assert!(toml_str.contains("[daemon]"));
+        assert!(toml_str.contains("vfs_prefix"));
+        assert!(toml_str.contains("the_source"));
     }
 
     #[test]
@@ -685,28 +690,61 @@ default_tier = "tier1"
     // ========== Config Merge Tests ==========
 
     #[test]
-    fn test_merge_replaces_non_empty_patterns() {
+    fn test_merge_replaces_explicitly_set_patterns() {
         let mut base = Config::default();
-        let mut overlay = Config::default();
 
-        overlay.tiers.tier1_patterns = vec!["custom/".to_string()];
-        base.merge(overlay);
+        // Overlay that explicitly sets tier1_patterns
+        let overlay_toml = r#"
+            [tiers]
+            tier1_patterns = ["custom/"]
+        "#;
+        let raw: toml::Value = toml::from_str(overlay_toml).unwrap();
+        let overlay: Config = toml::from_str(overlay_toml).unwrap();
 
+        base.merge_with_presence(overlay, &raw);
         assert_eq!(base.tiers.tier1_patterns, vec!["custom/".to_string()]);
     }
 
     #[test]
-    fn test_merge_preserves_base_when_overlay_empty() {
+    fn test_merge_preserves_base_when_key_absent() {
         let mut base = Config::default();
         let original_patterns = base.tiers.tier1_patterns.clone();
 
-        let mut overlay = Config::default();
-        overlay.tiers.tier1_patterns = vec![];
+        // Overlay with tiers section but NO tier1_patterns key
+        let overlay_toml = r#"
+            [project]
+            vfs_prefix = "/custom"
+        "#;
+        let raw: toml::Value = toml::from_str(overlay_toml).unwrap();
+        let overlay: Config = toml::from_str(overlay_toml).unwrap();
 
-        base.merge(overlay);
+        base.merge_with_presence(overlay, &raw);
 
-        // Empty overlay should not replace base patterns
+        // Absent key should not replace base patterns
         assert_eq!(base.tiers.tier1_patterns, original_patterns);
+        // But explicitly set key should be applied
+        assert_eq!(base.project.vfs_prefix, "/custom");
+    }
+
+    #[test]
+    fn test_merge_default_value_override() {
+        // Regression test: explicitly setting a value TO the default
+        // in project config should still override global config.
+        let mut base = Config::default();
+        base.project.vfs_prefix = "/global_custom".to_string();
+
+        let overlay_toml = r#"
+            [project]
+            vfs_prefix = "/vrift"
+        "#;
+        let raw: toml::Value = toml::from_str(overlay_toml).unwrap();
+        let overlay: Config = toml::from_str(overlay_toml).unwrap();
+
+        base.merge_with_presence(overlay, &raw);
+
+        // Even though "/vrift" is the default, it should override "/global_custom"
+        // because the key was explicitly present in the project TOML
+        assert_eq!(base.project.vfs_prefix, "/vrift");
     }
 
     // ========== Environment Override Tests ==========

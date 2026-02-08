@@ -314,6 +314,8 @@ struct DaemonState {
     cas: vrift_cas::CasStore,
     // Lock Manager for flock virtualization
     lock_manager: LockManager,
+    // Daemon start time (for uptime reporting)
+    start_time: std::time::Instant,
 }
 
 /// RFC-0044 Hot Stat Cache: Export manifest to mmap file for O(1) shim access
@@ -416,6 +418,7 @@ async fn start_daemon() -> Result<()> {
         workspaces: Mutex::new(HashMap::new()),
         cas: cas.clone(),
         lock_manager: LockManager::new(),
+        start_time: std::time::Instant::now(),
     });
 
     // Start background scan (Warm-up)
@@ -565,9 +568,25 @@ async fn handle_request(
             compatible: vrift_ipc::is_version_compatible(protocol_version),
         },
         VeloRequest::Status => {
-            let count = state.cas_index.lock().unwrap().len();
+            let blob_count = state.cas_index.lock().unwrap().len();
+            let workspace_count = state.workspaces.lock().unwrap().len();
+            let uptime = state.start_time.elapsed();
+            let uptime_str = if uptime.as_secs() >= 3600 {
+                format!(
+                    "{}h{}m",
+                    uptime.as_secs() / 3600,
+                    (uptime.as_secs() % 3600) / 60
+                )
+            } else if uptime.as_secs() >= 60 {
+                format!("{}m{}s", uptime.as_secs() / 60, uptime.as_secs() % 60)
+            } else {
+                format!("{}s", uptime.as_secs())
+            };
             VeloResponse::StatusAck {
-                status: format!("Multi-tenant Operational (Global Blobs: {})", count),
+                status: format!(
+                    "Multi-tenant Operational (Global Blobs: {}, Workspaces: {}, Uptime: {})",
+                    blob_count, workspace_count, uptime_str
+                ),
             }
         }
         VeloRequest::RegisterWorkspace {

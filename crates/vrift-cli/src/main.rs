@@ -341,9 +341,13 @@ fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    // Initialize tracing
+    // Initialize tracing — use VRIFT_LOG (matching daemon) with RUST_LOG fallback
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("VRIFT_LOG")
+                .or_else(|_| tracing_subscriber::EnvFilter::try_from_default_env())
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -748,8 +752,39 @@ fn cmd_config(command: ConfigCommands) -> Result<()> {
                 Ok(config) => {
                     println!("✓ Syntax: Valid TOML");
                     println!("✓ Schema: All fields recognized");
+
+                    // Version check
+                    if config.config_version == 0 {
+                        println!("⚠ Warning: missing config_version (pre-v1 schema)");
+                        println!("  Regenerate with: vrift config init --force");
+                    } else if config.config_version > vrift_config::CONFIG_VERSION {
+                        println!(
+                            "⚠ Warning: config_version {} is newer than supported ({})",
+                            config.config_version,
+                            vrift_config::CONFIG_VERSION
+                        );
+                    } else {
+                        println!("✓ Version: {} (current)", config.config_version);
+                    }
+
+                    // Platform checks
+                    #[cfg(target_os = "macos")]
+                    {
+                        let socket_str = config.daemon.socket.to_string_lossy();
+                        if socket_str.starts_with("/run/") {
+                            println!(
+                                "⚠ Warning: socket path {} looks like Linux convention",
+                                socket_str
+                            );
+                            println!("  Config layer will auto-fallback to /tmp/vrift.sock");
+                        }
+                    }
+
                     println!();
                     println!("Summary:");
+                    println!("  - Config version: {}", config.config_version);
+                    println!("  - VFS prefix: {}", config.project.vfs_prefix);
+                    println!("  - Socket: {}", config.daemon.socket.display());
                     println!("  - Tier1 patterns: {}", config.tiers.tier1_patterns.len());
                     println!("  - Tier2 patterns: {}", config.tiers.tier2_patterns.len());
                     println!(
