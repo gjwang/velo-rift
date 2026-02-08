@@ -938,6 +938,7 @@ pub const MMAP_MAX_ENTRIES: usize = 65536;
 
 /// Header for the mmap'd manifest file
 /// Layout: [Header][Bloom Filter][Hash Table]
+#[deprecated(note = "Phase 2: Use VDirHeader from vrift-vdird instead (MAP_SHARED + seqlock)")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ManifestMmapHeader {
@@ -953,6 +954,7 @@ pub struct ManifestMmapHeader {
     pub children_count: u32,     // Total children across all directories
 }
 
+#[allow(deprecated)]
 impl ManifestMmapHeader {
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
@@ -989,6 +991,7 @@ impl ManifestMmapHeader {
 
 /// Single stat entry in the hash table
 /// Uses open addressing with linear probing
+#[deprecated(note = "Phase 2: Use VDirEntry from vrift-vdird instead")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MmapStatEntry {
@@ -1000,6 +1003,7 @@ pub struct MmapStatEntry {
     pub flags: u32, // EntryFlags: is_dir, is_symlink, etc.
 }
 
+#[allow(deprecated)]
 impl MmapStatEntry {
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
@@ -1067,6 +1071,7 @@ pub fn fnv1a_hash(s: &str) -> u64 {
 }
 
 /// Calculate total mmap file size for given capacities
+#[allow(deprecated)]
 pub fn mmap_file_size(
     table_capacity: usize,
     dir_index_capacity: usize,
@@ -1081,18 +1086,22 @@ pub fn mmap_file_size(
 
 /// Builder for creating mmap manifest files (RFC-0044 Hot Stat Cache)
 /// Used by daemon to export manifest to shared memory for O(1) shim access
+#[deprecated(note = "Phase 2: VDir mmap is now managed by vDird directly")]
+#[allow(deprecated)]
 #[derive(Debug)]
 pub struct ManifestMmapBuilder {
     entries: Vec<(String, MmapStatEntry)>,
     bloom: Vec<u8>,
 }
 
+#[allow(deprecated)]
 impl Default for ManifestMmapBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[allow(deprecated)]
 impl ManifestMmapBuilder {
     pub fn new() -> Self {
         Self {

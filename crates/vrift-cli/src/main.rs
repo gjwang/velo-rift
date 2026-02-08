@@ -1408,6 +1408,7 @@ async fn cmd_ingest(
 
     // RFC-0044: Export Hot Stat Cache (mmap) for shim O(1) lookup
     // This enables VFS reads without daemon IPC dependency
+    #[allow(deprecated)]
     {
         use vrift_ipc::ManifestMmapBuilder;
         let mut builder = ManifestMmapBuilder::new();

@@ -50,7 +50,8 @@ pub async fn cmd_shell(project_dir: &Path) -> Result<()> {
         std::process::exit(1);
     }
 
-    let _ = crate::daemon::connect_to_daemon(project_dir).await;
+    // Phase 1.2: Capture DaemonConnection to inject vDird env vars
+    let daemon_conn = crate::daemon::connect_to_daemon(project_dir).await.ok();
 
     // RFC-0052: Manage session persistence
     let _session = crate::active::activate(project_dir, crate::active::ProjectionMode::Solid)?;
@@ -127,6 +128,16 @@ pub async fn cmd_shell(project_dir: &Path) -> Result<()> {
         .env("VRIFT_INCEPTION", "1")
         .env("PATH", new_path);
 
+    // Phase 1.2: Inject vDird socket + mmap paths for zero-RPC inception init
+    if let Some(ref conn) = daemon_conn {
+        if !conn.vdird_socket.is_empty() {
+            cmd.env("VRIFT_VDIRD_SOCKET", &conn.vdird_socket);
+        }
+        if !conn.vdir_mmap_path.is_empty() {
+            cmd.env("VRIFT_VDIR_MMAP", &conn.vdir_mmap_path);
+        }
+    }
+
     // Apply all SSOT-derived env vars
     for (key, value) in &shim_env {
         cmd.env(key, value);
@@ -178,7 +189,8 @@ pub async fn cmd_inception(project_dir: &Path) -> Result<()> {
     }
 
     // RFC-0052: Ensure daemon is running
-    let _ = crate::daemon::connect_to_daemon(project_dir).await;
+    // Phase 1.2: Capture DaemonConnection to inject vDird env vars
+    let daemon_conn = crate::daemon::connect_to_daemon(project_dir).await.ok();
 
     // RFC-0052: Manage session persistence
     let _session = crate::active::activate(project_dir, crate::active::ProjectionMode::Solid)?;
@@ -230,6 +242,15 @@ pub async fn cmd_inception(project_dir: &Path) -> Result<()> {
         println!("export {}=\"{}\"", key, value);
     }
     println!("export VRIFT_INCEPTION=1");
+    // Phase 1.2: Export vDird socket + mmap paths for zero-RPC inception init
+    if let Some(ref conn) = daemon_conn {
+        if !conn.vdird_socket.is_empty() {
+            println!("export VRIFT_VDIRD_SOCKET=\"{}\"", conn.vdird_socket);
+        }
+        if !conn.vdir_mmap_path.is_empty() {
+            println!("export VRIFT_VDIR_MMAP=\"{}\"", conn.vdir_mmap_path);
+        }
+    }
     // Add both .vrift/bin (wrappers) and vrift binary dir to PATH
     if !vrift_bin_dir.is_empty() {
         println!(
@@ -310,6 +331,8 @@ pub fn cmd_wake() -> Result<()> {
     println!("unset VRIFT_PROJECT_ROOT");
     println!("unset VRIFT_INCEPTION");
     println!("unset VRIFT_MANIFEST");
+    println!("unset VRIFT_VDIRD_SOCKET");
+    println!("unset VRIFT_VDIR_MMAP");
     #[cfg(target_os = "macos")]
     {
         println!("unset DYLD_INSERT_LIBRARIES");

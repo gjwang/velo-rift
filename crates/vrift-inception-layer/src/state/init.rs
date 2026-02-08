@@ -367,6 +367,7 @@ impl InceptionLayerState {
 /// that would overflow the 512KB default pthread stack if merged into get().
 #[inline(never)]
 #[cold]
+#[allow(deprecated)]
 pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
     // Check if mmap is explicitly disabled
     unsafe {
@@ -380,76 +381,83 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
         }
     }
 
-    // Get VRIFT_MANIFEST to derive project root and hash
-    let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
-    if manifest_ptr.is_null() {
-        return (ptr::null(), 0);
-    }
-    let _manifest_path = unsafe { CStr::from_ptr(manifest_ptr).to_string_lossy() };
+    // Phase 1.3: Read VRIFT_VDIR_MMAP env (zero-RPC, set by CLI)
+    let vdir_mmap_ptr = unsafe { libc::getenv(c"VRIFT_VDIR_MMAP".as_ptr()) };
 
-    // Construct path on stack: {project_root}/.vrift/manifest.mmap
+    // Construct path on stack
     let mut path_buf = [0u8; 1024];
     let mut writer = crate::macros::StackWriter::new(&mut path_buf);
     use std::fmt::Write;
 
-    let root_bytes = unsafe { CStr::from_ptr(manifest_ptr).to_bytes() };
-
-    // Naively assume project root is parent of manifest
-    let mut last_slash = 0;
-    for (i, &b) in root_bytes.iter().enumerate() {
-        if b == b'/' {
-            last_slash = i;
+    if !vdir_mmap_ptr.is_null() {
+        // Phase 1.3: Direct path from env — no derivation needed
+        let vdir_str = unsafe { CStr::from_ptr(vdir_mmap_ptr) };
+        let _ = write!(writer, "{}\0", vdir_str.to_str().unwrap_or(""));
+    } else {
+        // Fallback: Derive from VRIFT_MANIFEST (legacy path)
+        let manifest_ptr = unsafe { libc::getenv(c"VRIFT_MANIFEST".as_ptr()) };
+        if manifest_ptr.is_null() {
+            return (ptr::null(), 0);
         }
+
+        let root_bytes = unsafe { CStr::from_ptr(manifest_ptr).to_bytes() };
+
+        // Naively assume project root is parent of manifest
+        let mut last_slash = 0;
+        for (i, &b) in root_bytes.iter().enumerate() {
+            if b == b'/' {
+                last_slash = i;
+            }
+        }
+
+        let root_len = if last_slash > 0 {
+            last_slash
+        } else {
+            root_bytes.len()
+        };
+
+        // If ending in .vrift, strip it too
+        let root_part = &root_bytes[..root_len];
+        let final_root_len = if root_part.ends_with(b"/.vrift") {
+            root_len - 7
+        } else if root_part.ends_with(b".vrift") {
+            root_len - 6
+        } else {
+            root_len
+        };
+
+        let root_str = std::str::from_utf8(&root_bytes[..final_root_len]).unwrap_or("");
+
+        // BUG-007b: Use raw_realpath instead of std::fs::canonicalize()
+        let canon_root = unsafe {
+            let mut resolved = [0u8; libc::PATH_MAX as usize];
+            let root_cstr = std::ffi::CString::new(root_str).unwrap_or_default();
+            #[cfg(target_os = "macos")]
+            let result = crate::syscalls::macos_raw::raw_realpath(
+                root_cstr.as_ptr(),
+                resolved.as_mut_ptr() as *mut libc::c_char,
+            );
+            #[cfg(target_os = "linux")]
+            let result = libc::realpath(
+                root_cstr.as_ptr(),
+                resolved.as_mut_ptr() as *mut libc::c_char,
+            );
+            if !result.is_null() {
+                let resolved_str = CStr::from_ptr(result).to_string_lossy().to_string();
+                PathBuf::from(resolved_str)
+            } else {
+                PathBuf::from(root_str)
+            }
+        };
+        let canon_root_str = canon_root.to_string_lossy();
+
+        let project_id = vrift_config::path::compute_project_id(canon_root_str.as_ref());
+        let mmap_path = vrift_config::path::get_vdir_mmap_path(&project_id)
+            .unwrap_or_else(|| PathBuf::from(format!("{}/.vrift/manifest.mmap", canon_root_str)));
+
+        let _ = write!(writer, "{}\0", mmap_path.display());
     }
 
-    let root_len = if last_slash > 0 {
-        last_slash
-    } else {
-        root_bytes.len()
-    };
-
-    // If ending in .vrift, strip it too
-    let root_part = &root_bytes[..root_len];
-    let final_root_len = if root_part.ends_with(b"/.vrift") {
-        root_len - 7
-    } else if root_part.ends_with(b".vrift") {
-        // rare case if root is simply ".vrift"
-        root_len - 6
-    } else {
-        root_len
-    };
-
-    let root_str = std::str::from_utf8(&root_bytes[..final_root_len]).unwrap_or("");
-
-    // BUG-007b: Use raw_realpath instead of std::fs::canonicalize()
-    let canon_root = unsafe {
-        let mut resolved = [0u8; libc::PATH_MAX as usize];
-        let root_cstr = std::ffi::CString::new(root_str).unwrap_or_default();
-        #[cfg(target_os = "macos")]
-        let result = crate::syscalls::macos_raw::raw_realpath(
-            root_cstr.as_ptr(),
-            resolved.as_mut_ptr() as *mut libc::c_char,
-        );
-        #[cfg(target_os = "linux")]
-        let result = libc::realpath(
-            root_cstr.as_ptr(),
-            resolved.as_mut_ptr() as *mut libc::c_char,
-        );
-        if !result.is_null() {
-            let resolved_str = CStr::from_ptr(result).to_string_lossy().to_string();
-            PathBuf::from(resolved_str)
-        } else {
-            PathBuf::from(root_str)
-        }
-    };
-    let canon_root_str = canon_root.to_string_lossy();
-
-    // RFC-0044: Use standardized VDir mmap path managed by daemon
-    let project_id = vrift_config::path::compute_project_id(canon_root_str.as_ref());
-    let mmap_path = vrift_config::path::get_vdir_mmap_path(&project_id)
-        .unwrap_or_else(|| PathBuf::from(format!("{}/.vrift/manifest.mmap", canon_root_str)));
-
-    let _ = write!(writer, "{}\0", mmap_path.display());
     let mmap_path_ptr = path_buf.as_ptr() as *const libc::c_char;
 
     #[cfg(target_os = "macos")]
@@ -495,7 +503,7 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
             ptr::null_mut(),
             size,
             libc::PROT_READ,
-            libc::MAP_PRIVATE,
+            libc::MAP_SHARED, // Phase 1.3: MAP_SHARED for real-time vDird visibility
             fd,
             0,
         )
@@ -506,7 +514,7 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
             ptr::null_mut(),
             size,
             libc::PROT_READ,
-            libc::MAP_PRIVATE,
+            libc::MAP_SHARED, // Phase 1.3: MAP_SHARED for real-time vDird visibility
             fd,
             0,
         )
@@ -524,13 +532,22 @@ pub(crate) fn open_manifest_mmap() -> (*const u8, usize) {
         return (ptr::null(), 0);
     }
 
-    // Validate header magic
-    if size < vrift_ipc::ManifestMmapHeader::SIZE {
+    // Phase 1.3: Validate VDirHeader magic instead of ManifestMmapHeader
+    const VDIR_HEADER_SIZE: usize = 64; // sizeof(VDirHeader)
+    const VDIR_MAGIC: u32 = 0x56524654; // "VRFT"
+    if size < VDIR_HEADER_SIZE {
         unsafe { libc::munmap(ptr, size) };
         return (ptr::null(), 0);
     }
-    let header = unsafe { &*(ptr as *const vrift_ipc::ManifestMmapHeader) };
-    if !header.is_valid() {
+    let magic = unsafe { *(ptr as *const u32) };
+    if magic != VDIR_MAGIC {
+        // Fallback: Try legacy ManifestMmapHeader format
+        if size >= vrift_ipc::ManifestMmapHeader::SIZE {
+            let header = unsafe { &*(ptr as *const vrift_ipc::ManifestMmapHeader) };
+            if header.is_valid() {
+                return (ptr as *const u8, size);
+            }
+        }
         unsafe { libc::munmap(ptr, size) };
         return (ptr::null(), 0);
     }

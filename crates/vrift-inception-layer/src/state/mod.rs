@@ -792,6 +792,7 @@ pub(crate) static SYNTHETIC_DIR_COUNTER: std::sync::atomic::AtomicUsize =
 /// Returns None if entry not found or mmap not available.
 /// ZERO ALLOCATIONS - safe to call from any context.
 #[inline(always)]
+#[allow(deprecated)]
 pub(crate) fn mmap_lookup(
     mmap_ptr: *const u8,
     mmap_size: usize,
@@ -827,7 +828,120 @@ pub(crate) fn mmap_lookup(
     None // Table full, not found
 }
 
+// ============================================================================
+// Phase 1.3: vdir_lookup — seqlock-protected O(1) stat from VDir mmap
+// ============================================================================
+
+/// Result from VDir lookup (VDirEntry fields needed for stat)
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VDirStatResult {
+    pub size: u64,
+    pub mtime_sec: i64,
+    pub mtime_nsec: u32,
+    pub mode: u32,
+    pub flags: u16,
+}
+
+/// VDir constants (duplicated from vrift-vdird to avoid cross-crate dep)
+const VDIR_MAGIC: u32 = 0x56524654; // "VRFT"
+const VDIR_HEADER_SIZE: usize = 64;
+const VDIR_ENTRY_SIZE: usize = 72; // sizeof(VDirEntry)
+
+/// VDirEntry layout offsets (from vrift-vdird/src/vdir.rs)
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VDirEntryRaw {
+    path_hash: u64,
+    _cas_hash: [u8; 32],
+    size: u64,
+    mtime_sec: i64,
+    mtime_nsec: u32,
+    mode: u32,
+    flags: u16,
+    _pad: [u16; 3],
+}
+
+/// O(1) seqlock-protected stat lookup from VDir MAP_SHARED mmap.
+/// ZERO ALLOCATIONS, ZERO LOCKS, ZERO SYSCALLS — safe for PSFS hot path.
+#[inline(always)]
+pub(crate) fn vdir_lookup(
+    mmap_ptr: *const u8,
+    mmap_size: usize,
+    path: &str,
+) -> Option<VDirStatResult> {
+    if mmap_ptr.is_null() || mmap_size < VDIR_HEADER_SIZE {
+        return None;
+    }
+
+    // Validate magic (first 4 bytes of header)
+    let magic = unsafe { *(mmap_ptr as *const u32) };
+    if magic != VDIR_MAGIC {
+        return None;
+    }
+
+    // Read header fields we need (offsets from VDirHeader layout)
+    // generation is at offset 8 (after magic:u32 + version:u32)
+    let gen_ptr = unsafe { &*((mmap_ptr as usize + 8) as *const AtomicU64) };
+    // entry_count at offset 16 (u32), table_capacity at offset 20 (u32), table_offset at offset 24 (u32)
+    let table_capacity = unsafe { *((mmap_ptr as usize + 20) as *const u32) } as usize;
+    let table_offset = unsafe { *((mmap_ptr as usize + 24) as *const u32) } as usize;
+
+    if table_capacity == 0 {
+        return None;
+    }
+
+    let path_hash = vrift_ipc::fnv1a_hash(path);
+    let start_slot = (path_hash as usize) % table_capacity;
+
+    // Seqlock read loop
+    loop {
+        let g1 = gen_ptr.load(Ordering::Acquire);
+        if g1 & 1 != 0 {
+            // Writer active (odd generation) — spin
+            core::hint::spin_loop();
+            continue;
+        }
+
+        // O(1) hash table lookup with linear probing
+        let mut result: Option<VDirStatResult> = None;
+        for i in 0..table_capacity {
+            let slot = (start_slot + i) % table_capacity;
+            let entry_offset = table_offset + slot * VDIR_ENTRY_SIZE;
+            if entry_offset + VDIR_ENTRY_SIZE > mmap_size {
+                break;
+            }
+            let entry = unsafe { &*(mmap_ptr.add(entry_offset) as *const VDirEntryRaw) };
+
+            if entry.path_hash == 0 {
+                break; // Empty slot = not found
+            }
+
+            if entry.path_hash == path_hash {
+                result = Some(VDirStatResult {
+                    size: entry.size,
+                    mtime_sec: entry.mtime_sec,
+                    mtime_nsec: entry.mtime_nsec,
+                    mode: entry.mode,
+                    flags: entry.flags,
+                });
+                break;
+            }
+        }
+
+        // Re-read generation to check for concurrent write
+        let g2 = gen_ptr.load(Ordering::Acquire);
+        if g1 != g2 {
+            // Data changed during read — retry
+            core::hint::spin_loop();
+            continue;
+        }
+
+        return result;
+    }
+}
+
 /// O(1) readdir lookup in mmap'd manifest
+#[allow(deprecated)]
 pub(crate) fn mmap_dir_lookup(
     mmap_ptr: *const u8,
     mmap_size: usize,
@@ -994,8 +1108,21 @@ impl InceptionLayerState {
         unsafe { Some(&*ptr) }
     }
 
+    #[allow(deprecated)]
     pub(crate) fn query_manifest(&self, vpath: &VfsPath) -> Option<vrift_ipc::VnodeEntry> {
-        // First try Hot Stat Cache (O(1) mmap lookup)
+        // Phase 1.3: Try seqlock-protected VDir lookup first
+        if let Some(entry) = vdir_lookup(self.mmap_ptr, self.mmap_size, vpath.manifest_key.as_str())
+        {
+            return Some(vrift_ipc::VnodeEntry {
+                content_hash: [0u8; 32],
+                size: entry.size,
+                mtime: entry.mtime_sec as u64,
+                mode: entry.mode,
+                flags: entry.flags,
+                _pad: 0,
+            });
+        }
+        // Fallback: Try legacy ManifestMmapHeader format
         if let Some(entry) = mmap_lookup(self.mmap_ptr, self.mmap_size, vpath.manifest_key.as_str())
         {
             return Some(vrift_ipc::VnodeEntry {

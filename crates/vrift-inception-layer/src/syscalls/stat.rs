@@ -78,20 +78,20 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
         // If not found in open FDs (e.g. closed but not reingested), fall back to IPC
         // but SKIP mmap cache.
     } else {
-        // Try Hot Stat Cache (O(1) mmap lookup)
-        if let Some(entry) = mmap_lookup(state.mmap_ptr, state.mmap_size, manifest_path) {
-            inception_record!(EventType::StatHit, vpath.manifest_key_hash, 1); // 1 = mmap hit
+        // Try Hot Stat Cache — Phase 1.3: seqlock-protected VDir lookup
+        if let Some(entry) = vdir_lookup(state.mmap_ptr, state.mmap_size, manifest_path) {
+            inception_record!(EventType::StatHit, vpath.manifest_key_hash, 1); // 1 = vdir hit
             std::ptr::write_bytes(buf, 0, 1);
             (*buf).st_size = entry.size as _;
             #[cfg(target_os = "macos")]
             {
                 (*buf).st_mode = entry.mode as u16;
-                (*buf).st_mtime = entry.mtime as _;
+                (*buf).st_mtime = entry.mtime_sec as _;
             }
             #[cfg(target_os = "linux")]
             {
                 (*buf).st_mode = entry.mode as _;
-                (*buf).st_mtime = entry.mtime as _;
+                (*buf).st_mtime = entry.mtime_sec as _;
             }
             (*buf).st_dev = 0x52494654; // "RIFT"
             (*buf).st_nlink = 1;
