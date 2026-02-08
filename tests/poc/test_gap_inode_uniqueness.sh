@@ -3,12 +3,13 @@
 # Tests actual inode behavior, not source code
 # Problem: CAS dedup means different logical files → same inode
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR=$(mktemp -d)
 
 echo "=== P1 Gap Test: st_ino Uniqueness Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create two files with SAME content

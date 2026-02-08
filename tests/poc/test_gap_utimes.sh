@@ -4,13 +4,14 @@
 #
 # RISK: HIGH - Make/Ninja use this for dependency tracking
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR=$(mktemp -d)
 export TEST_DIR
 
 echo "=== Compiler Gap: utimes/futimes Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create test file

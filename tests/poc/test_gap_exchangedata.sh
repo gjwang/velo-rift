@@ -7,6 +7,7 @@
 # ============================================================================
 
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 
 # macOS only
 if [ "$(uname)" != "Darwin" ]; then
@@ -69,7 +70,7 @@ EOF
 
 clang -o "$WORK_DIR/test_exchangedata" "$WORK_DIR/test_exchangedata.c" 2>/dev/null || {
     echo -e "${YELLOW}⚠️  exchangedata not available in SDK, test cannot run${NC}"
-    rm -rf "$WORK_DIR"
+    safe_rm "$WORK_DIR"
     exit 0
 }
 
@@ -113,6 +114,6 @@ else
 fi
 
 # Cleanup
-rm -rf "$WORK_DIR"
+safe_rm "$WORK_DIR"
 echo "================================================================"
 exit $EXIT_CODE

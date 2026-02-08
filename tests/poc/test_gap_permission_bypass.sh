@@ -1,5 +1,6 @@
 #!/bin/bash
 # No set -e to allow proper error handling
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
@@ -53,7 +54,7 @@ RESULT=$("$TEST_DIR/perm_test" "$VELO_PROJECT_ROOT/protected.txt" 2>&1)
 EXIT_CODE=$?
 echo "$RESULT"
 
-rm -rf "$TEST_DIR"
+safe_rm "$TEST_DIR"
 
 if [[ $EXIT_CODE -eq 0 ]]; then
     echo "✅ PASS: chmod blocked or virtualized."

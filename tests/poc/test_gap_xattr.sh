@@ -2,6 +2,7 @@
 # RFC-0049 Gap Test: xattr (Extended Attributes)
 # Priority: P3
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Tests actual xattr behavior, not source code
 
@@ -13,7 +14,7 @@ SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.dylib"
 
 echo "=== P3 Gap Test: xattr Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create test file

@@ -4,6 +4,7 @@
 #
 # RISK: HIGH - GCC uses ftruncate when rewriting .o files
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
@@ -12,7 +13,7 @@ SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.dylib"
 
 echo "=== Compiler Gap: ftruncate Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create test file with content

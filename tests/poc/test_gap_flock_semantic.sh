@@ -6,6 +6,7 @@
 # Process B tries to acquire — should block until A releases
 
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -16,7 +17,7 @@ echo ""
 TEST_DIR=$(mktemp -d)
 
 cleanup() {
-    rm -rf "$TEST_DIR"
+    safe_rm "$TEST_DIR"
 }
 trap cleanup EXIT
 

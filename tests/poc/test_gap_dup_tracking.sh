@@ -4,13 +4,14 @@
 # Priority: P1
 # NOTE: Uses C program because Python os.dup() uses direct syscall on macOS
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
 export TEST_DIR
 
 echo "=== P1 Gap Test: dup/dup2 FD Tracking ==="
 
-cleanup() { rm -rf "$TEST_DIR"; rm -f /tmp/test_dup_gap; }
+cleanup() { safe_rm "$TEST_DIR"; rm -f /tmp/test_dup_gap; }
 trap cleanup EXIT
 
 # Create test file

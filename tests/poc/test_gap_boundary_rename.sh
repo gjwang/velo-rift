@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
@@ -97,9 +98,10 @@ set +e
 "$TEST_DIR/boundary_test" "$VELO_PROJECT_ROOT/test.txt" "$EXTERNAL_DIR/test.txt"
 RET=$?
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 
 kill $DAEMON_PID || true
-rm -rf "$TEST_DIR"
+safe_rm "$TEST_DIR"
 
 if [[ $RET -eq 2 ]]; then
     echo "✅ PASS: VFS boundary enforced (EXDEV returned)"

@@ -3,6 +3,7 @@
 # Tests actual copy behavior, not source code
 # Priority: P0
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,7 +11,7 @@ TEST_DIR=$(mktemp -d)
 
 echo "=== P0 Gap Test: copy_file_range() Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create source file

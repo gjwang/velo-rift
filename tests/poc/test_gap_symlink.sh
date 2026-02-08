@@ -4,12 +4,13 @@
 #
 # RISK: MEDIUM - Library versioning uses symlinks
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR=$(mktemp -d)
 
 echo "=== Compiler Gap: symlink Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create test file

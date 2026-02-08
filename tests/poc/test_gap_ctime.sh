@@ -3,6 +3,7 @@
 # Priority: P2
 # Tests actual ctime behavior, not source code
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
@@ -11,7 +12,7 @@ SHIM_PATH="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.dylib"
 
 echo "=== P2 Gap Test: ctime Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create test file

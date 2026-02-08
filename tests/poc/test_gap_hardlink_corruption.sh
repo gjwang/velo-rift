@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
@@ -83,9 +84,10 @@ set +e
 "$TEST_DIR/link_test" "$VELO_PROJECT_ROOT/blobs.txt" "$EXPORT_PATH"
 RET=$?
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 
 kill $DAEMON_PID || true
-rm -rf "$TEST_DIR"
+safe_rm "$TEST_DIR"
 
 if [[ $RET -eq 0 ]]; then
     echo "❌ FAIL: Protection Bypass. Hard link created directly to underlying storage."

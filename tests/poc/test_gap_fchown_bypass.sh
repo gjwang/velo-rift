@@ -7,6 +7,7 @@
 # ============================================================================
 
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VRIFT_BIN="$PROJECT_ROOT/target/release/vrift"
@@ -93,6 +94,6 @@ else
 fi
 
 # Cleanup
-rm -rf "$WORK_DIR"
+safe_rm "$WORK_DIR"
 echo "================================================================"
 exit $EXIT_CODE

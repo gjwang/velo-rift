@@ -3,6 +3,7 @@
 # Tests actual fcntl locking behavior, not source code
 # Priority: P1
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,7 +12,7 @@ export TEST_DIR
 
 echo "=== P1 Gap Test: fcntl() Record Locking Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create test file

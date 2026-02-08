@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TEST_DIR=$(mktemp -d)
@@ -105,5 +106,5 @@ export VRIFT_VFS_PREFIX="$VELO_PROJECT_ROOT"
 "$TEST_DIR/mutation_test" "$VELO_PROJECT_ROOT/mutation_test.txt"
 RET=$?
 
-rm -rf "$TEST_DIR"
+safe_rm "$TEST_DIR"
 exit $RET

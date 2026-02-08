@@ -3,6 +3,7 @@
 # Tests actual fchdir behavior, not source code
 # Priority: P1
 
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,7 +11,7 @@ TEST_DIR=$(mktemp -d)
 
 echo "=== P1 Gap Test: fchdir() Behavior ==="
 
-cleanup() { rm -rf "$TEST_DIR"; }
+cleanup() { safe_rm "$TEST_DIR"; }
 trap cleanup EXIT
 
 # Create test directory

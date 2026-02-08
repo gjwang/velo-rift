@@ -2,6 +2,7 @@
 # Gap Test: mkdirat bypass via file descriptor
 # Proves that mkdirat can create directories even when path-based mkdir is shimmed.
 set -e
+source "$(dirname "${BASH_SOURCE[0]}")/../helpers/test_common.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -11,7 +12,7 @@ SHIM_LIB="${PROJECT_ROOT}/target/release/libvrift_inception_layer.dylib"
 [ ! -f "$SHIM_LIB" ] && SHIM_LIB="${PROJECT_ROOT}/target/debug/libvrift_inception_layer.dylib"
 
 WORK_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK_DIR"' EXIT
+trap 'safe_rm "$WORK_DIR"' EXIT
 
 # Inline: test_mkdir_shim — path-based mkdir (should be blocked by shim)
 cat > "$WORK_DIR/test_mkdir_shim.c" << 'EOF'
