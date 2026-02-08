@@ -5,9 +5,7 @@ use vrift_config::path::{normalize_nonexistent, normalize_or_original};
 use vrift_ipc::{VeloRequest, VeloResponse, PROTOCOL_VERSION};
 
 fn get_socket_path() -> PathBuf {
-    let path = std::env::var("VRIFT_SOCKET_PATH")
-        .unwrap_or_else(|_| vrift_config::DEFAULT_SOCKET_PATH.to_string());
-    PathBuf::from(path)
+    vrift_config::config().socket_path().to_path_buf()
 }
 
 pub async fn check_status(project_root: &Path) -> Result<()> {

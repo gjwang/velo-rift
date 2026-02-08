@@ -384,8 +384,8 @@ fn export_mmap_cache(manifest: &LmdbManifest, project_root: &Path) {
 async fn start_daemon() -> Result<()> {
     tracing::info!("vriftd: Starting multi-tenant daemon...");
 
-    let socket_path = std::env::var("VRIFT_SOCKET_PATH")
-        .unwrap_or_else(|_| vrift_config::DEFAULT_SOCKET_PATH.to_string());
+    let cfg = vrift_config::Config::load().unwrap_or_default();
+    let socket_path = cfg.socket_path().to_string_lossy().to_string();
     let path = Path::new(&socket_path);
 
     if path.exists() {
@@ -396,9 +396,8 @@ async fn start_daemon() -> Result<()> {
     tracing::info!("vriftd: Listening on {}", socket_path);
 
     // Initialize shared state
-    // RFC-0050: VR_THE_SOURCE is the canonical env var (VRIFT_CAS_ROOT is deprecated)
-    let cas_root_str = std::env::var("VR_THE_SOURCE")
-        .unwrap_or_else(|_| vrift_config::DEFAULT_CAS_ROOT.to_string());
+    // RFC-0050: VR_THE_SOURCE via unified Config SSOT
+    let cas_root_str = cfg.cas_root().display().to_string();
     let cas_root = vrift_manifest::normalize_path(&cas_root_str);
     let cas = vrift_cas::CasStore::new(&cas_root)?;
 

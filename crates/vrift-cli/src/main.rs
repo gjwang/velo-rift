@@ -567,32 +567,45 @@ async fn cmd_init(directory: &Path) -> Result<()> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".to_string());
 
-    // Check if already initialized
-    if vrift_dir.exists() {
-        eprintln!(
-            "{} Project already initialized at {}",
-            style("ℹ").blue(),
-            style(vrift_dir.display()).dim()
-        );
-        eprintln!();
-        eprintln!(
-            "{}",
-            style("Run 'vrift' or 'eval $(vrift inception)' to enter VFS mode.").dim()
-        );
-        return Ok(());
-    }
-
-    // Create .vrift directory structure
+    // Create .vrift directory structure (idempotent)
     fs::create_dir_all(&vrift_dir)?;
     fs::create_dir_all(vrift_dir.join("bin"))?;
     fs::create_dir_all(vrift_dir.join("locks"))?;
 
-    // Create manifest.lmdb directory and initialize LMDB database
-    let project_id = vrift_config::path::compute_project_id(directory);
+    // 1. Generate .vrift/config.toml (project SSOT)
+    let project_config_path = vrift_dir.join("config.toml");
+    if !project_config_path.exists() {
+        let config_content = vrift_config::Config::init_toml();
+        fs::write(&project_config_path, config_content)?;
+    }
+
+    // 2. Ensure ~/.vrift/the_source/ exists (global CAS — managed by vriftd)
+    let cfg = vrift_config::Config::load().unwrap_or_default();
+    let the_source = cfg.cas_root();
+    let the_source_resolved = vrift_manifest::normalize_path(&the_source.to_string_lossy());
+    fs::create_dir_all(&the_source_resolved).with_context(|| {
+        format!(
+            "Failed to create TheSource at {}",
+            the_source_resolved.display()
+        )
+    })?;
+
+    // 3. Create ~/.vrift/config.toml (global defaults) if missing
+    if let Some(global_config_path) = vrift_config::Config::global_config_path() {
+        if !global_config_path.exists() {
+            if let Some(parent) = global_config_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let global_content = vrift_config::Config::init_toml();
+            fs::write(&global_config_path, global_content)?;
+        }
+    }
+
+    // 4. Initialize manifest LMDB database
+    let project_id = vrift_config::path::compute_project_id(&directory);
     let manifest_path = vrift_config::path::get_manifest_db_path(&project_id)
         .ok_or_else(|| anyhow::anyhow!("Could not determine manifest path"))?;
 
-    // Create parent directory for manifest
     if let Some(parent) = manifest_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -609,10 +622,15 @@ async fn cmd_init(directory: &Path) -> Result<()> {
         style(&project_name).green().bold()
     );
     eprintln!();
-    eprintln!("   {} Created {}", CHECK, style(".vrift/").dim());
+    eprintln!("   {} Created {}", CHECK, style(".vrift/config.toml").dim());
     eprintln!("   {} Created {}", CHECK, style(".vrift/bin/").dim());
     eprintln!(
-        "   {} Initialized {}",
+        "   {} TheSource™ at {}",
+        CHECK,
+        style(the_source_resolved.display()).dim()
+    );
+    eprintln!(
+        "   {} Manifest at {}",
         CHECK,
         style(manifest_path.display()).dim()
     );

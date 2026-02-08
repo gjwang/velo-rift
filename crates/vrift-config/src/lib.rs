@@ -49,6 +49,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub project: ProjectConfig,
     pub storage: StorageConfig,
     pub ingest: IngestConfig,
     pub tiers: TierConfig,
@@ -57,8 +58,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load config from standard locations
+    /// Load config from standard locations (CWD-relative project config)
     pub fn load() -> Result<Self, ConfigError> {
+        Self::load_for_project(Path::new("."))
+    }
+
+    /// Load config for a specific project root directory.
+    /// Resolution order: global → project → env vars.
+    pub fn load_for_project(project_root: &Path) -> Result<Self, ConfigError> {
         let mut config = Config::default();
 
         // 1. Load global config (~/.vrift/config.toml)
@@ -70,17 +77,26 @@ impl Config {
             }
         }
 
-        // 2. Load project config (.vrift/config.toml) - overrides global
-        let project_path = Path::new(".vrift/config.toml");
-        if project_path.exists() {
-            debug!("Loading project config from {:?}", project_path);
-            let contents = std::fs::read_to_string(project_path)?;
+        // 2. Load project config (<project_root>/.vrift/config.toml)
+        let project_config_path = project_root.join(".vrift/config.toml");
+        if project_config_path.exists() {
+            debug!("Loading project config from {:?}", project_config_path);
+            let contents = std::fs::read_to_string(&project_config_path)?;
             let project_config: Config = toml::from_str(&contents)?;
             config.merge(project_config);
         }
 
         // 3. Apply environment variable overrides
         config.apply_env_overrides();
+
+        // 4. Resolve project root to absolute path if relative
+        if config.project.root.as_os_str() == "." {
+            if let Ok(abs) = std::fs::canonicalize(project_root) {
+                config.project.root = abs;
+            } else {
+                config.project.root = project_root.to_path_buf();
+            }
+        }
 
         Ok(config)
     }
@@ -90,23 +106,66 @@ impl Config {
         dirs::home_dir().map(|h| h.join(".vrift/config.toml"))
     }
 
-    /// Merge another config (project overrides)
+    /// Merge another config (project overrides global).
+    /// Non-default values from `other` replace values in `self`.
     fn merge(&mut self, other: Config) {
-        // Only merge non-default values (simplified: just replace)
-        // A more sophisticated merge would check each field
+        // Project
+        let default_project = ProjectConfig::default();
+        if other.project.vfs_prefix != default_project.vfs_prefix {
+            self.project.vfs_prefix = other.project.vfs_prefix;
+        }
+        if other.project.root != default_project.root {
+            self.project.root = other.project.root;
+        }
+        if other.project.manifest != default_project.manifest {
+            self.project.manifest = other.project.manifest;
+        }
+
+        // Storage
+        let default_storage = StorageConfig::default();
+        if other.storage.the_source != default_storage.the_source {
+            self.storage.the_source = other.storage.the_source;
+        }
+        if other.storage.default_mode != default_storage.default_mode {
+            self.storage.default_mode = other.storage.default_mode;
+        }
+
+        // Daemon
+        let default_daemon = DaemonConfig::default();
+        if other.daemon.socket != default_daemon.socket {
+            self.daemon.socket = other.daemon.socket;
+        }
+        if other.daemon.debug != default_daemon.debug {
+            self.daemon.debug = other.daemon.debug;
+        }
+
+        // Tiers
         if !other.tiers.tier1_patterns.is_empty() {
             self.tiers.tier1_patterns = other.tiers.tier1_patterns;
         }
         if !other.tiers.tier2_patterns.is_empty() {
             self.tiers.tier2_patterns = other.tiers.tier2_patterns;
         }
+
+        // Security
         if !other.security.exclude_patterns.is_empty() {
             self.security.exclude_patterns = other.security.exclude_patterns;
         }
     }
 
-    /// Apply environment variable overrides
+    /// Apply environment variable overrides (highest priority)
     fn apply_env_overrides(&mut self) {
+        // Project
+        if let Ok(root) = std::env::var("VRIFT_PROJECT_ROOT") {
+            self.project.root = PathBuf::from(root);
+        }
+        if let Ok(prefix) = std::env::var("VRIFT_VFS_PREFIX") {
+            self.project.vfs_prefix = prefix;
+        }
+        if let Ok(manifest) = std::env::var("VRIFT_MANIFEST") {
+            self.project.manifest = PathBuf::from(manifest);
+        }
+
         // Storage
         if let Ok(path) = std::env::var("VR_THE_SOURCE") {
             self.storage.the_source = PathBuf::from(path);
@@ -134,7 +193,6 @@ impl Config {
         if std::env::var("VRIFT_DEBUG").is_ok() {
             self.daemon.debug = true;
         }
-        // New path overrides
         if let Ok(mmap) = std::env::var("VRIFT_MMAP_PATH") {
             self.daemon.mmap_path = PathBuf::from(mmap);
         }
@@ -144,6 +202,70 @@ impl Config {
         if let Ok(log) = std::env::var("VRIFT_LOG_DIR") {
             self.daemon.log_dir = PathBuf::from(log);
         }
+    }
+
+    /// Derive environment variables for shim-wrapped processes.
+    /// This is the SSOT → shim bridge: TOML config → env vars.
+    pub fn shim_env(&self) -> Vec<(String, String)> {
+        let mut env = vec![
+            (
+                "VR_THE_SOURCE".to_string(),
+                self.storage.the_source.display().to_string(),
+            ),
+            (
+                "VRIFT_VFS_PREFIX".to_string(),
+                self.project.vfs_prefix.clone(),
+            ),
+            (
+                "VRIFT_PROJECT_ROOT".to_string(),
+                self.project.root.display().to_string(),
+            ),
+            (
+                "VRIFT_SOCKET_PATH".to_string(),
+                self.daemon.socket.display().to_string(),
+            ),
+            (
+                "VRIFT_MANIFEST".to_string(),
+                self.project.manifest.display().to_string(),
+            ),
+        ];
+        if self.daemon.debug {
+            env.push(("VRIFT_DEBUG".to_string(), "1".to_string()));
+        }
+        env
+    }
+
+    /// Generate TOML template for `vrift init`.
+    pub fn init_toml() -> String {
+        let default = Config::default();
+        format!(
+            r#"# Velo Rift project configuration
+# Documentation: https://github.com/velo-sh/velo-rift
+
+[project]
+vfs_prefix = "{vfs_prefix}"
+# manifest = ".vrift/manifest.lmdb"  # relative to project root
+
+[storage]
+the_source = "{the_source}"
+# default_mode = "solid"
+
+[daemon]
+# socket = "{socket}"
+# debug = false
+
+# [ingest]
+# threads = auto
+# default_tier = "tier2"
+
+# [tiers]
+# tier1_patterns = ["node_modules/", ".cargo/registry/"]
+# tier2_patterns = ["target/", "build/"]
+"#,
+            vfs_prefix = default.project.vfs_prefix,
+            the_source = default.storage.the_source.display(),
+            socket = default.daemon.socket.display(),
+        )
     }
 
     /// Generate default config TOML string
@@ -194,11 +316,35 @@ impl Config {
     }
 }
 
+/// Project-level configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProjectConfig {
+    /// Project root directory (auto-resolved to absolute path)
+    pub root: PathBuf,
+    /// Virtual filesystem prefix for shim path interception
+    pub vfs_prefix: String,
+    /// Manifest LMDB path (relative to project root)
+    pub manifest: PathBuf,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::from("."),
+            vfs_prefix: "/vrift".to_string(),
+            manifest: PathBuf::from(".vrift/manifest.lmdb"),
+        }
+    }
+}
+
 /// Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
-    /// TheSource™ CAS root directory
+    /// TheSource™ — canonical CAS storage directory.
+    /// Global singleton managed by vriftd.
+    /// Env override: VR_THE_SOURCE
     pub the_source: PathBuf,
     /// Default projection mode: solid or phantom
     pub default_mode: String,

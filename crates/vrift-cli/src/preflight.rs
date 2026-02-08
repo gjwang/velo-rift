@@ -84,10 +84,8 @@ pub fn run_preflight(project_dir: &Path) -> PreflightResult {
     }
 
     // Check 4: Socket exists and daemon responds
-    let socket_path = PathBuf::from(
-        std::env::var("VRIFT_SOCKET_PATH")
-            .unwrap_or_else(|_| vrift_config::DEFAULT_SOCKET_PATH.to_string()),
-    );
+    let cfg = vrift_config::config();
+    let socket_path = cfg.socket_path().to_path_buf();
     if !socket_path.exists() {
         result.errors.push(format!(
             "Daemon socket not found. Run: {}",
@@ -177,10 +175,10 @@ fn test_socket_connection(socket_path: &Path) -> Result<(), String> {
 
 /// Check if CAS root is configured and writable
 fn check_cas_writable() -> Result<(), String> {
-    let cas_root = std::env::var("VR_THE_SOURCE")
-        .unwrap_or_else(|_| vrift_config::DEFAULT_CAS_ROOT.to_string());
+    let cfg = vrift_config::config();
+    let cas_root_str = cfg.cas_root().display().to_string();
 
-    let cas_path = Path::new(&cas_root);
+    let cas_path = Path::new(&cas_root_str);
 
     // CAS doesn't need to exist yet (will be created), but parent must be writable
     if cas_path.exists() {
