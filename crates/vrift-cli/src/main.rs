@@ -452,6 +452,7 @@ async fn async_main(cli: Cli, cas_root: std::path::PathBuf) -> Result<()> {
                 is_phantom,
                 is_tier1,
                 Some(prefix_val),
+                Some(&cas_root),
             )
             .await
             {
@@ -1954,7 +1955,7 @@ async fn cmd_watch(_cas_root: &Path, directory: &Path, output: &Path) -> Result<
 
     // Initial ingest via daemon
     println!("\n[Initial Scan]");
-    daemon::ingest_via_daemon(directory, output, None, false, false, None).await?;
+    daemon::ingest_via_daemon(directory, output, None, false, false, None, None).await?;
 
     // Create a channel to receive the events.
     let (tx, rx) = channel();
@@ -1987,7 +1988,7 @@ async fn cmd_watch(_cas_root: &Path, directory: &Path, output: &Path) -> Result<
                         if last_ingest.elapsed() > debounce_duration {
                             println!("\n[Change Detected] Re-ingesting...");
                             if let Err(e) = daemon::ingest_via_daemon(
-                                directory, output, None, false, false, None,
+                                directory, output, None, false, false, None, None,
                             )
                             .await
                             {

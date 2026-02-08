@@ -88,6 +88,7 @@ impl CommandHandler {
                 phantom,
                 tier1,
                 prefix,
+                cas_root,
             } => {
                 self.handle_ingest_full_scan(
                     &path,
@@ -96,6 +97,7 @@ impl CommandHandler {
                     phantom,
                     tier1,
                     prefix.as_deref(),
+                    cas_root.as_deref(),
                 )
                 .await
             }
@@ -407,6 +409,7 @@ impl CommandHandler {
 
     /// Handle IngestFullScan - unified ingest through daemon
     /// CLI sends this request instead of doing ingest itself
+    #[allow(clippy::too_many_arguments)]
     async fn handle_ingest_full_scan(
         &self,
         path: &str,
@@ -415,6 +418,7 @@ impl CommandHandler {
         phantom: bool,
         tier1: bool,
         prefix: Option<&str>,
+        cas_root_override: Option<&str>,
     ) -> VeloResponse {
         use std::time::Instant;
         use vrift_cas::{parallel_ingest_with_progress, IngestMode};
@@ -463,10 +467,18 @@ impl CommandHandler {
             IngestMode::SolidTier2
         };
 
-        // 3. Run parallel ingest
+        // 3. Run parallel ingest — use CLI-provided CAS root if available
+        let effective_cas_path = match cas_root_override {
+            Some(cli_cas) => {
+                let p = PathBuf::from(cli_cas);
+                info!(cas_root = %p.display(), "Using CLI-provided CAS root");
+                p
+            }
+            None => self.config.cas_path.clone(),
+        };
         let results = parallel_ingest_with_progress(
             &file_paths,
-            &self.config.cas_path,
+            &effective_cas_path,
             mode,
             threads,
             |_result, _idx| {

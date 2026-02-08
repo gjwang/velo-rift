@@ -264,6 +264,7 @@ pub async fn ingest_via_daemon(
     phantom: bool,
     tier1: bool,
     prefix: Option<String>,
+    cas_root: Option<&Path>,
 ) -> Result<IngestResult> {
     // Normalize paths before sending to daemon (daemon's cwd may differ)
     let abs_path = normalize_or_original(path);
@@ -283,6 +284,7 @@ pub async fn ingest_via_daemon(
         phantom,
         tier1,
         prefix,
+        cas_root: cas_root.map(|p| p.to_string_lossy().to_string()),
     };
 
     tracing::info!(

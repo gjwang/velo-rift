@@ -782,6 +782,7 @@ async fn handle_request(
             phantom,
             tier1,
             prefix,
+            cas_root,
         } => {
             use std::time::Instant;
             use vrift_cas::{streaming_ingest, IngestMode};
@@ -810,8 +811,15 @@ async fn handle_request(
                 IngestMode::SolidTier2
             };
 
-            // Use configured CAS path
-            let cas_root_path = state.cas.root().to_path_buf();
+            // CAS path precedence: CLI arg > daemon global
+            let cas_root_path = match cas_root {
+                Some(ref cli_cas) => {
+                    let p = vrift_manifest::normalize_path(cli_cas);
+                    tracing::info!(cas_root = %p.display(), "Using CLI-provided CAS root");
+                    p
+                }
+                None => state.cas.root().to_path_buf(),
+            };
 
             // Run streaming ingest in blocking task
             let source_clone = source_path.clone();

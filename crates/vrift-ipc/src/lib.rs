@@ -643,6 +643,10 @@ pub enum VeloRequest {
         tier1: bool,
         /// Optional prefix for manifest keys
         prefix: Option<String>,
+        /// CAS root override from CLI (--the-source-root).
+        /// Precedence: CLI arg > env (VR_THE_SOURCE) > config > default
+        /// If None, daemon uses its own resolved CAS root.
+        cas_root: Option<String>,
     },
 }
 
