@@ -118,6 +118,136 @@ pub fn streaming_ingest(
         .unwrap()
 }
 
+/// Streaming ingest with mtime+size cache skip (P0 Optimization)
+///
+/// Same producer-consumer pipeline as `streaming_ingest`, but workers check
+/// (mtime, size) against a cache before hashing. On cache hit, returns the
+/// cached content_hash without reading the file.
+///
+/// # Arguments
+///
+/// * `source` - Source directory to scan
+/// * `cas_root` - CAS storage root
+/// * `mode` - Ingest mode
+/// * `threads` - Worker thread count
+/// * `cache_lookup` - Closure: manifest_key → Option<CacheHint>
+pub fn streaming_ingest_cached<F>(
+    source: &Path,
+    cas_root: &Path,
+    mode: IngestMode,
+    threads: Option<usize>,
+    cache_lookup: F,
+) -> Vec<Result<IngestResult, CasError>>
+where
+    F: Fn(&str) -> Option<crate::zero_copy_ingest::CacheHint> + Send + Sync + 'static,
+{
+    use crate::zero_copy_ingest::{ingest_phantom, ingest_solid_tier1, ingest_solid_tier2_cached};
+
+    tracing::info!(
+        "[INGEST] streaming_ingest_cached starting: source={:?}, cas={:?}",
+        source,
+        cas_root
+    );
+
+    let (tx, rx): (Sender<PathBuf>, Receiver<PathBuf>) = channel::bounded(CHANNEL_CAP);
+
+    let results: Arc<std::sync::Mutex<Vec<Result<IngestResult, CasError>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let num_threads = threads.unwrap_or_else(|| std::cmp::min(4, num_cpus::get() / 2).max(1));
+    tracing::info!(
+        "[INGEST] Using {} worker threads (cached mode)",
+        num_threads
+    );
+
+    // Scanner thread
+    let source_path = source.to_path_buf();
+    let scanner_source = source_path.clone();
+    let scanner = std::thread::spawn(move || {
+        let mut file_count = 0;
+        for entry in WalkDir::new(&scanner_source)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_str().unwrap_or("");
+                name != ".vrift" && name != ".git"
+            })
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let path = entry.into_path();
+            file_count += 1;
+            if tx.send(path).is_err() {
+                break;
+            }
+        }
+        tracing::info!("[INGEST] Scanner complete: {} files found", file_count);
+    });
+
+    // Spawn worker threads with cache lookup
+    let cas = cas_root.to_path_buf();
+    let cache_lookup = Arc::new(cache_lookup);
+
+    let workers: Vec<_> = (0..num_threads)
+        .map(|i| {
+            let rx = rx.clone();
+            let r = Arc::clone(&results);
+            let cas = cas.clone();
+            let source_root = source_path.clone();
+            let cache = Arc::clone(&cache_lookup);
+            std::thread::spawn(move || {
+                let mut processed = 0u64;
+                let mut cache_hits = 0u64;
+                for path in rx {
+                    let result = match mode {
+                        IngestMode::SolidTier2 => {
+                            // Compute manifest key: /relative/path from source root
+                            let manifest_key = match path.strip_prefix(&source_root) {
+                                Ok(rel) => format!("/{}", rel.display()),
+                                Err(_) => format!(
+                                    "/{}",
+                                    path.file_name().unwrap_or_default().to_string_lossy()
+                                ),
+                            };
+                            let res =
+                                ingest_solid_tier2_cached(&path, &cas, &manifest_key, &*cache);
+                            if let Ok(ref r) = res {
+                                if r.skipped_by_cache {
+                                    cache_hits += 1;
+                                }
+                            }
+                            res
+                        }
+                        IngestMode::Phantom => ingest_phantom(&path, &cas),
+                        IngestMode::SolidTier1 => ingest_solid_tier1(&path, &cas),
+                    };
+                    r.lock().unwrap().push(result);
+                    processed += 1;
+                }
+                tracing::info!(
+                    "[INGEST] Worker {} finished: processed={}, cache_hits={}",
+                    i,
+                    processed,
+                    cache_hits
+                );
+            })
+        })
+        .collect();
+
+    drop(rx);
+    scanner.join().expect("Scanner thread panicked");
+
+    for (i, worker) in workers.into_iter().enumerate() {
+        worker
+            .join()
+            .unwrap_or_else(|_| panic!("Worker {} panicked", i));
+    }
+
+    Arc::try_unwrap(results)
+        .expect("Results still referenced")
+        .into_inner()
+        .unwrap()
+}
+
 /// Streaming ingest with progress callback
 pub fn streaming_ingest_with_progress<F>(
     source: &Path,

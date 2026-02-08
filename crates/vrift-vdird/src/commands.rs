@@ -89,6 +89,7 @@ impl CommandHandler {
                 tier1,
                 prefix,
                 cas_root,
+                force_hash: _,
             } => {
                 self.handle_ingest_full_scan(
                     &path,

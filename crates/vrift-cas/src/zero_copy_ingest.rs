@@ -21,6 +21,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use dashmap::DashSet;
@@ -113,6 +114,20 @@ pub struct IngestResult {
     pub size: u64,
     /// True if this was a new blob (not a duplicate)
     pub was_new: bool,
+    /// True if this result was returned from mtime+size cache (no file read/hash)
+    pub skipped_by_cache: bool,
+}
+
+/// Cache hint from manifest for mtime+size skip optimization (P0)
+///
+/// Callers construct this from existing manifest entries and pass it
+/// via closure to avoid circular dependency between vrift-cas and vrift-manifest.
+#[derive(Debug, Clone)]
+pub struct CacheHint {
+    pub content_hash: Blake3Hash,
+    pub size: u64,
+    /// mtime in seconds since Unix epoch (MetadataExt::mtime())
+    pub mtime: u64,
 }
 
 // ============================================================================
@@ -167,6 +182,7 @@ pub fn ingest_solid_tier1(source: &Path, cas_root: &Path) -> Result<IngestResult
         hash,
         size,
         was_new,
+        skipped_by_cache: false,
     })
 }
 
@@ -231,6 +247,7 @@ pub fn ingest_solid_tier1_dedup(
         hash,
         size,
         was_new: is_new, // is_new from insert() tells us if this was first time
+        skipped_by_cache: false,
     })
 }
 
@@ -271,7 +288,57 @@ pub fn ingest_solid_tier2(source: &Path, cas_root: &Path) -> Result<IngestResult
         hash,
         size,
         was_new,
+        skipped_by_cache: false,
     })
+}
+
+/// Ingest Solid Mode Tier-2 with mtime+size cache skip (P0 Optimization)
+///
+/// Before hashing, checks if (mtime, size) match the cached manifest entry.
+/// On cache hit: returns cached content_hash without reading the file at all.
+/// On cache miss: falls through to full `ingest_solid_tier2()`.
+///
+/// # Arguments
+///
+/// * `source` - Path to file to ingest
+/// * `cas_root` - CAS storage root
+/// * `manifest_key` - Manifest key for cache lookup (e.g., "/src/main.rs")
+/// * `cache_lookup` - Closure returning CacheHint from existing manifest
+pub fn ingest_solid_tier2_cached<F>(
+    source: &Path,
+    cas_root: &Path,
+    manifest_key: &str,
+    cache_lookup: &F,
+) -> Result<IngestResult>
+where
+    F: Fn(&str) -> Option<CacheHint>,
+{
+    let metadata = fs::metadata(source)?;
+    let size = metadata.len();
+    let mtime = metadata.mtime() as u64;
+
+    // Cache hit: mtime+size match → skip read+hash+link entirely
+    //
+    // Safety: MetadataExt::mtime() returns seconds since epoch on all Unix
+    // platforms (POSIX st_mtime). This is consistent between macOS and Linux.
+    // Sub-second modifications with identical size could cause false cache hits,
+    // but this is an acceptable tradeoff — such scenarios are extremely rare in
+    // practice (build outputs, source files). A future P1 could add mtime_nsec()
+    // for nanosecond precision if needed.
+    if let Some(hint) = cache_lookup(manifest_key) {
+        if hint.size == size && hint.mtime == mtime {
+            return Ok(IngestResult {
+                source_path: source.to_owned(),
+                hash: hint.content_hash,
+                size,
+                was_new: false,
+                skipped_by_cache: true,
+            });
+        }
+    }
+
+    // Cache miss: full ingest path
+    ingest_solid_tier2(source, cas_root)
 }
 
 /// Ingest Solid Mode Tier-2 with in-memory deduplication
@@ -316,6 +383,7 @@ pub fn ingest_solid_tier2_dedup(
             hash,
             size,
             was_new: false, // Duplicate - already processed
+            skipped_by_cache: false,
         });
     }
 
@@ -340,6 +408,7 @@ pub fn ingest_solid_tier2_dedup(
         hash,
         size,
         was_new,
+        skipped_by_cache: false,
     })
 }
 
@@ -373,6 +442,7 @@ pub fn ingest_phantom(source: &Path, cas_root: &Path) -> Result<IngestResult> {
             hash,
             size,
             was_new: false,
+            skipped_by_cache: false,
         });
     }
 
@@ -395,6 +465,7 @@ pub fn ingest_phantom(source: &Path, cas_root: &Path) -> Result<IngestResult> {
                     hash,
                     size,
                     was_new: false,
+                    skipped_by_cache: false,
                 });
             }
             return Err(e.into());
@@ -407,6 +478,7 @@ pub fn ingest_phantom(source: &Path, cas_root: &Path) -> Result<IngestResult> {
         hash,
         size,
         was_new: true, // Phantom always creates new (rename)
+        skipped_by_cache: false,
     })
 }
 
@@ -584,5 +656,93 @@ mod tests {
         let cas_file = cas_path(cas_dir.path(), &result.hash, result.size);
         assert!(cas_file.exists());
         assert_eq!(fs::read(&cas_file).unwrap(), original_content);
+    }
+
+    #[test]
+    fn test_cached_ingest_skip() {
+        let (_source_dir, cas_dir, test_file) = setup();
+
+        // First ingest: compute real hash
+        let first = ingest_solid_tier2(&test_file, cas_dir.path()).unwrap();
+        assert!(!first.skipped_by_cache);
+
+        // Build cache hint from first result
+        let metadata = fs::metadata(&test_file).unwrap();
+        let mtime = metadata.mtime() as u64;
+        let hint = CacheHint {
+            content_hash: first.hash,
+            size: first.size,
+            mtime,
+        };
+
+        // Re-ingest with matching cache → should skip
+        let cached =
+            ingest_solid_tier2_cached(&test_file, cas_dir.path(), "/test.txt", &|_key: &str| {
+                Some(hint.clone())
+            })
+            .unwrap();
+
+        assert!(
+            cached.skipped_by_cache,
+            "Expected cache skip on mtime+size match"
+        );
+        assert_eq!(cached.hash, first.hash, "Hash should match cached value");
+        assert_eq!(cached.size, first.size);
+        assert!(!cached.was_new);
+    }
+
+    #[test]
+    fn test_cached_ingest_miss_size() {
+        let (_source_dir, cas_dir, test_file) = setup();
+
+        let first = ingest_solid_tier2(&test_file, cas_dir.path()).unwrap();
+
+        let metadata = fs::metadata(&test_file).unwrap();
+        let mtime = metadata.mtime() as u64;
+
+        // Wrong size → cache miss
+        let hint = CacheHint {
+            content_hash: first.hash,
+            size: first.size + 999,
+            mtime,
+        };
+
+        let result =
+            ingest_solid_tier2_cached(&test_file, cas_dir.path(), "/test.txt", &|_key: &str| {
+                Some(hint.clone())
+            })
+            .unwrap();
+
+        assert!(
+            !result.skipped_by_cache,
+            "Size mismatch should trigger full hash"
+        );
+        assert_eq!(result.hash, first.hash, "Hash should still match");
+    }
+
+    #[test]
+    fn test_cached_ingest_miss_mtime() {
+        let (_source_dir, cas_dir, test_file) = setup();
+
+        let first = ingest_solid_tier2(&test_file, cas_dir.path()).unwrap();
+
+        // Wrong mtime → cache miss
+        let hint = CacheHint {
+            content_hash: first.hash,
+            size: first.size,
+            mtime: 9999999,
+        };
+
+        let result =
+            ingest_solid_tier2_cached(&test_file, cas_dir.path(), "/test.txt", &|_key: &str| {
+                Some(hint.clone())
+            })
+            .unwrap();
+
+        assert!(
+            !result.skipped_by_cache,
+            "mtime mismatch should trigger full hash"
+        );
+        assert_eq!(result.hash, first.hash);
     }
 }

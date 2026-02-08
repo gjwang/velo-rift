@@ -257,6 +257,7 @@ pub async fn read_response(stream: &mut UnixStream) -> Result<VeloResponse> {
 /// Ingest files via daemon (unified architecture)
 /// CLI becomes thin client, daemon handles all ingest logic
 /// Note: IngestFullScan is a standalone operation that doesn't require workspace registration
+#[allow(clippy::too_many_arguments)]
 pub async fn ingest_via_daemon(
     path: &Path,
     manifest_path: &Path,
@@ -265,6 +266,7 @@ pub async fn ingest_via_daemon(
     tier1: bool,
     prefix: Option<String>,
     cas_root: Option<&Path>,
+    force_hash: bool,
 ) -> Result<IngestResult> {
     // Normalize paths before sending to daemon (daemon's cwd may differ)
     let abs_path = normalize_or_original(path);
@@ -285,6 +287,7 @@ pub async fn ingest_via_daemon(
         tier1,
         prefix,
         cas_root: cas_root.map(|p| p.to_string_lossy().to_string()),
+        force_hash,
     };
 
     tracing::info!(

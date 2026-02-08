@@ -303,6 +303,7 @@ pub fn parallel_ingest_with_fallback(
                                         hash,
                                         size,
                                         was_new: true, // Fallback always creates new blob
+                                        skipped_by_cache: false,
                                     })
                                 }
                                 Err(_) => {

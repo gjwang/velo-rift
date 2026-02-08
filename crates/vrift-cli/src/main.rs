@@ -92,6 +92,11 @@ enum Commands {
         #[arg(long)]
         show_excluded: bool,
 
+        /// Force full file read+hash, bypassing mtime+size cache skip
+        /// Useful for audit/verification when you suspect data corruption
+        #[arg(long)]
+        force_hash: bool,
+
         /// Use daemon for ingest (unified architecture: CLI is thin client)
         /// This is the default and only behavior.
         #[arg(long, hide = true)]
@@ -427,6 +432,7 @@ async fn async_main(
             tier,
             no_security_filter: _,
             show_excluded: _,
+            force_hash,
             via_daemon: _,
         } => {
             let (mode, tier) = {
@@ -463,6 +469,7 @@ async fn async_main(
                 is_tier1,
                 Some(prefix_val),
                 cli_cas_root_override.as_deref(),
+                force_hash,
             )
             .await
             {
@@ -1965,7 +1972,7 @@ async fn cmd_watch(_cas_root: &Path, directory: &Path, output: &Path) -> Result<
 
     // Initial ingest via daemon
     println!("\n[Initial Scan]");
-    daemon::ingest_via_daemon(directory, output, None, false, false, None, None).await?;
+    daemon::ingest_via_daemon(directory, output, None, false, false, None, None, false).await?;
 
     // Create a channel to receive the events.
     let (tx, rx) = channel();
@@ -1998,7 +2005,7 @@ async fn cmd_watch(_cas_root: &Path, directory: &Path, output: &Path) -> Result<
                         if last_ingest.elapsed() > debounce_duration {
                             println!("\n[Change Detected] Re-ingesting...");
                             if let Err(e) = daemon::ingest_via_daemon(
-                                directory, output, None, false, false, None, None,
+                                directory, output, None, false, false, None, None, false,
                             )
                             .await
                             {

@@ -783,9 +783,10 @@ async fn handle_request(
             tier1,
             prefix,
             cas_root,
+            force_hash,
         } => {
             use std::time::Instant;
-            use vrift_cas::{streaming_ingest, IngestMode};
+            use vrift_cas::{streaming_ingest, streaming_ingest_cached, CacheHint, IngestMode};
 
             let source_path = PathBuf::from(&path);
             let manifest_out = PathBuf::from(&manifest_path);
@@ -821,14 +822,57 @@ async fn handle_request(
                 None => state.cas.root().to_path_buf(),
             };
 
+            // P0: Load existing manifest for mtime+size cache skip (SolidTier2 only)
+            // --force-hash bypasses this entirely
+            let existing_manifest = if mode == IngestMode::SolidTier2 && !force_hash {
+                match LmdbManifest::open(&manifest_out) {
+                    Ok(m) => {
+                        tracing::info!("P0: loaded existing manifest for cache skip");
+                        Some(std::sync::Arc::new(m))
+                    }
+                    Err(e) => {
+                        tracing::info!("P0: no existing manifest (first ingest): {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             // Run streaming ingest in blocking task
             let source_clone = source_path.clone();
             let cas_clone = cas_root_path.clone();
             let results = match tokio::task::spawn_blocking(move || {
-                tracing::info!("spawn_blocking: starting streaming_ingest");
-                let r = streaming_ingest(&source_clone, &cas_clone, mode, threads);
-                tracing::info!("spawn_blocking: streaming_ingest done, {} results", r.len());
-                r
+                if let Some(manifest_arc) = existing_manifest {
+                    // P0: Cached path — use mtime+size skip
+                    tracing::info!("spawn_blocking: starting streaming_ingest_cached");
+                    let cache_lookup = move |key: &str| -> Option<CacheHint> {
+                        let entry = manifest_arc.get(key).ok()??;
+                        Some(CacheHint {
+                            content_hash: entry.vnode.content_hash,
+                            size: entry.vnode.size,
+                            mtime: entry.vnode.mtime,
+                        })
+                    };
+                    let r = streaming_ingest_cached(
+                        &source_clone,
+                        &cas_clone,
+                        mode,
+                        threads,
+                        cache_lookup,
+                    );
+                    tracing::info!(
+                        "spawn_blocking: streaming_ingest_cached done, {} results",
+                        r.len()
+                    );
+                    r
+                } else {
+                    // Standard path (first ingest or non-SolidTier2)
+                    tracing::info!("spawn_blocking: starting streaming_ingest");
+                    let r = streaming_ingest(&source_clone, &cas_clone, mode, threads);
+                    tracing::info!("spawn_blocking: streaming_ingest done, {} results", r.len());
+                    r
+                }
             })
             .await
             {
@@ -843,16 +887,20 @@ async fn handle_request(
 
             let total_files = results.len() as u64;
 
-            // 5. Collect stats
+            // 5. Collect stats (including P0 cache skip count)
             let mut total_bytes = 0u64;
             let mut new_bytes = 0u64;
             let mut unique_blobs = 0u64;
+            let mut cache_skipped = 0u64;
 
             for r in results.iter().flatten() {
                 total_bytes += r.size;
                 if r.was_new {
                     unique_blobs += 1;
                     new_bytes += r.size;
+                }
+                if r.skipped_by_cache {
+                    cache_skipped += 1;
                 }
             }
 
@@ -876,6 +924,7 @@ async fn handle_request(
                 files = total_files,
                 blobs = unique_blobs,
                 new_bytes = new_bytes,
+                cache_skipped = cache_skipped,
                 duration_ms = duration.as_millis() as u64,
                 "Full scan ingest complete"
             );

@@ -647,6 +647,8 @@ pub enum VeloRequest {
         /// Precedence: CLI arg > env (VR_THE_SOURCE) > config > default
         /// If None, daemon uses its own resolved CAS root.
         cas_root: Option<String>,
+        /// Force full file read+hash, bypassing mtime+size cache skip (P0)
+        force_hash: bool,
     },
 }
 

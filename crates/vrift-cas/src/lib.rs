@@ -43,11 +43,13 @@ pub use parallel_ingest::{
 pub use protection::{
     enforce_cas_invariant, is_immutable, set_immutable, CAS_FORBIDDEN_PERM_MASK, CAS_READ_ONLY_PERM,
 };
-pub use streaming_ingest::{streaming_ingest, streaming_ingest_with_progress};
+pub use streaming_ingest::{
+    streaming_ingest, streaming_ingest_cached, streaming_ingest_with_progress,
+};
 pub use streaming_pipeline::{IngestPipeline, IngestStats, PipelineConfig};
 pub use zero_copy_ingest::{
     ingest_phantom, ingest_solid_tier1, ingest_solid_tier1_dedup, ingest_solid_tier2,
-    ingest_solid_tier2_dedup, IngestResult,
+    ingest_solid_tier2_cached, ingest_solid_tier2_dedup, CacheHint, IngestResult,
 };
 
 use serde::{Deserialize, Serialize};

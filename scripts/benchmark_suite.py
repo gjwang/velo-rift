@@ -241,12 +241,13 @@ def run_dataset_benchmark(name: str, config: dict[str, str], work_dir: Path) -> 
     suite.add(result)
     print(f"    {result.files_per_sec:,.0f} files/sec, {result.dedup_ratio * 100:.1f}% dedup")
 
-    # Re-ingest benchmark (test CAS cache hit performance)
-    print("  Benchmarking re-ingest (CAS hit)...")
+    # Re-ingest benchmark (test mtime+size cache skip performance)
+    # Uses SAME manifest so P0 cache can match existing entries
+    print("  Benchmarking re-ingest (cache skip)...")
     vrift_meta = node_modules / ".vrift"
     if vrift_meta.exists():
         shutil.rmtree(vrift_meta, onerror=rmtree_onerror)
-    result2 = benchmark_vrift_ingest(node_modules, cas_dir, work_dir / f"{name}_reingest.manifest")
+    result2 = benchmark_vrift_ingest(node_modules, cas_dir, manifest)
     result2.name = "vrift (reingest)"
     suite.add(result2)
     speedup = result.duration_sec / result2.duration_sec if result2.duration_sec > 0 else 0
