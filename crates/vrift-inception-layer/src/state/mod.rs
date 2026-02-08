@@ -904,51 +904,8 @@ pub(crate) fn vdir_lookup(
     }
 }
 
-/// O(1) readdir lookup in mmap'd manifest
-#[allow(deprecated)]
-pub(crate) fn mmap_dir_lookup(
-    mmap_ptr: *const u8,
-    mmap_size: usize,
-    path: &str,
-) -> Option<(*const vrift_ipc::MmapDirChild, usize)> {
-    if mmap_ptr.is_null() || mmap_size < vrift_ipc::ManifestMmapHeader::SIZE {
-        return None;
-    }
-
-    let header = unsafe { &*(mmap_ptr as *const vrift_ipc::ManifestMmapHeader) };
-    if !header.is_valid() {
-        return None;
-    }
-
-    // Directory index lookup with linear probing
-    let parent_hash = vrift_ipc::fnv1a_hash(path);
-    let dir_index_offset = header.dir_index_offset as usize;
-    let dir_index_capacity = header.dir_index_capacity as usize;
-    let dir_index_ptr =
-        unsafe { mmap_ptr.add(dir_index_offset) as *const vrift_ipc::MmapDirIndexEntry };
-
-    let start_slot = (parent_hash as usize) % dir_index_capacity;
-    for i in 0..dir_index_capacity {
-        let slot = (start_slot + i) % dir_index_capacity;
-        let entry = unsafe { &*dir_index_ptr.add(slot) };
-
-        if entry.parent_hash == 0 && entry.children_count == 0 {
-            return None; // Empty slot
-        }
-
-        if entry.parent_hash == parent_hash {
-            // Found parent directory!
-            let children_offset = header.children_offset as usize;
-            let children_start_ptr = unsafe {
-                (mmap_ptr.add(children_offset) as *const vrift_ipc::MmapDirChild)
-                    .add(entry.children_start as usize)
-            };
-            return Some((children_start_ptr, entry.children_count as usize));
-        }
-    }
-
-    None
-}
+// mmap_dir_lookup removed — VDir entries store only path hashes (no filenames),
+// so readdir is served via IPC. Readdir is not on the PSFS hot path.
 
 // ============================================================================
 // InceptionLayerState: Core struct & hot-path methods
@@ -1196,19 +1153,7 @@ impl InceptionLayerState {
     /// Query daemon for directory listing (for opendir/readdir)
     #[allow(dead_code)]
     pub(crate) fn query_dir_listing(&self, path: &str) -> Option<Vec<vrift_ipc::DirEntry>> {
-        // First try mmap directory lookup
-        if let Some((children_ptr, count)) = mmap_dir_lookup(self.mmap_ptr, self.mmap_size, path) {
-            let mut entries = Vec::with_capacity(count);
-            for i in 0..count {
-                let child = unsafe { &*children_ptr.add(i) };
-                entries.push(vrift_ipc::DirEntry {
-                    name: child.name_as_str().to_string(),
-                    is_dir: child.is_dir != 0,
-                });
-            }
-            return Some(entries);
-        }
-        // Fall back to IPC
+        // Fall back to IPC (readdir is not on the PSFS hot path and VDir doesn't store filenames)
         unsafe { sync_ipc_manifest_list_dir(&self.vdird_socket_path, path) }
     }
 

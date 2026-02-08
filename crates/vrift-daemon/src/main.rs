@@ -411,11 +411,48 @@ async fn start_daemon() -> Result<()> {
     }
 
     println!("vriftd: Shutting down");
+    cleanup_vdird_processes(&state).await;
+
     if path.exists() {
         tokio::fs::remove_file(path).await?;
     }
 
     Ok(())
+}
+
+async fn cleanup_vdird_processes(state: &DaemonState) {
+    let processes = {
+        let mut processes = state.vdird_processes.lock().unwrap();
+        std::mem::take(&mut *processes)
+    };
+
+    if processes.is_empty() {
+        return;
+    }
+
+    tracing::info!("vriftd: Cleaning up {} vDird processes...", processes.len());
+
+    for (project_root, vdird) in processes {
+        let pid = vdird.child_pid as libc::pid_t;
+        tracing::info!(
+            "vriftd: Sending SIGTERM to vDird pid={} for {:?}",
+            pid,
+            project_root
+        );
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+
+        // Clean up socket file
+        let _ = std::fs::remove_file(&vdird.socket_path);
+    }
+
+    // Give them a moment to exit and reap them
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mut status: libc::c_int = 0;
+    while unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } > 0 {
+        // Continue reaping until no more exited children
+    }
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) {
