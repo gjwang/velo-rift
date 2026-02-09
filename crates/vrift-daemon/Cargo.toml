@@ -6,6 +6,7 @@ edition = "2021"
 [[bin]]
 name = "vriftd"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 anyhow = { workspace = true }
