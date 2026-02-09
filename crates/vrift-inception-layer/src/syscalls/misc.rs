@@ -556,34 +556,15 @@ pub unsafe extern "C" fn mkdirat_inception(
     path: *const c_char,
     mode: libc::mode_t,
 ) -> c_int {
+    // Always let the real mkdirat execute — the kernel handles EEXIST correctly.
+    // Do NOT pre-check manifest: stale directory entries cause spurious EEXIST.
     #[cfg(target_os = "macos")]
     {
-        let init_state = INITIALIZING.load(Ordering::Relaxed);
-        if init_state != 0
-            || crate::state::INCEPTION_LAYER_STATE
-                .load(Ordering::Acquire)
-                .is_null()
-        {
-            // RFC-0039: During early init, allow mkdirat passthrough
-            return crate::syscalls::macos_raw::raw_mkdirat(dirfd, path, mode);
-        }
-        // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
-        block_existing_vfs_entry_at(dirfd, path)
-            .unwrap_or_else(|| crate::syscalls::macos_raw::raw_mkdirat(dirfd, path, mode))
+        crate::syscalls::macos_raw::raw_mkdirat(dirfd, path, mode)
     }
     #[cfg(target_os = "linux")]
     {
-        if INITIALIZING.load(Ordering::Relaxed) >= 2
-            || crate::state::INCEPTION_LAYER_STATE
-                .load(Ordering::Acquire)
-                .is_null()
-        {
-            // RFC-0039: During early init, allow mkdirat passthrough
-            return crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode);
-        }
-        // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
-        block_existing_vfs_entry(path)
-            .unwrap_or_else(|| crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode))
+        crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode)
     }
 }
 
@@ -715,12 +696,10 @@ pub unsafe extern "C" fn mkdir_inception(path: *const c_char, mode: libc::mode_t
         return crate::syscalls::macos_raw::raw_mkdir(path, mode);
     }
 
-    // RFC-0039: Only block if path EXISTS in manifest, allow new dir creation
-    if let Some(err) = block_existing_vfs_entry(path) {
-        return err;
-    }
-
-    // Execute the actual mkdir
+    // Always let the real mkdir execute — the kernel correctly returns EEXIST
+    // when the directory already exists on the real filesystem.
+    // Do NOT pre-check the manifest here: manifest may have stale directory entries
+    // (e.g. target/debug after cargo clean) that would cause spurious EEXIST.
     let result = crate::syscalls::macos_raw::raw_mkdir(path, mode);
 
     // RFC-0039 Live Ingest: Notify daemon of successful mkdir
@@ -750,12 +729,8 @@ pub unsafe extern "C" fn mkdir_inception(path: *const c_char, mode: libc::mode_t
         return crate::syscalls::linux_raw::raw_mkdir(path, mode);
     }
 
-    // RFC-0039: Only block if path EXISTS in manifest
-    if let Some(err) = block_existing_vfs_entry(path) {
-        return err;
-    }
-
-    // Execute the actual mkdir
+    // Always let the real mkdir execute — the kernel correctly returns EEXIST
+    // when the directory already exists on the real filesystem.
     let result = crate::syscalls::linux_raw::raw_mkdir(path, mode);
 
     // RFC-0039 Live Ingest: Notify daemon of successful mkdir

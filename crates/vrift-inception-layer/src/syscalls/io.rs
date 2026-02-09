@@ -274,8 +274,10 @@ pub unsafe extern "C" fn ftruncate_inception(fd: c_int, length: off_t) -> c_int 
 // close inception layer - untrack and trigger COW reingest
 // ============================================================================
 
+/// Write syscall implementation — called from C bridge (c_write_bridge).
+/// Uses raw assembly syscalls internally, safe for interposition.
 #[no_mangle]
-pub unsafe extern "C" fn write_inception(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
+pub unsafe extern "C" fn velo_write_impl(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
     profile_timed!(write_calls, write_ns, {
         #[cfg(target_os = "macos")]
         {
@@ -288,8 +290,10 @@ pub unsafe extern "C" fn write_inception(fd: c_int, buf: *const c_void, count: s
     })
 }
 
+/// Read syscall implementation — called from C bridge (c_read_bridge).
+/// Uses raw assembly syscalls internally, safe for interposition.
 #[no_mangle]
-pub unsafe extern "C" fn read_inception(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
+pub unsafe extern "C" fn velo_read_impl(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
     profile_timed!(read_calls, read_ns, {
         #[cfg(target_os = "macos")]
         {
@@ -302,8 +306,11 @@ pub unsafe extern "C" fn read_inception(fd: c_int, buf: *mut c_void, count: size
     })
 }
 
+/// Close syscall implementation — called from C bridge (c_close_bridge).
+/// Handles COW session cleanup, FD tracking, and reactor reingest.
+/// Uses raw assembly syscalls internally, safe for interposition.
 #[no_mangle]
-pub unsafe extern "C" fn close_inception(fd: c_int) -> c_int {
+pub unsafe extern "C" fn velo_close_impl(fd: c_int) -> c_int {
     profile_timed!(close_calls, close_ns, {
         use crate::state::{EventType, InceptionLayerGuard, InceptionLayerState};
 

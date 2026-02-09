@@ -273,6 +273,43 @@ int c_setattrlist_bridge(const char *path, void *attrlist, void *attrbuf,
   return setattrlist_inception(path, attrlist, attrbuf, attrbufsize, options);
 }
 
+/* --- close/read/write bridges for profiling (RFC-0045) --- */
+/* These enable macOS dyld interposition without infinite recursion.
+ * The C bridge uses raw_syscall() assembly for early init,
+ * and forwards to Rust velo_*_impl for normal operation.
+ * Rust impls use raw assembly syscalls (NOT libc), so no recursion. */
+
+#define SYS_CLOSE 6
+#define SYS_READ 3
+#define SYS_WRITE 4
+
+extern int velo_close_impl(int fd);
+extern long velo_read_impl(int fd, void *buf, size_t count);
+extern long velo_write_impl(int fd, const void *buf, size_t count);
+
+#if defined(__APPLE__)
+int c_close_bridge(int fd) {
+  if (INITIALIZING >= 2) {
+    return (int)raw_syscall(SYS_CLOSE, (long)fd, 0, 0, 0);
+  }
+  return velo_close_impl(fd);
+}
+
+long c_read_bridge(int fd, void *buf, size_t count) {
+  if (INITIALIZING >= 2) {
+    return raw_syscall(SYS_READ, (long)fd, (long)buf, (long)count, 0);
+  }
+  return velo_read_impl(fd, buf, count);
+}
+
+long c_write_bridge(int fd, const void *buf, size_t count) {
+  if (INITIALIZING >= 2) {
+    return raw_syscall(SYS_WRITE, (long)fd, (long)buf, (long)count, 0);
+  }
+  return velo_write_impl(fd, buf, count);
+}
+#endif
+
 /* --- fcntl variadic bridge --- */
 
 extern int velo_fcntl_impl(int fd, int cmd, long arg);

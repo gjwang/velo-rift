@@ -8,8 +8,8 @@ use crate::syscalls::dir::{
 };
 #[cfg(target_os = "macos")]
 use crate::syscalls::io::{
-    close_inception, dup2_inception, dup_inception, fchdir_inception, ftruncate_inception,
-    lseek_inception, read_inception, sendfile_inception, write_inception,
+    dup2_inception, dup_inception, fchdir_inception, ftruncate_inception, lseek_inception,
+    sendfile_inception,
 };
 #[cfg(target_os = "macos")]
 extern "C" {
@@ -28,6 +28,10 @@ extern "C" {
         attrbufsize: libc::size_t,
         options: libc::c_ulong,
     ) -> c_int;
+    // RFC-0045: C bridge wrappers for close/read/write profiling
+    fn c_close_bridge(fd: c_int) -> c_int;
+    fn c_read_bridge(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t;
+    fn c_write_bridge(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t;
 }
 #[cfg(target_os = "macos")]
 use crate::syscalls::misc::{
@@ -415,26 +419,28 @@ pub static IT_MUNMAP: Interpose = Interpose {
     old_func: real_munmap as _,
 };
 
-// Passthrough / Inactive Interpositions (Sectioned to __nointerpose to avoid dyld resolution overhead)
+// RFC-0045: Active interpositions for I/O profiling via C bridges
+// These use C bridge wrappers that call raw_syscall() assembly for early init
+// and forward to Rust velo_*_impl for normal operation — no recursion risk.
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_WRITE: Interpose = Interpose {
-    new_func: write_inception as _,
+    new_func: c_write_bridge as _,
     old_func: real_write as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_READ: Interpose = Interpose {
-    new_func: read_inception as _,
+    new_func: c_read_bridge as _,
     old_func: real_read as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_CLOSE: Interpose = Interpose {
-    new_func: close_inception as _,
+    new_func: c_close_bridge as _,
     old_func: real_close as _,
 };
 #[cfg(target_os = "macos")]
