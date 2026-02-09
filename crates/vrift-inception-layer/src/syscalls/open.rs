@@ -1,3 +1,4 @@
+use crate::path::VfsPath;
 use crate::state::*;
 use libc::{c_char, c_int, c_void, mode_t};
 use std::ffi::CStr;
@@ -10,6 +11,7 @@ use crate::syscalls::linux_raw::raw_open;
 use crate::syscalls::macos_raw::raw_open;
 
 /// Open implementation with VFS detection and CoW semantics.
+/// RFC-0044: VDir fast-path — resolve open() via mmap lookup, zero IPC on hit.
 pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> Option<c_int> {
     if path.is_null() {
         return None;
@@ -36,6 +38,45 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
         None => return None,
     };
 
+    let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
+
+    // =========================================================================
+    // FAST PATH: VDir mmap lookup — zero syscall, zero IPC, zero allocation
+    // Only for non-dirty files where VDir has a valid cas_hash.
+    // =========================================================================
+    if !DIRTY_TRACKER.is_dirty(&vpath.manifest_key) {
+        if let Some(vdir_entry) = vdir_lookup(state.mmap_ptr, state.mmap_size, &vpath.manifest_key)
+        {
+            // Skip directories (cas_hash is all zeros for dirs)
+            let has_content = !vdir_entry.cas_hash.iter().all(|b| *b == 0);
+            if has_content {
+                inception_record!(EventType::OpenHit, vpath.manifest_key_hash, 11); // 11 = vdir_open_hit
+
+                let blob_path =
+                    format_blob_path_fixed(&state.cas_root, &vdir_entry.cas_hash, vdir_entry.size);
+
+                if is_write {
+                    return open_cow_write(state, &vpath, blob_path.as_str(), flags, mode);
+                } else {
+                    return open_cas_read(
+                        state,
+                        &vpath,
+                        blob_path.as_str(),
+                        flags,
+                        mode,
+                        vdir_entry.size,
+                        vdir_entry.mode,
+                        vdir_entry.mtime_sec as u64,
+                    );
+                }
+            }
+            // Directory entry — fall through to passthrough
+        }
+    }
+
+    // =========================================================================
+    // SLOW PATH: IPC fallback — VDir miss, dirty file, or directory
+    // =========================================================================
     let entry = match state.query_manifest_ipc(&vpath) {
         Some(e) => {
             inception_log!(
@@ -48,11 +89,6 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
         }
         None => {
             // RFC-0039 Solid Mode: Allow new file creation in VFS territory
-            // Manifest MISS means the file doesn't exist in VFS yet - this is a NEW file
-            // We passthrough to real FS and track for later Live Ingest on close()
-            let is_write =
-                (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
-
             inception_log!(
                 "manifest lookup '{}': NOT FOUND -> passthrough + track (is_write={})",
                 vpath.manifest_key,
@@ -62,7 +98,6 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
 
             let fd = unsafe { raw_open(path, flags, mode) };
             if fd >= 0 {
-                // Track FD for Live Ingest on close() - especially important for writes
                 crate::syscalls::io::track_fd(
                     fd,
                     &vpath.manifest_key,
@@ -76,184 +111,237 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
         }
     };
 
-    let hash_hex = hex_encode(&entry.content_hash);
-    let blob_path = format!(
-        "{}/blake3/{}/{}/{}_{}.bin",
-        state.cas_root,
-        &hash_hex[0..2],
-        &hash_hex[2..4],
-        hash_hex,
-        entry.size
-    );
+    let blob_path = format_blob_path_fixed(&state.cas_root, &entry.content_hash, entry.size as u64);
 
-    inception_log!("redirection path: '{}'", blob_path);
-
-    let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
+    inception_log!("redirection path (IPC): '{}'", blob_path.as_str());
 
     if is_write {
-        inception_log!("open write request for '{}'", vpath.absolute);
-
-        // M4: Mark path as dirty in DirtyTracker (enables stat redirect to staging)
-        DIRTY_TRACKER.mark_dirty(&vpath.manifest_key);
-
-        let mut attempts = 0;
-        let mut fd = -1;
-        let mut temp_path_fs = FixedString::<1024>::new();
-        let pid = unsafe { libc::getpid() };
-        let tid_addr = &attempts as *const _ as usize;
-
-        while attempts < 100 {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-
-            let mut buf = [0u8; 1024];
-            let mut writer = crate::macros::StackWriter::new(&mut buf);
-            let _ = write!(
-                writer,
-                "{}/.vrift/staging/vrift_cow_{}_{}_{}_{}.tmp",
-                state.project_root.as_str(),
-                pid,
-                timestamp,
-                tid_addr,
-                attempts
-            );
-            temp_path_fs.set(writer.as_str());
-
-            let c_temp = match std::ffi::CString::new(temp_path_fs.as_str()) {
-                Ok(c) => c,
-                Err(_) => break,
-            };
-            fd = unsafe {
-                libc::open(
-                    c_temp.as_ptr(),
-                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
-                    0o600,
-                )
-            };
-            if fd >= 0 {
-                break;
-            }
-            if unsafe { crate::get_errno() } != libc::EEXIST {
-                break;
-            }
-            attempts += 1;
-        }
-
-        if fd < 0 {
-            return None;
-        }
-        let temp_fd = fd;
-        let temp_path = temp_path_fs;
-        unsafe { libc::close(temp_fd) };
-        let temp_cpath = std::ffi::CString::new(temp_path.as_str()).ok()?;
-
-        inception_log!("COW TRIGGERED: '{}' -> '{}'", vpath.absolute, temp_path);
-        inception_record!(EventType::CowTriggered, vpath.manifest_key_hash, 0);
-
-        let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
-        let src_fd = unsafe { libc::open(blob_cpath.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-        if src_fd >= 0 {
-            let dst_fd = unsafe {
-                libc::open(
-                    temp_cpath.as_ptr(),
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
-                    0o644,
-                )
-            };
-            if dst_fd >= 0 {
-                let mut buf = [0u8; 8192];
-                loop {
-                    let n =
-                        unsafe { libc::read(src_fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
-                    if n <= 0 {
-                        break;
-                    }
-                    unsafe { libc::write(dst_fd, buf.as_ptr() as *const c_void, n as usize) };
-                }
-                unsafe { libc::close(dst_fd) };
-            }
-            unsafe { libc::close(src_fd) };
-        } else {
-            let dst_fd = unsafe {
-                libc::open(
-                    temp_cpath.as_ptr(),
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
-                    0o644,
-                )
-            };
-            if dst_fd >= 0 {
-                unsafe { libc::close(dst_fd) };
-            }
-        }
-
-        let fd = unsafe { libc::open(temp_cpath.as_ptr(), flags, mode as libc::c_uint) };
-        if fd < 0 {
-            None
-        } else {
-            // Allocate entry manually for lock-free insertion
-            let entry = Box::into_raw(Box::new(crate::syscalls::io::FdEntry {
-                vpath: vpath.absolute,
-                manifest_key: vpath.manifest_key,
-                manifest_key_hash: vpath.manifest_key_hash,
-                temp_path,
-                is_vfs: true,
-                cached_stat: None,
-                mmap_count: 0,
-                lock_fd: -1,
-            }));
-
-            let old = state.open_fds.set(fd as u32, entry);
-            if !old.is_null() {
-                // If overwritten (unlikely for new FD!), reclaim old
-                unsafe { drop(Box::from_raw(old)) };
-            } else {
-                crate::syscalls::io::OPEN_FD_COUNT.fetch_add(1, Ordering::Relaxed);
-            }
-            Some(fd)
-        }
+        open_cow_write(state, &vpath, blob_path.as_str(), flags, mode)
     } else {
-        let blob_cpath = std::ffi::CString::new(blob_path.as_str()).ok()?;
-        let fd = unsafe { libc::open(blob_cpath.as_ptr(), flags, mode as libc::c_uint) };
-        if fd >= 0 {
-            // 🔥 Build and cache stat for VFS file
-            let mut cached_stat: libc::stat = unsafe { std::mem::zeroed() };
-            cached_stat.st_size = entry.size as _;
-            cached_stat.st_mode = entry.mode as _;
-            cached_stat.st_mtime = entry.mtime as _;
-            cached_stat.st_dev = 0x52494654; // "RIFT"
-            cached_stat.st_nlink = 1;
-            cached_stat.st_ino = vpath.manifest_key_hash as _;
+        open_cas_read(
+            state,
+            &vpath,
+            blob_path.as_str(),
+            flags,
+            mode,
+            entry.size as u64,
+            entry.mode as u32,
+            entry.mtime,
+        )
+    }
+}
 
-            crate::syscalls::io::track_fd(
-                fd,
-                &vpath.manifest_key,
-                true,
-                Some(cached_stat),
-                vpath.manifest_key_hash,
-            );
-            Some(fd)
-        } else {
-            None
+/// Open a CAS blob for reading — shared by VDir fast-path and IPC fallback.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn open_cas_read(
+    _state: &InceptionLayerState,
+    vpath: &VfsPath,
+    blob_path: &str,
+    flags: c_int,
+    mode: mode_t,
+    size: u64,
+    file_mode: u32,
+    mtime: u64,
+) -> Option<c_int> {
+    let blob_cpath = std::ffi::CString::new(blob_path).ok()?;
+    let fd = unsafe { libc::open(blob_cpath.as_ptr(), flags, mode as libc::c_uint) };
+    if fd >= 0 {
+        let mut cached_stat: libc::stat = unsafe { std::mem::zeroed() };
+        cached_stat.st_size = size as _;
+        cached_stat.st_mode = file_mode as _;
+        cached_stat.st_mtime = mtime as _;
+        cached_stat.st_dev = 0x52494654; // "RIFT"
+        cached_stat.st_nlink = 1;
+        cached_stat.st_ino = vpath.manifest_key_hash as _;
+
+        crate::syscalls::io::track_fd(
+            fd,
+            &vpath.manifest_key,
+            true,
+            Some(cached_stat),
+            vpath.manifest_key_hash,
+        );
+        Some(fd)
+    } else {
+        None
+    }
+}
+
+/// Open with CoW (Copy-on-Write) semantics — shared by VDir fast-path and IPC fallback.
+#[inline]
+unsafe fn open_cow_write(
+    state: &InceptionLayerState,
+    vpath: &VfsPath,
+    blob_path: &str,
+    flags: c_int,
+    mode: mode_t,
+) -> Option<c_int> {
+    inception_log!("open write request for '{}'", vpath.absolute);
+
+    // M4: Mark path as dirty in DirtyTracker (enables stat redirect to staging)
+    DIRTY_TRACKER.mark_dirty(&vpath.manifest_key);
+
+    let mut attempts = 0;
+    let mut fd = -1;
+    let mut temp_path_fs = FixedString::<1024>::new();
+    let pid = unsafe { libc::getpid() };
+    let tid_addr = &attempts as *const _ as usize;
+
+    while attempts < 100 {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        let mut buf = [0u8; 1024];
+        let mut writer = crate::macros::StackWriter::new(&mut buf);
+        let _ = write!(
+            writer,
+            "{}/.vrift/staging/vrift_cow_{}_{}_{}_{}.tmp",
+            state.project_root.as_str(),
+            pid,
+            timestamp,
+            tid_addr,
+            attempts
+        );
+        temp_path_fs.set(writer.as_str());
+
+        let c_temp = match std::ffi::CString::new(temp_path_fs.as_str()) {
+            Ok(c) => c,
+            Err(_) => break,
+        };
+        fd = unsafe {
+            libc::open(
+                c_temp.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd >= 0 {
+            break;
+        }
+        if unsafe { crate::get_errno() } != libc::EEXIST {
+            break;
+        }
+        attempts += 1;
+    }
+
+    if fd < 0 {
+        return None;
+    }
+    let temp_fd = fd;
+    let temp_path = temp_path_fs;
+    unsafe { libc::close(temp_fd) };
+    let temp_cpath = std::ffi::CString::new(temp_path.as_str()).ok()?;
+
+    inception_log!("COW TRIGGERED: '{}' -> '{}'", vpath.absolute, temp_path);
+    inception_record!(EventType::CowTriggered, vpath.manifest_key_hash, 0);
+
+    let blob_cpath = std::ffi::CString::new(blob_path).ok()?;
+    let src_fd = unsafe { libc::open(blob_cpath.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if src_fd >= 0 {
+        let dst_fd = unsafe {
+            libc::open(
+                temp_cpath.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        if dst_fd >= 0 {
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = unsafe { libc::read(src_fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                unsafe { libc::write(dst_fd, buf.as_ptr() as *const c_void, n as usize) };
+            }
+            unsafe { libc::close(dst_fd) };
+        }
+        unsafe { libc::close(src_fd) };
+    } else {
+        let dst_fd = unsafe {
+            libc::open(
+                temp_cpath.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        if dst_fd >= 0 {
+            unsafe { libc::close(dst_fd) };
         }
     }
+
+    let fd = unsafe { libc::open(temp_cpath.as_ptr(), flags, mode as libc::c_uint) };
+    if fd < 0 {
+        None
+    } else {
+        let entry = Box::into_raw(Box::new(crate::syscalls::io::FdEntry {
+            vpath: vpath.absolute,
+            manifest_key: vpath.manifest_key,
+            manifest_key_hash: vpath.manifest_key_hash,
+            temp_path,
+            is_vfs: true,
+            cached_stat: None,
+            mmap_count: 0,
+            lock_fd: -1,
+        }));
+
+        let old = state.open_fds.set(fd as u32, entry);
+        if !old.is_null() {
+            unsafe { drop(Box::from_raw(old)) };
+        } else {
+            crate::syscalls::io::OPEN_FD_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(fd)
+    }
+}
+
+/// Stack-allocated hex encoding of a 32-byte hash → 64-char hex string.
+/// Zero heap allocation.
+fn hex_encode_fixed(hash: &[u8; 32]) -> FixedString<68> {
+    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0u8; 64];
+    for (i, byte) in hash.iter().enumerate() {
+        buf[i * 2] = HEX_CHARS[(byte >> 4) as usize];
+        buf[i * 2 + 1] = HEX_CHARS[(byte & 0x0f) as usize];
+    }
+    let mut result = FixedString::<68>::new();
+    // Safety: all bytes are ASCII hex chars
+    result.set(unsafe { std::str::from_utf8_unchecked(&buf) });
+    result
+}
+
+/// Stack-allocated blob path: "{cas_root}/blake3/{xx}/{yy}/{hash}_{size}.bin"
+/// Zero heap allocation — uses FixedString<1024>.
+fn format_blob_path_fixed(
+    cas_root: &FixedString<1024>,
+    hash: &[u8; 32],
+    size: u64,
+) -> FixedString<1024> {
+    let hex = hex_encode_fixed(hash);
+    let hex_str = hex.as_str();
+    let mut path = FixedString::<1024>::new();
+    let mut buf = [0u8; 1024];
+    let mut writer = crate::macros::StackWriter::new(&mut buf);
+    let _ = write!(
+        writer,
+        "{}/blake3/{}/{}/{}_{}.bin",
+        cas_root.as_str(),
+        &hex_str[0..2],
+        &hex_str[2..4],
+        hex_str,
+        size
+    );
+    path.set(writer.as_str());
+    path
 }
 
 // Called by C bridge (c_open_bridge) after INITIALIZING check passes
 #[no_mangle]
 pub unsafe extern "C" fn velo_open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
     open_impl(path, flags, mode).unwrap_or_else(|| raw_open(path, flags, mode))
-}
-
-fn hex_encode(hash: &[u8; 32]) -> String {
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-    let mut result = String::with_capacity(64);
-    for byte in hash {
-        result.push(HEX_CHARS[(byte >> 4) as usize] as char);
-        result.push(HEX_CHARS[(byte & 0x0f) as usize] as char);
-    }
-    result
 }
 
 #[cfg(target_os = "macos")]
