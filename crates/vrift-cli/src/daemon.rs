@@ -18,13 +18,23 @@ fn get_socket_path() -> PathBuf {
 }
 
 pub async fn check_status(project_root: &Path) -> Result<()> {
-    let conn = connect_to_daemon(project_root).await?;
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        connect_to_daemon(project_root),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out connecting to daemon (5s)"))??;
     let mut stream = conn.stream;
 
     // Status request
     let req = VeloRequest::Status;
     send_request(&mut stream, req).await?;
-    let resp = read_response(&mut stream).await?;
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_response(&mut stream),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out waiting for daemon status (5s)"))??;
 
     match resp {
         VeloResponse::StatusAck { status } => {
@@ -127,9 +137,15 @@ pub async fn protect_file(
 
 pub async fn connect_to_daemon(project_root: &Path) -> Result<DaemonConnection> {
     let socket_path = get_socket_path();
-    let mut stream = match UnixStream::connect(&socket_path).await {
-        Ok(s) => s,
-        Err(_) => {
+    let connect_fut = UnixStream::connect(&socket_path);
+    let mut stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        connect_fut,
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        _ => {
             tracing::info!("Daemon not running. Attempting to start...");
             spawn_daemon()?;
             let mut s = None;
@@ -179,36 +195,58 @@ pub async fn connect_to_daemon(project_root: &Path) -> Result<DaemonConnection> 
 /// Used for standalone operations like IngestFullScan
 async fn connect_simple() -> Result<UnixStream> {
     let socket_path = get_socket_path();
-    let mut stream = match UnixStream::connect(&socket_path).await {
-        Ok(s) => s,
-        Err(_) => {
-            tracing::info!("Daemon not running. Attempting to start...");
-            spawn_daemon()?;
-            let mut s = None;
-            for _ in 0..10 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                if let Ok(conn) = UnixStream::connect(&socket_path).await {
-                    s = Some(conn);
-                    break;
+
+    // Try connecting + handshake directly first
+    if let Ok(mut stream) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        UnixStream::connect(&socket_path),
+    )
+    .await
+    .unwrap_or(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout")))
+    {
+        let handshake = VeloRequest::Handshake {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        if send_request(&mut stream, handshake).await.is_ok() {
+            if let Ok(resp) = read_response(&mut stream).await {
+                match resp {
+                    VeloResponse::HandshakeAck { .. } => return Ok(stream),
+                    VeloResponse::Error(e) => anyhow::bail!("Handshake failed: {}", e),
+                    _ => {}
                 }
             }
-            s.context("Failed to connect to daemon after starting it")?
         }
-    };
-
-    // Only handshake - no workspace registration
-    let handshake = VeloRequest::Handshake {
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
-        protocol_version: PROTOCOL_VERSION,
-    };
-    send_request(&mut stream, handshake).await?;
-    let resp = read_response(&mut stream).await?;
-
-    match resp {
-        VeloResponse::HandshakeAck { .. } => Ok(stream),
-        VeloResponse::Error(e) => anyhow::bail!("Handshake failed: {}", e),
-        _ => anyhow::bail!("Unexpected handshake response"),
     }
+
+    // Direct connect failed or handshake failed — spawn daemon and retry
+    tracing::info!("Daemon not running. Attempting to start...");
+    spawn_daemon()?;
+
+    for attempt in 0..20 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        if let Ok(mut stream) = UnixStream::connect(&socket_path).await {
+            let handshake = VeloRequest::Handshake {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_version: PROTOCOL_VERSION,
+            };
+            if send_request(&mut stream, handshake).await.is_ok() {
+                if let Ok(resp) = read_response(&mut stream).await {
+                    match resp {
+                        VeloResponse::HandshakeAck { .. } => {
+                            tracing::info!("Connected to daemon after {} attempts", attempt + 1);
+                            return Ok(stream);
+                        }
+                        VeloResponse::Error(e) => anyhow::bail!("Handshake failed: {}", e),
+                        _ => tracing::debug!("Unexpected handshake response, retrying..."),
+                    }
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("Failed to connect to daemon after starting it (20 attempts)")
 }
 
 fn spawn_daemon() -> Result<()> {
@@ -298,7 +336,13 @@ pub async fn ingest_via_daemon(
     send_request(&mut stream, req).await?;
     tracing::info!("[CLI] IngestFullScan request sent, waiting for response...");
 
-    let resp = read_response(&mut stream).await?;
+    // Ingest can take minutes for large datasets, use generous timeout
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        read_response(&mut stream),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out waiting for ingest response (120s)"))??;
     tracing::info!("[CLI] Received ingest response");
     match resp {
         VeloResponse::IngestAck {

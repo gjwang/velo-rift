@@ -69,6 +69,16 @@ RUNNING=0
 PIDS=()
 TEST_NAMES=()
 
+# Portable timeout: perl alarm on macOS, GNU timeout on Linux
+portable_timeout() {
+    local secs=$1; shift
+    if command -v timeout &>/dev/null; then
+        timeout "$secs" "$@"
+    else
+        perl -e "alarm $secs; exec @ARGV" "$@"
+    fi
+}
+
 run_test() {
     local test_script="$1"
     local test_name
@@ -76,7 +86,7 @@ run_test() {
     local log_file="$RESULTS_DIR/${test_name}.log"
 
     (
-        if timeout 120 bash "$test_script" > "$log_file" 2>&1; then
+        if portable_timeout 120 bash "$test_script" > "$log_file" 2>&1; then
             echo "PASS" > "$RESULTS_DIR/${test_name}.result"
         else
             echo "FAIL" > "$RESULTS_DIR/${test_name}.result"

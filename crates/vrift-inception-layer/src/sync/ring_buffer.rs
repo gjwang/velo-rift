@@ -92,42 +92,53 @@ impl RingBuffer {
     }
 
     /// Try to push a task into the buffer. Returns Err if full.
+    /// Uses CAS loop to prevent TOCTOU race between capacity check and slot claim.
     #[inline(always)]
     pub fn push(&self, task: Task) -> Result<(), Task> {
-        // Load head and tail
-        let head = self.head.0.load(Ordering::Relaxed);
-        let tail = self.tail.0.load(Ordering::Acquire);
+        loop {
+            let head = self.head.0.load(Ordering::Relaxed);
+            let tail = self.tail.0.load(Ordering::Acquire);
 
-        // Check if buffer is full
-        if head.wrapping_sub(tail) >= BUFFER_SIZE {
-            self.stats.0.push_errors.fetch_add(1, Ordering::Relaxed);
-            return Err(task);
+            // Check if buffer is full
+            if head.wrapping_sub(tail) >= BUFFER_SIZE {
+                self.stats.0.push_errors.fetch_add(1, Ordering::Relaxed);
+                return Err(task);
+            }
+
+            // CAS: atomically claim this slot — only one producer succeeds
+            match self.head.0.compare_exchange_weak(
+                head,
+                head.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // Safety: We exclusively own this slot via CAS
+                    unsafe {
+                        let slot = &self.buffer[head & BUFFER_MASK];
+                        *slot.get() = Some(task);
+                    }
+
+                    // Release fence to ensure task is visible to consumer
+                    std::sync::atomic::fence(Ordering::Release);
+
+                    // Update statistics
+                    self.stats.0.pushes.fetch_add(1, Ordering::Relaxed);
+                    let depth = head.wrapping_sub(tail) + 1;
+                    self.stats
+                        .0
+                        .max_depth
+                        .fetch_max(depth as u64, Ordering::Relaxed);
+
+                    return Ok(());
+                }
+                Err(_) => core::hint::spin_loop(),
+            }
         }
-
-        // Reserve slot atomically (MPSC: multiple producers)
-        let pos = self.head.0.fetch_add(1, Ordering::Relaxed);
-
-        // Safety: We've reserved the slot
-        unsafe {
-            let slot = &self.buffer[pos & BUFFER_MASK];
-            *slot.get() = Some(task);
-        }
-
-        // Release fence to ensure task is visible to consumer
-        std::sync::atomic::fence(Ordering::Release);
-
-        // Update statistics
-        self.stats.0.pushes.fetch_add(1, Ordering::Relaxed);
-        let depth = head.wrapping_sub(tail) + 1;
-        self.stats
-            .0
-            .max_depth
-            .fetch_max(depth as u64, Ordering::Relaxed);
-
-        Ok(())
     }
 
     /// Pop a task from the buffer. Only the Consumer (Worker Thread) calls this.
+    /// Spins until the producer finishes writing the slot value before advancing tail.
     #[inline(always)]
     pub fn pop(&self) -> Option<Task> {
         let tail = self.tail.0.load(Ordering::Relaxed);
@@ -138,21 +149,20 @@ impl RingBuffer {
             return None;
         }
 
-        // Safety: We are the sole consumer
-        let task = unsafe {
-            let slot = &self.buffer[tail & BUFFER_MASK];
-            (&mut *slot.get()).take()
-        };
-
-        // Always update tail (task should always be Some)
-        self.tail.0.store(tail.wrapping_add(1), Ordering::Release);
-
-        // Update statistics
-        if task.is_some() {
-            self.stats.0.pops.fetch_add(1, Ordering::Relaxed);
+        // Spin until the producer finishes writing the slot.
+        // This handles the window where head was CAS'd but value not yet stored.
+        loop {
+            let task = unsafe {
+                let slot = &self.buffer[tail & BUFFER_MASK];
+                (&mut *slot.get()).take()
+            };
+            if let Some(task) = task {
+                self.tail.0.store(tail.wrapping_add(1), Ordering::Release);
+                self.stats.0.pops.fetch_add(1, Ordering::Relaxed);
+                return Some(task);
+            }
+            core::hint::spin_loop();
         }
-
-        task
     }
 
     /// Get current buffer depth
