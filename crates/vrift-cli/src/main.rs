@@ -252,6 +252,12 @@ enum Commands {
         #[command(subcommand)]
         command: DebugCommands,
     },
+
+    /// Performance profiling (RFC-0045)
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -343,6 +349,16 @@ enum DebugCommands {
         /// Project directory (for auto-detect)
         #[arg(short, long, value_name = "DIR")]
         directory: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileCommands {
+    /// Display profiling statistics from last inception session
+    Show {
+        /// PID of the process (default: auto-detect latest)
+        #[arg(short, long)]
+        pid: Option<u32>,
     },
 }
 
@@ -588,6 +604,9 @@ async fn async_main(
         }
         Commands::Debug { command } => match command {
             DebugCommands::Vdir { file, directory } => cmd_debug_vdir(file, directory),
+        },
+        Commands::Profile { command } => match command {
+            ProfileCommands::Show { pid } => cmd_profile_show(pid),
         },
     }
 }
@@ -1697,4 +1716,203 @@ fn cmd_debug_vdir(file: Option<PathBuf>, directory: Option<PathBuf>) -> Result<(
 
     println!();
     Ok(())
+}
+
+/// RFC-0045: Display profiling statistics
+fn cmd_profile_show(pid: Option<u32>) -> Result<()> {
+    use console::style;
+
+    let profile_path = if let Some(p) = pid {
+        PathBuf::from(format!("/tmp/vrift-profile-{}.json", p))
+    } else {
+        // Auto-detect: find latest vrift-profile-*.json in /tmp
+        let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+        if let Ok(entries) = fs::read_dir("/tmp") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("vrift-profile-") && name_str.ends_with(".json") {
+                    if let Ok(meta) = entry.metadata() {
+                        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                        if latest.as_ref().is_none_or(|(_, t)| mtime > *t) {
+                            latest = Some((entry.path(), mtime));
+                        }
+                    }
+                }
+            }
+        }
+        match latest {
+            Some((path, _)) => path,
+            None => anyhow::bail!(
+                "No profile data found. Run with VRIFT_PROFILE=1 to enable profiling.\n\
+                 Example: VRIFT_PROFILE=1 vrift"
+            ),
+        }
+    };
+
+    if !profile_path.exists() {
+        anyhow::bail!(
+            "Profile file not found: {}\n\
+             Run with VRIFT_PROFILE=1 to enable profiling.",
+            profile_path.display()
+        );
+    }
+
+    let content = fs::read_to_string(&profile_path)?;
+    let data: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse profile: {}", profile_path.display()))?;
+
+    let pid_val = data["pid"].as_u64().unwrap_or(0);
+    let duration_ms = data["duration_ms"].as_u64().unwrap_or(0);
+    let total = data["total_syscalls"].as_u64().unwrap_or(0);
+
+    println!();
+    println!(
+        "{}",
+        style("╔══════════════════════════════════════════╗")
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        style("║  📊 VRift Performance Profile            ║")
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        style("╚══════════════════════════════════════════╝")
+            .cyan()
+            .bold()
+    );
+    println!();
+
+    println!("  {:<20} {}", "PID:", style(pid_val).bold());
+    println!("  {:<20} {:.1}s", "Duration:", duration_ms as f64 / 1000.0);
+    println!(
+        "  {:<20} {}",
+        "Total Syscalls:",
+        style(format_count(total)).bold()
+    );
+    if duration_ms > 0 {
+        let rate = total as f64 / (duration_ms as f64 / 1000.0);
+        println!("  {:<20} {}/s", "Syscall Rate:", format_count(rate as u64));
+    }
+    println!(
+        "  {:<20} {}",
+        "Source:",
+        style(profile_path.display()).dim()
+    );
+
+    // Syscall breakdown
+    println!();
+    println!("{}", style("  Syscall Breakdown").bold());
+    println!("  {}", style("─".repeat(38)).dim());
+
+    let syscalls = &data["syscalls"];
+    let entries = [
+        ("stat", syscalls["stat"].as_u64().unwrap_or(0)),
+        ("fstat", syscalls["fstat"].as_u64().unwrap_or(0)),
+        ("lstat", syscalls["lstat"].as_u64().unwrap_or(0)),
+        ("open", syscalls["open"].as_u64().unwrap_or(0)),
+        ("close", syscalls["close"].as_u64().unwrap_or(0)),
+        ("read", syscalls["read"].as_u64().unwrap_or(0)),
+        ("write", syscalls["write"].as_u64().unwrap_or(0)),
+        ("readdir", syscalls["readdir"].as_u64().unwrap_or(0)),
+        ("access", syscalls["access"].as_u64().unwrap_or(0)),
+    ];
+
+    for (name, count) in &entries {
+        if *count > 0 {
+            let pct = if total > 0 {
+                100.0 * *count as f64 / total as f64
+            } else {
+                0.0
+            };
+            // Bar chart
+            let bar_len = (pct / 2.0) as usize;
+            let bar: String = "█".repeat(bar_len.min(20));
+            println!(
+                "    {:<10} {:>10}  {:>5.1}%  {}",
+                name,
+                format_count(*count),
+                pct,
+                style(bar).cyan()
+            );
+        }
+    }
+
+    // VFS contribution
+    let vfs = &data["vfs"];
+    let handled = vfs["handled"].as_u64().unwrap_or(0);
+    let passthrough = vfs["passthrough"].as_u64().unwrap_or(0);
+    let handled_pct = vfs["handled_pct"].as_f64().unwrap_or(0.0);
+
+    if handled + passthrough > 0 {
+        println!();
+        println!("{}", style("  VFS Contribution").bold());
+        println!("  {}", style("─".repeat(38)).dim());
+        println!(
+            "    {:<20} {}",
+            "Handled by VFS:",
+            style(format_count(handled)).green()
+        );
+        println!(
+            "    {:<20} {}",
+            "Passthrough to FS:",
+            format_count(passthrough)
+        );
+
+        let pct_style = if handled_pct > 80.0 {
+            style(format!("{:.1}%", handled_pct)).green().bold()
+        } else if handled_pct > 50.0 {
+            style(format!("{:.1}%", handled_pct)).yellow().bold()
+        } else {
+            style(format!("{:.1}%", handled_pct)).red().bold()
+        };
+        println!("    {:<20} {}", "VFS Hit Rate:", pct_style);
+    }
+
+    // Cache stats
+    let cache = &data["cache"];
+    let vdir_hits = cache["vdir_hits"].as_u64().unwrap_or(0);
+    let vdir_misses = cache["vdir_misses"].as_u64().unwrap_or(0);
+    let hit_rate = cache["hit_rate_pct"].as_f64().unwrap_or(0.0);
+    let ipc_calls = cache["ipc_calls"].as_u64().unwrap_or(0);
+
+    if vdir_hits + vdir_misses > 0 {
+        println!();
+        println!("{}", style("  Cache Performance").bold());
+        println!("  {}", style("─".repeat(38)).dim());
+        println!(
+            "    {:<20} {}",
+            "VDir Hits:",
+            style(format_count(vdir_hits)).green()
+        );
+        println!("    {:<20} {}", "VDir Misses:", format_count(vdir_misses));
+
+        let hit_style = if hit_rate > 90.0 {
+            style(format!("{:.1}%", hit_rate)).green().bold()
+        } else if hit_rate > 70.0 {
+            style(format!("{:.1}%", hit_rate)).yellow().bold()
+        } else {
+            style(format!("{:.1}%", hit_rate)).red().bold()
+        };
+        println!("    {:<20} {}", "VDir Hit Rate:", hit_style);
+        println!("    {:<20} {}", "IPC Roundtrips:", format_count(ipc_calls));
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Format large numbers with K/M suffixes for readability
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 10_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
 }

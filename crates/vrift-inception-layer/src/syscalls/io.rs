@@ -276,6 +276,7 @@ pub unsafe extern "C" fn ftruncate_inception(fd: c_int, length: off_t) -> c_int 
 
 #[no_mangle]
 pub unsafe extern "C" fn write_inception(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
+    profile_count!(write_calls);
     #[cfg(target_os = "macos")]
     return crate::syscalls::macos_raw::raw_write(fd, buf, count);
     #[cfg(target_os = "linux")]
@@ -284,6 +285,7 @@ pub unsafe extern "C" fn write_inception(fd: c_int, buf: *const c_void, count: s
 
 #[no_mangle]
 pub unsafe extern "C" fn read_inception(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
+    profile_count!(read_calls);
     #[cfg(target_os = "macos")]
     return crate::syscalls::macos_raw::raw_read(fd, buf, count);
     #[cfg(target_os = "linux")]
@@ -292,6 +294,7 @@ pub unsafe extern "C" fn read_inception(fd: c_int, buf: *mut c_void, count: size
 
 #[no_mangle]
 pub unsafe extern "C" fn close_inception(fd: c_int) -> c_int {
+    profile_count!(close_calls);
     use crate::state::{EventType, InceptionLayerGuard, InceptionLayerState};
 
     let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);

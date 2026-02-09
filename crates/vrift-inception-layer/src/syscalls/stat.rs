@@ -80,6 +80,7 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
     } else {
         // Try Hot Stat Cache — Phase 1.3: seqlock-protected VDir lookup
         if let Some(entry) = vdir_lookup(state.mmap_ptr, state.mmap_size, manifest_path) {
+            profile_count!(vdir_hits);
             inception_record!(EventType::StatHit, vpath.manifest_key_hash, 11); // 11 = vdir_hit (seqlock)
             std::ptr::write_bytes(buf, 0, 1);
             (*buf).st_size = entry.size as _;
@@ -101,9 +102,11 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
         }
     }
 
+    profile_count!(vdir_misses);
     inception_record!(EventType::StatMiss, vpath.manifest_key_hash, 20); // 20 = vdir_miss, trying IPC
 
     // Try IPC query (also use manifest path format)
+    profile_count!(ipc_calls);
     if let Some(entry) = state.query_manifest(&vpath) {
         std::ptr::write_bytes(buf, 0, 1);
         (*buf).st_size = entry.size as _;
@@ -151,6 +154,7 @@ unsafe fn stat_impl(
 
 #[no_mangle]
 pub unsafe extern "C" fn velo_stat_impl(path: *const c_char, buf: *mut libc_stat) -> c_int {
+    profile_count!(stat_calls);
     stat_impl(path, buf, true).unwrap_or_else(|| {
         #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_stat(path, buf);
@@ -174,6 +178,7 @@ pub unsafe extern "C" fn stat_inception(path: *const c_char, buf: *mut libc_stat
 
 #[no_mangle]
 pub unsafe extern "C" fn velo_lstat_impl(path: *const c_char, buf: *mut libc_stat) -> c_int {
+    profile_count!(lstat_calls);
     stat_impl(path, buf, false).unwrap_or_else(|| {
         #[cfg(target_os = "macos")]
         return crate::syscalls::macos_raw::raw_lstat(path, buf);
@@ -196,6 +201,7 @@ pub unsafe extern "C" fn lstat_inception(path: *const c_char, buf: *mut libc_sta
 
 #[no_mangle]
 pub unsafe extern "C" fn velo_fstat_impl(fd: c_int, buf: *mut libc_stat) -> c_int {
+    profile_count!(fstat_calls);
     // 🔥 ULTRA-FAST PATH: Lock-free, Allocation-free, TLS-free logic
     // This supports usage inside malloc() without deadlock.
 
@@ -281,6 +287,7 @@ pub unsafe extern "C" fn fstat_inception(fd: c_int, buf: *mut libc_stat) -> c_in
 
 #[no_mangle]
 pub unsafe extern "C" fn velo_access_impl(path: *const c_char, mode: c_int) -> c_int {
+    profile_count!(access_calls);
     // Use raw syscall for fallback to avoid dlsym deadlock (Pattern 2682.v2)
     let _guard = match InceptionLayerGuard::enter() {
         Some(g) => g,

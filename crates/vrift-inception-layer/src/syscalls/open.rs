@@ -32,10 +32,14 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
                 path_str,
                 p.absolute
             );
+            profile_count!(vfs_handled);
             inception_record!(EventType::OpenHit, p.manifest_key_hash, 0);
             p
         }
-        None => return None,
+        None => {
+            profile_count!(vfs_passthrough);
+            return None;
+        }
     };
 
     let is_write = (flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC)) != 0;
@@ -50,6 +54,7 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
             // Skip directories (cas_hash is all zeros for dirs)
             let has_content = !vdir_entry.cas_hash.iter().all(|b| *b == 0);
             if has_content {
+                profile_count!(vdir_hits);
                 inception_record!(EventType::OpenHit, vpath.manifest_key_hash, 11); // 11 = vdir_open_hit
 
                 let blob_path =
@@ -77,6 +82,8 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
     // =========================================================================
     // SLOW PATH: IPC fallback — VDir miss, dirty file, or directory
     // =========================================================================
+    profile_count!(vdir_misses);
+    profile_count!(ipc_calls);
     let entry = match state.query_manifest_ipc(&vpath) {
         Some(e) => {
             inception_log!(
@@ -341,6 +348,7 @@ fn format_blob_path_fixed(
 // Called by C bridge (c_open_bridge) after INITIALIZING check passes
 #[no_mangle]
 pub unsafe extern "C" fn velo_open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+    profile_count!(open_calls);
     open_impl(path, flags, mode).unwrap_or_else(|| raw_open(path, flags, mode))
 }
 

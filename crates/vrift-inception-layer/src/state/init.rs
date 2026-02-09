@@ -360,6 +360,9 @@ impl InceptionLayerState {
         // Install custom panic handler for better diagnostics (Phase 5)
         install_panic_handler();
 
+        // RFC-0045: Initialize profiling counters if VRIFT_PROFILE=1
+        crate::profile::init_profile();
+
         Some(ptr)
     }
 

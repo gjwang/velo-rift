@@ -85,6 +85,7 @@ static mut DIRENT_BUF: libc::dirent = libc::dirent {
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn readdir_inception(dir: *mut c_void) -> *mut libc::dirent {
+    profile_count!(readdir_calls);
     // RFC-0050: Use IT_READDIR.old_func to avoid recursion (same fix as opendir_inception)
     let real = std::mem::transmute::<
         *const (),
