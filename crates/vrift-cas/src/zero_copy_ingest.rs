@@ -54,8 +54,8 @@ use crate::{Blake3Hash, CasError, Result};
 /// Refactored to use LinkStrategy for Inode Decoupling (Reflink Priority).
 fn link_or_clone_or_copy(source: &Path, target: &Path) -> io::Result<bool> {
     if target.exists() {
-        // Existing CAS file — already protected (0444 + uchg),
-        // skip redundant chmod/chflags (Phase4-#2)
+        // CAS file exists — permissions are enforced by the caller via
+        // enforce_cas_invariant() after this function returns (Iron Law).
         return Ok(false);
     }
 

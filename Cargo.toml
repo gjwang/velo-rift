@@ -14,8 +14,10 @@ members = [
     "crates/vrift-ipc",
     "crates/vrift-vdird",
 ]
-# Note: vrift-inception-layer has test=false/doctest=false in its Cargo.toml
-# to prevent hangs from its DYLD constructor, so it's safe in default-members.
+# Note: vrift-inception-layer triggers a Cargo filename collision warning (#6313)
+# because cdylib targets produce the same .dylib output artifact for normal and
+# test builds. This is a known Cargo limitation and harmless — the warning cannot
+# be suppressed without restructuring the dependency graph.
 default-members = [
     "crates/vrift-cas",
     "crates/vrift-config",

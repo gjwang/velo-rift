@@ -7,7 +7,7 @@ license.workspace = true
 
 [lib]
 name = "vrift_inception_layer"
-crate-type = ["cdylib"]  # Shared library for LD_PRELOAD
+crate-type = ["cdylib"]  # Shared library for DYLD_INSERT_LIBRARIES
 test = false  # Inception layer constructor causes hangs when tested
 doctest = false  # Also disable doctests to prevent any test harness loading
 
