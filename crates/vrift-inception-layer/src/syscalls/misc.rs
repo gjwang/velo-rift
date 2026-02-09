@@ -556,16 +556,25 @@ pub unsafe extern "C" fn mkdirat_inception(
     path: *const c_char,
     mode: libc::mode_t,
 ) -> c_int {
-    // Always let the real mkdirat execute — the kernel handles EEXIST correctly.
-    // Do NOT pre-check manifest: stale directory entries cause spurious EEXIST.
+    // RFC-0039: For mkdirat, we do the simple passthrough since resolving
+    // dirfd-relative paths for VDir lookup is complex. The kernel handles EEXIST.
     #[cfg(target_os = "macos")]
-    {
-        crate::syscalls::macos_raw::raw_mkdirat(dirfd, path, mode)
-    }
+    let result = crate::syscalls::macos_raw::raw_mkdirat(dirfd, path, mode);
     #[cfg(target_os = "linux")]
-    {
-        crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode)
+    let result = crate::syscalls::linux_raw::raw_mkdirat(dirfd, path, mode);
+
+    // On success, update VDir with new directory entry
+    if result == 0 {
+        if let Some(state) = crate::state::InceptionLayerState::get() {
+            // Resolve the path (handles dirfd-relative paths)
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            if let Some(vpath) = state.resolve_path(&path_str) {
+                let _ = state.manifest_mkdir(&vpath.manifest_key, mode);
+            }
+        }
     }
+
+    result
 }
 
 #[no_mangle]
@@ -696,18 +705,34 @@ pub unsafe extern "C" fn mkdir_inception(path: *const c_char, mode: libc::mode_t
         return crate::syscalls::macos_raw::raw_mkdir(path, mode);
     }
 
-    // Always let the real mkdir execute — the kernel correctly returns EEXIST
-    // when the directory already exists on the real filesystem.
-    // Do NOT pre-check the manifest here: manifest may have stale directory entries
-    // (e.g. target/debug after cargo clean) that would cause spurious EEXIST.
+    // RFC-0039: Check VDir (virtual view) for existence — NOT the static manifest.
+    // VDir reflects runtime mutations and is the authoritative source of truth.
+    if let Some(_guard) = InceptionLayerGuard::enter() {
+        if let Some(state) = InceptionLayerState::get() {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            if let Some(vpath) = state.resolve_path(&path_str) {
+                // O(1) VDir mmap lookup — zero alloc, zero IPC
+                if let Some(vdir_result) =
+                    vdir_lookup(state.mmap_ptr, state.mmap_size, &vpath.manifest_key)
+                {
+                    // Entry exists in VDir and not deleted → EEXIST
+                    if (vdir_result.flags & vrift_ipc::vdir_types::FLAG_DELETED) == 0 {
+                        crate::set_errno(libc::EEXIST);
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+
+    // VDir says not exists (or deleted) → let kernel create it
     let result = crate::syscalls::macos_raw::raw_mkdir(path, mode);
 
-    // RFC-0039 Live Ingest: Notify daemon of successful mkdir
+    // RFC-0039 Live Ingest: Update VDir with new directory entry
     if result == 0 {
         if let Some(state) = crate::state::InceptionLayerState::get() {
             let path_str = CStr::from_ptr(path).to_string_lossy();
             if let Some(vpath) = state.resolve_path(&path_str) {
-                // Fire-and-forget IPC to register new dir in manifest
                 let _ = state.manifest_mkdir(&vpath.manifest_key, mode);
             }
         }
@@ -729,11 +754,26 @@ pub unsafe extern "C" fn mkdir_inception(path: *const c_char, mode: libc::mode_t
         return crate::syscalls::linux_raw::raw_mkdir(path, mode);
     }
 
-    // Always let the real mkdir execute — the kernel correctly returns EEXIST
-    // when the directory already exists on the real filesystem.
+    // RFC-0039: Check VDir (virtual view) for existence — NOT the static manifest.
+    if let Some(_guard) = InceptionLayerGuard::enter() {
+        if let Some(state) = InceptionLayerState::get() {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            if let Some(vpath) = state.resolve_path(&path_str) {
+                if let Some(vdir_result) =
+                    vdir_lookup(state.mmap_ptr, state.mmap_size, &vpath.manifest_key)
+                {
+                    if (vdir_result.flags & vrift_ipc::vdir_types::FLAG_DELETED) == 0 {
+                        crate::set_errno(libc::EEXIST);
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+
     let result = crate::syscalls::linux_raw::raw_mkdir(path, mode);
 
-    // RFC-0039 Live Ingest: Notify daemon of successful mkdir
+    // RFC-0039 Live Ingest: Update VDir with new directory entry
     if result == 0 {
         if let Some(state) = crate::state::InceptionLayerState::get() {
             let path_str = CStr::from_ptr(path).to_string_lossy();
