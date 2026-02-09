@@ -996,10 +996,16 @@ impl InceptionLayerState {
         }
 
         // Initialize state - reset INITIALIZING to Ready (0) on success
+        // Record init duration for profiling (full 60s accounting)
+        let init_start = crate::profile::now_ns();
         let ptr = match Self::init() {
             Some(p) => {
                 INCEPTION_LAYER_STATE.store(p, Ordering::Release);
                 unsafe { INITIALIZING.store(InceptionState::Ready as u8, Ordering::SeqCst) };
+                let init_elapsed = crate::profile::now_ns().wrapping_sub(init_start);
+                crate::profile::PROFILE
+                    .init_ns
+                    .store(init_elapsed, std::sync::atomic::Ordering::Relaxed);
                 p
             }
             None => {

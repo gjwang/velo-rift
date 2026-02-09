@@ -419,27 +419,26 @@ pub static IT_MUNMAP: Interpose = Interpose {
     old_func: real_munmap as _,
 };
 
-// close/read/write: MUST stay in __nointerpose — velo_close_impl uses
-// InceptionLayerGuard which deadlocks when close() is called from within
-// another guarded syscall (e.g., open → TLS → close). The C bridges exist
-// but are not activated by dyld. Profile data comes from path-based
-// syscalls (open, stat, mkdir) which don't have this reentrance problem.
+// RFC-0045: Active interpositions for I/O profiling via C bridges.
+// - read/write: safe — just profile_timed! + raw_syscall (no guard, no TLS)
+// - close: safe after guard-free rewrite — reads INCEPTION_LAYER_STATE atomic
+//   pointer directly, no InceptionLayerGuard (avoids BOOTSTRAPPING deadlock)
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_WRITE: Interpose = Interpose {
     new_func: c_write_bridge as _,
     old_func: real_write as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_READ: Interpose = Interpose {
     new_func: c_read_bridge as _,
     old_func: real_read as _,
 };
 #[cfg(target_os = "macos")]
-#[link_section = "__DATA,__nointerpose"]
+#[link_section = "__DATA,__interpose"]
 #[used]
 pub static IT_CLOSE: Interpose = Interpose {
     new_func: c_close_bridge as _,

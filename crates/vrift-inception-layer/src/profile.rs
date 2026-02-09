@@ -88,6 +88,9 @@ pub struct VriftProfile {
 
     // ── Top-N Hot Paths (simple sampled atomic counter) ──
     pub sample_counter: AtomicU64, // Total sampled paths recorded
+
+    // ── Init time (ns from dylib load to init complete) ──
+    pub init_ns: AtomicU64,
 }
 
 // Safety: All fields are AtomicU64/AtomicBool — inherently Sync.
@@ -123,6 +126,7 @@ impl VriftProfile {
             ipc_roundtrip_ns: AtomicU64::new(0),
             start_time_ns: AtomicU64::new(0),
             sample_counter: AtomicU64::new(0),
+            init_ns: AtomicU64::new(0),
         }
     }
 }
@@ -257,6 +261,7 @@ fn dump_profile_json() {
     let end = now_ns();
     let duration_ns = end.saturating_sub(start);
     let duration_ms = duration_ns / 1_000_000;
+    let init_time = PROFILE.init_ns.load(Ordering::Relaxed);
 
     let total_calls = stat + fstat + lstat + open + close + read + write_c + readdir + access;
     let total_ns =
@@ -266,6 +271,7 @@ fn dump_profile_json() {
     let _ = writeln!(buf, "{{");
     let _ = writeln!(buf, "  \"pid\": {},", pid);
     let _ = writeln!(buf, "  \"duration_ms\": {},", duration_ms);
+    let _ = writeln!(buf, "  \"init_ns\": {},", init_time);
     let _ = writeln!(buf, "  \"total_syscalls\": {},", total_calls);
     let _ = writeln!(buf, "  \"total_syscall_ns\": {},", total_ns);
 
@@ -367,9 +373,10 @@ fn dump_profile_json() {
         0
     };
     let summary = format!(
-        "\n[vrift-profile] PID {} | {:.1}s | {} syscalls (avg {}ns) | VFS {}/{} ({:.0}%) | VDir hit {:.0}% | wrote {}\n",
+        "\n[vrift-profile] PID {} | {:.1}s | init {:.1}ms | {} syscalls (avg {}ns) | VFS {}/{} ({:.0}%) | VDir hit {:.0}% | wrote {}\n",
         pid,
         duration_ms as f64 / 1000.0,
+        init_time as f64 / 1_000_000.0,
         total_calls,
         avg_ns,
         handled,

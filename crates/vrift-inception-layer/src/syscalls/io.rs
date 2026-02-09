@@ -307,13 +307,12 @@ pub unsafe extern "C" fn velo_read_impl(fd: c_int, buf: *mut c_void, count: size
 }
 
 /// Close syscall implementation — called from C bridge (c_close_bridge).
-/// Handles COW session cleanup, FD tracking, and reactor reingest.
+/// Guard-free: reads INCEPTION_LAYER_STATE atomic pointer directly to avoid
+/// InceptionLayerGuard deadlock (BOOTSTRAPPING + TLS reentrance).
 /// Uses raw assembly syscalls internally, safe for interposition.
 #[no_mangle]
 pub unsafe extern "C" fn velo_close_impl(fd: c_int) -> c_int {
     profile_timed!(close_calls, close_ns, {
-        use crate::state::{EventType, InceptionLayerGuard, InceptionLayerState};
-
         let init_state = crate::state::INITIALIZING.load(std::sync::atomic::Ordering::Relaxed);
         if init_state != 0
             || crate::state::CIRCUIT_TRIPPED.load(std::sync::atomic::Ordering::Relaxed)
@@ -324,55 +323,40 @@ pub unsafe extern "C" fn velo_close_impl(fd: c_int) -> c_int {
             return crate::syscalls::linux_raw::raw_close(fd);
         }
 
-        let _guard = match InceptionLayerGuard::enter() {
-            Some(g) => g,
-            None => {
-                #[cfg(target_os = "macos")]
-                return crate::syscalls::macos_raw::raw_close(fd);
-                #[cfg(target_os = "linux")]
-                return crate::syscalls::linux_raw::raw_close(fd);
-            }
-        };
-
-        let state = match InceptionLayerState::get() {
-            Some(s) => s,
-            None => {
-                #[cfg(target_os = "macos")]
-                return crate::syscalls::macos_raw::raw_close(fd);
-                #[cfg(target_os = "linux")]
-                return crate::syscalls::linux_raw::raw_close(fd);
-            }
-        };
-
-        // RFC-0051: Monitor FD usage on close (to reset warning thresholds)
-        let _ = crate::syscalls::io::OPEN_FD_COUNT.fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |val| Some(val.saturating_sub(1)),
-        );
-        state.check_fd_usage();
-
-        // Check if this FD is a COW session
+        // Guard-free state access: read atomic pointer directly.
+        // NO InceptionLayerGuard (avoids BOOTSTRAPPING + TLS deadlock).
+        // open_fds is a lock-free concurrent map — safe without guard.
         let cow_info = {
-            let entry_ptr = state.open_fds.remove(fd as u32);
-            if !entry_ptr.is_null() {
-                unsafe { Some(*Box::from_raw(entry_ptr)) }
+            let ptr =
+                crate::state::INCEPTION_LAYER_STATE.load(std::sync::atomic::Ordering::Acquire);
+            if !ptr.is_null() {
+                let state = &*ptr;
+                // Decrement FD counter (atomic, no guard needed)
+                let _ = crate::syscalls::io::OPEN_FD_COUNT.fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |val| Some(val.saturating_sub(1)),
+                );
+                // Remove from open_fds (lock-free concurrent map)
+                let entry_ptr = state.open_fds.remove(fd as u32);
+                if !entry_ptr.is_null() {
+                    Some(*Box::from_raw(entry_ptr))
+                } else {
+                    untrack_fd(fd);
+                    None
+                }
             } else {
                 None
             }
         };
 
-        // Use a hash of the FD or 0 if not tracked for general close event
-        let file_id = 0; // Simplified for general close
-        inception_record!(EventType::Close, file_id, fd);
-
-        // Final close of the file
+        // Close the FD exactly once (fixes previous double-close bug)
         #[cfg(target_os = "macos")]
         let res = crate::syscalls::macos_raw::raw_close(fd);
         #[cfg(target_os = "linux")]
         let res = crate::syscalls::linux_raw::raw_close(fd);
 
-        // Offload IPC task to Worker (asynchronous)
+        // COW reingest: fire-and-forget to worker (non-blocking)
         if let Some(info) = cow_info {
             inception_log!(
                 "COW CLOSE: fd={} vpath='{}' temp='{}'",
@@ -381,27 +365,15 @@ pub unsafe extern "C" fn velo_close_impl(fd: c_int) -> c_int {
                 info.temp_path
             );
 
-            // Offload reingest to Worker (non-blocking)
             if let Some(reactor) = crate::sync::get_reactor() {
                 let _ = reactor.ring_buffer.push(crate::sync::Task::Reingest {
                     vpath: info.vpath.to_string(),
                     temp_path: info.temp_path.to_string(),
                 });
             }
-
-            res
-        } else {
-            // Not a COW file, but might be a VFS read-only file or non-VFS file
-            untrack_fd(fd);
-            #[cfg(target_os = "macos")]
-            {
-                crate::syscalls::macos_raw::raw_close(fd)
-            }
-            #[cfg(target_os = "linux")]
-            {
-                crate::syscalls::linux_raw::raw_close(fd)
-            }
         }
+
+        res
     }) // profile_timed! close
 }
 
