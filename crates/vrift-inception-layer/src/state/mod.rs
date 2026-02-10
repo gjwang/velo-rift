@@ -1117,7 +1117,7 @@ impl InceptionLayerState {
                 size: 0,
                 mtime: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs())
+                    .map(|d| d.as_nanos() as u64)
                     .unwrap_or(0),
                 mode: mode as u32,
                 flags: 1, // is_dir flag
@@ -1142,7 +1142,7 @@ impl InceptionLayerState {
                 size: 0,
                 mtime: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs())
+                    .map(|d| d.as_nanos() as u64)
                     .unwrap_or(0),
                 mode: 0o777,
                 flags: 2, // is_symlink pseudo-flag
