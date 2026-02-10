@@ -207,7 +207,7 @@ impl IngestHandler {
                         let vnode = vrift_ipc::VnodeEntry {
                             content_hash: result.hash,
                             size: result.size,
-                            mtime: meta.mtime() as u64,
+                            mtime: meta.mtime() as u64 * 1_000_000_000 + meta.mtime_nsec() as u64,
                             mode: meta.mode(),
                             flags: 0,
                             _pad: 0,
@@ -268,7 +268,7 @@ impl IngestHandler {
                 let vnode = vrift_ipc::VnodeEntry {
                     content_hash: [0u8; 32], // Directories have empty hash
                     size: 0,
-                    mtime: meta.mtime() as u64,
+                    mtime: meta.mtime() as u64 * 1_000_000_000 + meta.mtime_nsec() as u64,
                     mode: meta.mode(),
                     flags: 1, // Directory flag
                     _pad: 0,
@@ -315,7 +315,7 @@ impl IngestHandler {
                 let vnode = vrift_ipc::VnodeEntry {
                     content_hash,
                     size: target_bytes.len() as u64,
-                    mtime: meta.mtime() as u64,
+                    mtime: meta.mtime() as u64 * 1_000_000_000 + meta.mtime_nsec() as u64,
                     mode: 0o777,
                     flags: 2, // Symlink flag
                     _pad: 0,
