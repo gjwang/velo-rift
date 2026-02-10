@@ -19,7 +19,7 @@ mod imp {
     };
     use libc::{c_int, ENOENT};
     use vrift_cas::CasStore;
-    use vrift_manifest::{Manifest, VnodeEntry};
+    use vrift_manifest::{LmdbManifest, VnodeEntry};
 
     const TTL: Duration = Duration::from_secs(60);
     const BLOCK_SIZE: u64 = 4096;
@@ -37,7 +37,7 @@ mod imp {
     }
 
     impl VeloFs {
-        pub fn new(manifest: &Manifest, cas: CasStore) -> Self {
+        pub fn new(manifest: &LmdbManifest, cas: CasStore) -> Self {
             let mut fs = Self {
                 cas,
                 inodes: HashMap::new(),
@@ -62,7 +62,7 @@ mod imp {
             Ok(())
         }
 
-        fn init_from_manifest(&mut self, manifest: &Manifest) {
+        fn init_from_manifest(&mut self, manifest: &LmdbManifest) {
             // 1. Assign inodes to all paths
             let mut next_inode = 2; // 1 is root
 
@@ -78,10 +78,10 @@ mod imp {
             self.path_to_inode.insert("/".to_string(), 1);
 
             // Sort paths to process parents before children (ensures directory structure)
-            let mut paths: Vec<&str> = manifest.paths().collect();
-            paths.sort();
+            let mut entries = manifest.iter().unwrap_or_default();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-            for path in paths {
+            for (path, entry) in entries {
                 if path == "/" {
                     continue;
                 } // Already handled
@@ -89,43 +89,84 @@ mod imp {
                 let inode = next_inode;
                 next_inode += 1;
 
-                self.path_to_inode.insert(path.to_string(), inode);
+                self.path_to_inode.insert(path.clone(), inode);
 
-                let entry = manifest.get(path).unwrap();
-                let attr = Self::vnode_to_attr(inode, entry);
+                let attr = Self::vnode_to_attr(inode, &entry.vnode);
 
                 self.inodes.insert(
                     inode,
                     InodeEntry {
-                        path_hash: entry.content_hash,
+                        path_hash: entry.vnode.content_hash,
                         attr,
                         children: Vec::new(),
                     },
                 );
 
                 // Add to parent's children
-                let p = Path::new(path);
+                let p = Path::new(&path);
                 if let Some(parent) = p.parent() {
                     let parent_str = if parent == Path::new("") {
                         "/"
                     } else {
                         parent.to_str().unwrap()
                     };
-                    // Ensure normalized path (e.g., if parent is empty, it's root)
-                    // Or better: ensure we find the parent inode
-                    if let Some(parent_inode) = self.path_to_inode.get(parent_str) {
-                        let name = p.file_name().unwrap().to_str().unwrap().to_string();
-                        if let Some(parent_entry) = self.inodes.get_mut(parent_inode) {
-                            parent_entry.children.push((name, inode));
-                        }
+
+                    // Handle implicit directories
+                    let parent_inode = if let Some(&inode) = self.path_to_inode.get(parent_str) {
+                        inode
                     } else {
-                        // Parent might be missing from manifest if explicit entries omitted?
-                        // For MVP assume valid manifest.
-                        // Or auto-create implicit directories?
-                        // Let's assume manifest is complete.
+                        self.create_implicit_dirs(parent_str, &mut next_inode)
+                    };
+
+                    let name = p.file_name().unwrap().to_str().unwrap().to_string();
+                    if let Some(parent_entry) = self.inodes.get_mut(&parent_inode) {
+                        parent_entry.children.push((name, inode));
                     }
                 }
             }
+        }
+
+        fn create_implicit_dirs(&mut self, path: &str, next_inode: &mut u64) -> u64 {
+            if let Some(&inode) = self.path_to_inode.get(path) {
+                return inode;
+            }
+
+            // Recursively ensure parent exists
+            let p = Path::new(path);
+            let parent_inode = if let Some(parent) = p.parent() {
+                let parent_str = if parent == Path::new("") {
+                    "/"
+                } else {
+                    parent.to_str().unwrap()
+                };
+                self.create_implicit_dirs(parent_str, next_inode)
+            } else {
+                1 // Fallback to root
+            };
+
+            let inode = *next_inode;
+            *next_inode += 1;
+
+            self.path_to_inode.insert(path.to_string(), inode);
+
+            // Create directory entry
+            let attr = Self::default_dir_attr(inode);
+            self.inodes.insert(
+                inode,
+                InodeEntry {
+                    path_hash: [0; 32],
+                    attr,
+                    children: Vec::new(),
+                },
+            );
+
+            // Link to parent
+            if let Some(parent_entry) = self.inodes.get_mut(&parent_inode) {
+                let name = p.file_name().unwrap().to_str().unwrap().to_string();
+                parent_entry.children.push((name, inode));
+            }
+
+            inode
         }
 
         fn default_dir_attr(inode: u64) -> FileAttr {
@@ -233,7 +274,10 @@ mod imp {
                         reply.data(&data[offset..end]);
                     }
                 }
-                Err(_) => reply.error(libc::EIO),
+                Err(e) => {
+                    eprintln!("CAS Read Error for inode {}: {}", ino, e);
+                    reply.error(libc::EIO);
+                }
             }
         }
 
@@ -288,13 +332,13 @@ mod imp {
 #[cfg(not(all(feature = "fuse", target_os = "linux")))]
 mod imp {
     use vrift_cas::CasStore;
-    use vrift_manifest::Manifest;
+    use vrift_manifest::LmdbManifest;
 
     /// Dummy FUSE filesystem for non-Linux or non-feature builds
     pub struct VeloFs;
 
     impl VeloFs {
-        pub fn new(_manifest: &Manifest, _cas: CasStore) -> Self {
+        pub fn new(_manifest: &LmdbManifest, _cas: CasStore) -> Self {
             #[cfg(not(target_os = "linux"))]
             println!(
                 "⚠️  FUSE support is only available on Linux (current: {}).",

@@ -315,6 +315,9 @@ SIMEOF
            echo "[PASS] FUSE read verified."
        else
            echo "ERROR: Content mismatch in FUSE mount. Got: '$CONTENT'"
+           echo "=== MOUNT LOG ==="
+           cat "$TEST_DIR/mount.log"
+           echo "================="
            exit 1
        fi
     else

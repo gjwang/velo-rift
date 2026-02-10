@@ -390,9 +390,14 @@ fn main() -> Result<()> {
         .the_source_root
         .as_ref()
         .map(|p| vrift_manifest::normalize_path(&p.to_string_lossy()));
-    let cas_root = cli_cas_root_override
-        .clone()
-        .unwrap_or_else(|| vrift_manifest::normalize_path(vrift_config::DEFAULT_CAS_ROOT));
+    let cas_root = cli_cas_root_override.clone().unwrap_or_else(|| {
+        // Priority: Env Var > Config > Default
+        // We load config here to respect standard resolution order (including VR_THE_SOURCE env var)
+        match vrift_config::Config::load() {
+            Ok(config) => config.storage.the_source,
+            Err(_) => vrift_manifest::normalize_path(vrift_config::DEFAULT_CAS_ROOT),
+        }
+    });
 
     // Isolation check MUST happen before Tokio runtime starts (single-threaded requirement)
     if let Some(Commands::Run {
@@ -1436,6 +1441,8 @@ async fn cmd_watch(_cas_root: &Path, directory: &Path, output: &Path) -> Result<
     // We'll implemented a simple loop that consumes events.
 
     let mut last_ingest = std::time::Instant::now();
+    // Allow immediate triggering for the first event after startup
+    let mut first_trigger = true;
     let debounce_duration = Duration::from_secs(1);
 
     loop {
@@ -1447,7 +1454,8 @@ async fn cmd_watch(_cas_root: &Path, directory: &Path, output: &Path) -> Result<
                         // println!("Change detected: {:?}", event.paths);
 
                         // Simple debounce
-                        if last_ingest.elapsed() > debounce_duration {
+                        if first_trigger || last_ingest.elapsed() > debounce_duration {
+                            first_trigger = false;
                             println!("\n[Change Detected] Re-ingesting...");
                             if let Err(e) = daemon::ingest_via_daemon(
                                 directory, output, None, false, false, None, None, false,

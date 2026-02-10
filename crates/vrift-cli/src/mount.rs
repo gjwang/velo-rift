@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "fuse")]
 use vrift_cas::CasStore;
 #[cfg(feature = "fuse")]
-use vrift_manifest::Manifest;
+use vrift_manifest::LmdbManifest;
 
 #[derive(Args, Debug)]
 pub struct MountArgs {
@@ -45,7 +45,17 @@ pub fn run(args: MountArgs, cas_root: &Path) -> Result<()> {
     #[cfg(feature = "fuse")]
     {
         let cas = CasStore::new(cas_root)?;
-        let manifest = Manifest::load(manifest_path)?;
+
+        tracing::info!("  Format:     LMDB");
+        // We assume manifest_path points to the LMDB directory (RFC-0039)
+        // If it points to a file (legacy), LmdbManifest::open will replace it with a directory.
+        let manifest = LmdbManifest::open(manifest_path).with_context(|| {
+            format!(
+                "Failed to open LMDB manifest at {}",
+                manifest_path.display()
+            )
+        })?;
+
         let fs = vrift_fuse::VeloFs::new(&manifest, cas);
 
         // This will block until unmounted
