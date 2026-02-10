@@ -192,6 +192,167 @@ macro_rules! profile_latency {
     }};
 }
 
+// ── Per-file hot path tracking ──
+// 256-slot open-addressing hash table tracking per-file latency.
+// Zero cost when profiling disabled. Lock-free with atomic operations.
+
+const HOT_PATH_SLOTS: usize = 256;
+const HOT_PATH_STR_LEN: usize = 128;
+
+/// Single entry in the hot path table.
+/// Layout: path_hash (8B) + total_ns (8B) + call_count (8B) + path_str (128B) = 152B
+/// Total table: 256 * 152 = ~38KB in .bss — zero cost when unused.
+#[repr(C)]
+pub struct HotPathEntry {
+    pub path_hash: AtomicU64,  // FNV-1a hash of path (0 = empty slot)
+    pub total_ns: AtomicU64,   // Cumulative latency
+    pub call_count: AtomicU64, // Number of calls
+    pub path_str: [std::sync::atomic::AtomicU8; HOT_PATH_STR_LEN], // Truncated path
+}
+
+impl HotPathEntry {
+    const fn new() -> Self {
+        // SAFETY: AtomicU8::new(0) repeated — we need a workaround for const init
+        // Using transmute from zeroed bytes since AtomicU8 has same repr
+        Self {
+            path_hash: AtomicU64::new(0),
+            total_ns: AtomicU64::new(0),
+            call_count: AtomicU64::new(0),
+            path_str: unsafe { std::mem::zeroed() },
+        }
+    }
+}
+
+// SAFETY: All fields are atomic.
+unsafe impl Sync for HotPathEntry {}
+
+// Macro to create the static array since we can't use const generics with static
+#[allow(unused_macros)]
+macro_rules! make_hot_path_table {
+    ($n:expr) => {{
+        // SAFETY: HotPathEntry is all-zeros by default (atomics init to 0)
+        unsafe { std::mem::zeroed::<[HotPathEntry; $n]>() }
+    }};
+}
+
+/// Global hot path table — lives in .bss, zero cost when disabled.
+pub static HOT_PATH_TABLE: std::sync::LazyLock<Box<[HotPathEntry; HOT_PATH_SLOTS]>> =
+    std::sync::LazyLock::new(|| {
+        // SAFETY: All-zeros is valid for HotPathEntry (all atomics start at 0)
+        unsafe { Box::new(std::mem::zeroed()) }
+    });
+
+/// Record a file path + latency into the hot path table.
+/// Called from open/stat interpositions with the elapsed time.
+/// Uses open-addressing with linear probing. Lock-free via atomic CAS.
+#[inline]
+pub unsafe fn profile_record_path(path: *const libc::c_char, elapsed_ns: u64) {
+    if !PROFILE_ENABLED.load(Ordering::Relaxed) || path.is_null() {
+        return;
+    }
+
+    // Hash the path using FNV-1a (same as VDir)
+    let path_cstr = unsafe { std::ffi::CStr::from_ptr(path) };
+    let path_bytes = path_cstr.to_bytes();
+    if path_bytes.is_empty() {
+        return;
+    }
+    let hash = fnv1a_hash(path_bytes);
+    if hash == 0 {
+        return; // 0 = empty sentinel
+    }
+
+    let table = &*HOT_PATH_TABLE;
+    let start_slot = (hash as usize) % HOT_PATH_SLOTS;
+
+    for i in 0..16 {
+        // Only probe 16 slots to bound worst case
+        let slot = (start_slot + i) % HOT_PATH_SLOTS;
+        let entry = &table[slot];
+
+        let existing = entry.path_hash.load(Ordering::Relaxed);
+        if existing == hash {
+            // Found existing entry — accumulate
+            entry.total_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
+            entry.call_count.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if existing == 0 {
+            // Empty slot — try to claim it
+            match entry
+                .path_hash
+                .compare_exchange(0, hash, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    // Claimed! Write path string (one-time, truncated)
+                    let copy_len = path_bytes.len().min(HOT_PATH_STR_LEN - 1);
+                    for (j, &byte) in path_bytes.iter().enumerate().take(copy_len) {
+                        entry.path_str[j].store(byte, Ordering::Relaxed);
+                    }
+                    entry.total_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
+                    entry.call_count.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                Err(actual) if actual == hash => {
+                    // Another thread claimed it with same hash — accumulate
+                    entry.total_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
+                    entry.call_count.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                Err(_) => {
+                    // Another thread claimed it with different hash — continue probing
+                    continue;
+                }
+            }
+        }
+        // Slot occupied by different hash — continue probing
+    }
+    // Table full for this probe chain — drop sample (rare)
+}
+
+/// FNV-1a hash for path bytes
+#[inline]
+fn fnv1a_hash(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Collect hot path entries sorted by total_ns descending.
+/// Returns vec of (path_string, total_ns, call_count).
+pub fn collect_hot_paths(top_n: usize) -> Vec<(String, u64, u64)> {
+    let table = &*HOT_PATH_TABLE;
+    let mut entries: Vec<(String, u64, u64)> = Vec::new();
+
+    for entry in table.iter() {
+        let hash = entry.path_hash.load(Ordering::Relaxed);
+        if hash == 0 {
+            continue;
+        }
+        let ns = entry.total_ns.load(Ordering::Relaxed);
+        let count = entry.call_count.load(Ordering::Relaxed);
+
+        // Read path string
+        let mut path_buf = Vec::with_capacity(HOT_PATH_STR_LEN);
+        for j in 0..HOT_PATH_STR_LEN {
+            let b = entry.path_str[j].load(Ordering::Relaxed);
+            if b == 0 {
+                break;
+            }
+            path_buf.push(b);
+        }
+        let path = String::from_utf8_lossy(&path_buf).to_string();
+        entries.push((path, ns, count));
+    }
+
+    entries.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by total_ns descending
+    entries.truncate(top_n);
+    entries
+}
+
 /// Initialize profiling: check VRIFT_PROFILE env var, record start time.
 /// Called from InceptionLayerState::init() after env is safe to read.
 pub fn init_profile() {
@@ -349,8 +510,34 @@ fn dump_profile_json() {
     let _ = writeln!(buf, "    \"ipc_calls\": {},", ipc);
     let _ = writeln!(buf, "    \"vdir_lookup_ns\": {},", vdir_ns);
     let _ = writeln!(buf, "    \"ipc_roundtrip_ns\": {}", ipc_ns);
-    let _ = writeln!(buf, "  }}");
-    let _ = write!(buf, "}}");
+    let _ = writeln!(buf, "  }},");
+
+    // Hot paths — top 20 files by cumulative latency
+    let hot_paths = collect_hot_paths(20);
+    let _ = writeln!(buf, "  \"hot_paths\": [");
+    for (i, (path, ns, count)) in hot_paths.iter().enumerate() {
+        let avg = if *count > 0 { ns / count } else { 0 };
+        let comma = if i + 1 < hot_paths.len() { "," } else { "" };
+        // Escape path for JSON (simple: replace \ with \\, " with \")
+        let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+        let _ = writeln!(
+            buf,
+            "    {{ \"path\": \"{}\", \"total_ns\": {}, \"count\": {}, \"avg_ns\": {} }}{}",
+            escaped, ns, count, avg, comma
+        );
+    }
+    let _ = writeln!(buf, "  ],");
+
+    // Build cache counters
+    let bc_checks = crate::build_cache::CHECK_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    let bc_overrides =
+        crate::build_cache::OVERRIDE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    let bc_active = crate::build_cache::is_active();
+    let _ = write!(
+        buf,
+        "  \"build_cache\": {{ \"active\": {}, \"checks\": {}, \"overrides\": {} }}\n}}",
+        bc_active, bc_checks, bc_overrides
+    );
 
     // Write to file — use raw libc to avoid allocator issues in atexit
     let path = format!("/tmp/vrift-profile-{}.json\0", pid);

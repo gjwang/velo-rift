@@ -53,3 +53,30 @@ Space savings from content-addressable storage:
 - **Dataset**: `node_modules` directory (npm install)
 - **Method**: daemon pre-started, `vrift ingest` with release build
 - **Re-ingest**: same dataset, manifest cache loaded, warm CAS
+
+## Build Cache (mtime override POC)
+
+Target: `velo` project (329 crates, ~51s clean build)
+
+| Scenario | Time | Crates Compiled | Speedup |
+|----------|------|-----------------|---------|
+| Clean build (no cache) | 51.0s | 329 | — |
+| No-op (intact target/) | 0.37s | 0 | 138x |
+| `cp -a` restore (mtime preserved) | 0.38s | 0 | 134x |
+| `cp -r` restore (mtime reset) | 25.7s | 329 | 2x |
+| **`cp -r` + VRift BUILD_CACHE** | **0.67s** | **0** | **76x** |
+
+### Root Cause
+
+Cargo uses **nanosecond-precision** mtime comparison for freshness checks.
+`cp -r` resets all file mtimes to copy-time, but copy order creates nanosecond
+differences between files → cargo sees dependency outputs as "newer" → dirty.
+
+### Mechanism
+
+VRift intercepts `stat()` at the syscall layer and overrides mtime for all files
+under `target/debug/` and `target/release/` to a uniform `(now, 0ns)` timestamp.
+Cargo sees all artifacts as equally "recent" and newer than all sources → no-op.
+
+This is a POC shim. Production implementation will use VDir to serve target/
+artifacts with their original build-time mtimes.

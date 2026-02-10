@@ -88,11 +88,13 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
             {
                 (*buf).st_mode = entry.mode as u16;
                 (*buf).st_mtime = entry.mtime_sec as _;
+                (*buf).st_mtime_nsec = entry.mtime_nsec as _;
             }
             #[cfg(target_os = "linux")]
             {
                 (*buf).st_mode = entry.mode as _;
                 (*buf).st_mtime = entry.mtime_sec as _;
+                (*buf).st_mtime_nsec = entry.mtime_nsec as _;
             }
             (*buf).st_dev = 0x52494654; // "RIFT"
             (*buf).st_nlink = 1;
@@ -110,15 +112,20 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
     if let Some(entry) = state.query_manifest(&vpath) {
         std::ptr::write_bytes(buf, 0, 1);
         (*buf).st_size = entry.size as _;
+        // VnodeEntry.mtime is nanoseconds since epoch — decompose for stat
+        let mtime_sec = (entry.mtime / 1_000_000_000) as i64;
+        let mtime_nsec = (entry.mtime % 1_000_000_000) as i64;
         #[cfg(target_os = "macos")]
         {
             (*buf).st_mode = entry.mode as u16;
-            (*buf).st_mtime = entry.mtime as _;
+            (*buf).st_mtime = mtime_sec as _;
+            (*buf).st_mtime_nsec = mtime_nsec as _;
         }
         #[cfg(target_os = "linux")]
         {
             (*buf).st_mode = entry.mode as _;
-            (*buf).st_mtime = entry.mtime as _;
+            (*buf).st_mtime = mtime_sec as _;
+            (*buf).st_mtime_nsec = mtime_nsec as _;
         }
         (*buf).st_dev = 0x52494654; // "RIFT"
         (*buf).st_nlink = 1;
@@ -148,20 +155,67 @@ unsafe fn stat_impl(
     let _guard = InceptionLayerGuard::enter()?;
     let path_str = CStr::from_ptr(path).to_str().ok()?;
 
-    // RFC-0044: Symlink following logic not yet implemented for VFS
-    stat_impl_common(path_str, buf)
+    // RFC-0044: Try VDir first (symlink following not yet implemented)
+    if let Some(result) = stat_impl_common(path_str, buf) {
+        return Some(result);
+    }
+
+    // Build cache fallback: when VDir misses but build cache is active,
+    // intercept target artifact stat calls and override mtime to now().
+    // This handles the passthrough path (target/ not in VDir).
+    //
+    // CRITICAL: must override BOTH seconds AND nanoseconds.
+    // Cargo uses nanosecond-precision mtime comparison:
+    //   dep_mtime.ns > output_mtime.ns → dirty
+    // With cp -r, files get different nanosecond values based on copy order.
+    // Setting all to (override_ts, 0ns) ensures exact equality → fresh.
+    if let Some(override_ts) = crate::build_cache::should_override_mtime(path_str) {
+        // Do the real stat first to get actual file metadata
+        #[cfg(target_os = "macos")]
+        let res = crate::syscalls::macos_raw::raw_stat(path, buf);
+        #[cfg(target_os = "linux")]
+        let res = crate::syscalls::linux_raw::raw_stat(path, buf);
+
+        if res == 0 {
+            // Override mtime to a uniform timestamp across ALL target files.
+            // Both seconds and nanoseconds must be identical to prevent
+            // cargo's nanosecond-precision ordering check from triggering.
+            (*buf).st_mtime = override_ts as _;
+            (*buf).st_mtime_nsec = 0;
+            return Some(0);
+        }
+    }
+
+    None
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn velo_stat_impl(path: *const c_char, buf: *mut libc_stat) -> c_int {
-    profile_timed!(stat_calls, stat_ns, {
+    if crate::profile::PROFILE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        let _t0 = crate::profile::now_ns();
+        let _result = stat_impl(path, buf, true).unwrap_or_else(|| {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_stat(path, buf);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_stat(path, buf);
+        });
+        let _elapsed = crate::profile::now_ns().wrapping_sub(_t0);
+        crate::profile::PROFILE
+            .stat_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::profile::PROFILE
+            .stat_ns
+            .fetch_add(_elapsed, std::sync::atomic::Ordering::Relaxed);
+        crate::profile::profile_record_path(path, _elapsed);
+        _result
+    } else {
         stat_impl(path, buf, true).unwrap_or_else(|| {
             #[cfg(target_os = "macos")]
             return crate::syscalls::macos_raw::raw_stat(path, buf);
             #[cfg(target_os = "linux")]
             return crate::syscalls::linux_raw::raw_stat(path, buf);
         })
-    })
+    }
 }
 
 #[no_mangle]

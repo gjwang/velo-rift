@@ -1042,7 +1042,7 @@ impl InceptionLayerState {
             return Some(vrift_ipc::VnodeEntry {
                 content_hash: entry.cas_hash,
                 size: entry.size,
-                mtime: entry.mtime_sec as u64,
+                mtime: entry.mtime_sec as u64 * 1_000_000_000 + entry.mtime_nsec as u64,
                 mode: entry.mode,
                 flags: entry.flags,
                 _pad: 0,

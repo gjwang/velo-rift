@@ -348,9 +348,21 @@ fn format_blob_path_fixed(
 // Called by C bridge (c_open_bridge) after INITIALIZING check passes
 #[no_mangle]
 pub unsafe extern "C" fn velo_open_impl(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
-    profile_timed!(open_calls, open_ns, {
+    if crate::profile::PROFILE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        let _t0 = crate::profile::now_ns();
+        let _result = open_impl(path, flags, mode).unwrap_or_else(|| raw_open(path, flags, mode));
+        let _elapsed = crate::profile::now_ns().wrapping_sub(_t0);
+        crate::profile::PROFILE
+            .open_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::profile::PROFILE
+            .open_ns
+            .fetch_add(_elapsed, std::sync::atomic::Ordering::Relaxed);
+        crate::profile::profile_record_path(path, _elapsed);
+        _result
+    } else {
         open_impl(path, flags, mode).unwrap_or_else(|| raw_open(path, flags, mode))
-    })
+    }
 }
 
 #[cfg(target_os = "macos")]

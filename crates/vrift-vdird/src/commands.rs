@@ -118,10 +118,12 @@ impl CommandHandler {
 
         // 1. First check VDir (runtime overlay for COW mutations)
         if let Some(entry) = self.vdir.lookup(path_hash) {
+            // Reconstruct nanosecond mtime from VDirEntry sec+nsec
+            let mtime_ns = entry.mtime_sec as u64 * 1_000_000_000 + entry.mtime_nsec as u64;
             let vnode = VnodeEntry {
                 content_hash: entry.cas_hash,
                 size: entry.size,
-                mtime: entry.mtime_sec as u64,
+                mtime: mtime_ns,
                 mode: entry.mode,
                 flags: entry.flags,
                 _pad: 0,
@@ -150,12 +152,15 @@ impl CommandHandler {
 
     /// Handle ManifestUpsert
     fn handle_manifest_upsert(&mut self, path: &str, entry: VnodeEntry) -> VeloResponse {
+        // VnodeEntry.mtime is nanoseconds since epoch — decompose for VDirEntry
+        let mtime_sec = (entry.mtime / 1_000_000_000) as i64;
+        let mtime_nsec = (entry.mtime % 1_000_000_000) as u32;
         let vdir_entry = VDirEntry {
             path_hash: fnv1a_hash(path),
             cas_hash: entry.content_hash,
             size: entry.size,
-            mtime_sec: entry.mtime as i64,
-            mtime_nsec: 0,
+            mtime_sec,
+            mtime_nsec,
             mode: entry.mode,
             flags: entry.flags,
             _pad: [0; 3],
@@ -198,8 +203,8 @@ impl CommandHandler {
                 path_hash: old_hash,
                 cas_hash: lmdb_entry.vnode.content_hash,
                 size: lmdb_entry.vnode.size,
-                mtime_sec: lmdb_entry.vnode.mtime as i64,
-                mtime_nsec: 0,
+                mtime_sec: (lmdb_entry.vnode.mtime / 1_000_000_000) as i64,
+                mtime_nsec: (lmdb_entry.vnode.mtime % 1_000_000_000) as u32,
                 mode: lmdb_entry.vnode.mode,
                 flags: lmdb_entry.vnode.flags,
                 _pad: [0; 3],
@@ -250,8 +255,8 @@ impl CommandHandler {
                 path_hash,
                 cas_hash: lmdb_entry.vnode.content_hash,
                 size: lmdb_entry.vnode.size,
-                mtime_sec: lmdb_entry.vnode.mtime as i64,
-                mtime_nsec: 0,
+                mtime_sec: (lmdb_entry.vnode.mtime / 1_000_000_000) as i64,
+                mtime_nsec: (lmdb_entry.vnode.mtime % 1_000_000_000) as u32,
                 mode: lmdb_entry.vnode.mode,
                 flags: lmdb_entry.vnode.flags,
                 _pad: [0; 3],
@@ -400,7 +405,7 @@ impl CommandHandler {
             entry: Some(VnodeEntry {
                 content_hash: hash_bytes,
                 size: meta.len(),
-                mtime: meta.mtime() as u64,
+                mtime: meta.mtime() as u64 * 1_000_000_000 + meta.mtime_nsec() as u64,
                 mode: meta.mode(),
                 flags: 0,
                 _pad: 0,
@@ -542,7 +547,11 @@ impl CommandHandler {
         for result in results.iter().flatten() {
             // Try to get metadata for mtime/mode
             let (mtime, mode) = match fs::metadata(&result.source_path) {
-                Ok(meta) => (meta.mtime() as u64, meta.mode()),
+                Ok(meta) => {
+                    // VnodeEntry.mtime is nanoseconds since epoch
+                    let mtime_ns = meta.mtime() as u64 * 1_000_000_000 + meta.mtime_nsec() as u64;
+                    (mtime_ns, meta.mode())
+                }
                 Err(_) => (0, 0o644), // Fallback
             };
 
@@ -986,14 +995,14 @@ mod tests {
     async fn test_manifest_update_mtime() {
         let (mut handler, _temp) = create_test_handler();
 
-        // Insert a file
+        // Insert a file (mtime in nanoseconds since epoch)
         handler
             .handle_request(VeloRequest::ManifestUpsert {
                 path: "test.txt".to_string(),
                 entry: VnodeEntry {
                     content_hash: [0; 32],
                     size: 100,
-                    mtime: 1000,
+                    mtime: 1_000_000_000_000, // 1000 seconds in ns
                     mode: 0o644,
                     flags: 0,
                     _pad: 0,
@@ -1011,7 +1020,7 @@ mod tests {
             .await;
         assert!(matches!(response, VeloResponse::ManifestAck { .. }));
 
-        // Verify mtime was updated
+        // Verify mtime was updated (VnodeEntry.mtime is nanoseconds)
         let response = handler
             .handle_request(VeloRequest::ManifestGet {
                 path: "test.txt".to_string(),
@@ -1019,7 +1028,7 @@ mod tests {
             .await;
         match response {
             VeloResponse::ManifestAck { entry: Some(e) } => {
-                assert_eq!(e.mtime, 5); // 5 seconds
+                assert_eq!(e.mtime, new_mtime_ns); // 5.5 seconds in ns
                 assert_eq!(e.size, 100); // size preserved
             }
             _ => panic!("Expected entry"),

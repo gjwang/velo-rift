@@ -46,6 +46,7 @@ pub mod macros;
 pub mod interpose;
 #[macro_use]
 pub mod profile;
+pub mod build_cache;
 pub mod ipc;
 pub mod path;
 pub mod raw_context;
