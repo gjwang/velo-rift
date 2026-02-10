@@ -1010,16 +1010,26 @@ async fn handle_request(
                 use vrift_ipc::fnv1a_hash;
                 use vrift_ipc::vdir_types::VDirEntry;
 
-                // Compute VDir file path based on project path hash
-                let vdir_dir = state
-                    .cas
-                    .root()
-                    .parent()
-                    .unwrap_or(state.cas.root())
-                    .join("vdir");
-                let _ = std::fs::create_dir_all(&vdir_dir);
-                let project_hash = fnv1a_hash(&path);
-                let vdir_path = vdir_dir.join(format!("{:016x}.vdir", project_hash));
+                // VDir file path must match inception layer's derivation:
+                // compute_project_id(project_root) → BLAKE3 first 16 chars → {id}.vdir
+                let project_id = vrift_config::path::compute_project_id(&path);
+                let vdir_path = match vrift_config::path::get_vdir_mmap_path(&project_id) {
+                    Some(p) => {
+                        let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+                        p
+                    }
+                    None => {
+                        tracing::warn!("VDir backfill skipped (no home dir)");
+                        return VeloResponse::IngestAck {
+                            files: total_files,
+                            blobs: unique_blobs,
+                            new_bytes,
+                            total_bytes,
+                            duration_ms: duration.as_millis() as u64,
+                            manifest_path,
+                        };
+                    }
+                };
 
                 match vrift_vdird::vdir::VDir::create_or_open(&vdir_path) {
                     Ok(mut vdir) => {
