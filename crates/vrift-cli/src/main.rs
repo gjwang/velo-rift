@@ -325,6 +325,11 @@ async fn async_main(cli: Cli, cas_root: PathBuf) -> Result<()> {
         },
         Commands::Watch { directory, .. } => {
             println!("Watching {}...", directory.display());
+            let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+            vrift_vdird::watch::spawn_watch_task(directory.clone(), tx);
+            while let Some(event) = rx.recv().await {
+                println!("Change Detected: {:?}", event);
+            }
             Ok(())
         }
         Commands::Active { phantom, directory } => {

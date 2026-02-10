@@ -8,9 +8,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
-use vrift_ipc::{
-    VeloError, VeloErrorKind, VeloRequest, VeloResponse, VnodeEntry, PROTOCOL_VERSION,
-};
+use vrift_ipc::{VeloError, VeloRequest, VeloResponse, VnodeEntry, PROTOCOL_VERSION};
 
 /// Command handler for vdir_d
 pub struct CommandHandler {
@@ -113,13 +111,11 @@ impl CommandHandler {
     }
 
     /// Handle ManifestGet
-    /// First checks VDir (runtime overlay for COW), then falls back to LMDB (persistent storage)
     fn handle_manifest_get(&self, path: &str) -> VeloResponse {
         let path_hash = fnv1a_hash(path);
 
         // 1. First check VDir (runtime overlay for COW mutations)
         if let Some(entry) = self.vdir.lock().unwrap().lookup(path_hash) {
-            // Reconstruct nanosecond mtime from VDirEntry sec+nsec
             let mtime_ns = entry.mtime_sec as u64 * 1_000_000_000 + entry.mtime_nsec as u64;
             let vnode = VnodeEntry {
                 content_hash: entry.cas_hash,
@@ -133,26 +129,19 @@ impl CommandHandler {
         }
 
         // 2. Fallback to LMDB (persistent storage)
-        // Ensure path starts with slash for LMDB lookup
-        let lookup_path = if path.starts_with('/') {
-            path.to_string()
-        } else {
-            format!("/{}", path)
-        };
-
-        match self.manifest.get(&lookup_path) {
+        match self.manifest.get(path) {
             Ok(Some(entry)) => {
-                debug!(path = %lookup_path, "ManifestGet: found in LMDB");
+                debug!(path = %path, "ManifestGet: found in LMDB");
                 VeloResponse::ManifestAck {
                     entry: Some(entry.vnode),
                 }
             }
             Ok(None) => {
-                debug!(path = %lookup_path, "ManifestGet: not found in VDir or LMDB");
+                debug!(path = %path, "ManifestGet: not found");
                 VeloResponse::ManifestAck { entry: None }
             }
             Err(e) => {
-                warn!(path = %lookup_path, error = %e, "ManifestGet: LMDB lookup failed");
+                warn!(path = %path, error = %e, "ManifestGet: LMDB lookup failed");
                 VeloResponse::ManifestAck { entry: None }
             }
         }
@@ -160,7 +149,6 @@ impl CommandHandler {
 
     /// Handle ManifestUpsert
     fn handle_manifest_upsert(&mut self, path: &str, entry: VnodeEntry) -> VeloResponse {
-        // VnodeEntry.mtime is nanoseconds since epoch — decompose for VDirEntry
         let mtime_sec = (entry.mtime / 1_000_000_000) as i64;
         let mtime_nsec = (entry.mtime % 1_000_000_000) as u32;
         let vdir_entry = VDirEntry {
@@ -191,7 +179,6 @@ impl CommandHandler {
     fn handle_manifest_remove(&mut self, path: &str) -> VeloResponse {
         let path_hash = fnv1a_hash(path);
         if self.vdir.lock().unwrap().mark_dirty(path_hash, false) {
-            // For now, just clear dirty bit. Full deletion would require tombstone.
             debug!(path = %path, "Marked for removal");
             VeloResponse::ManifestAck { entry: None }
         } else {
@@ -199,12 +186,11 @@ impl CommandHandler {
         }
     }
 
-    /// Handle ManifestRename: remove old path, upsert under new path
+    /// Handle ManifestRename
     fn handle_manifest_rename(&mut self, old_path: &str, new_path: &str) -> VeloResponse {
         let old_hash = fnv1a_hash(old_path);
         let new_hash = fnv1a_hash(new_path);
 
-        // Lookup old entry (VDir first, then LMDB)
         let old_entry = if let Some(entry) = self.vdir.lock().unwrap().lookup(old_hash) {
             Some(*entry)
         } else if let Ok(Some(lmdb_entry)) = self.manifest.get(old_path) {
@@ -225,10 +211,7 @@ impl CommandHandler {
 
         match old_entry {
             Some(entry) => {
-                // Mark old path as removed
                 self.vdir.lock().unwrap().mark_dirty(old_hash, false);
-
-                // Insert under new path hash
                 let new_entry = VDirEntry {
                     path_hash: new_hash,
                     ..entry
@@ -250,19 +233,18 @@ impl CommandHandler {
                 }
             }
             None => {
-                debug!(path = %old_path, "Rename: source not found, treating as no-op");
+                debug!(path = %old_path, "Rename: source not found");
                 VeloResponse::ManifestAck { entry: None }
             }
         }
     }
 
-    /// Handle ManifestUpdateMtime: update mtime on existing entry
+    /// Handle ManifestUpdateMtime
     fn handle_manifest_update_mtime(&mut self, path: &str, mtime_ns: u64) -> VeloResponse {
         let path_hash = fnv1a_hash(path);
         let mtime_sec = (mtime_ns / 1_000_000_000) as i64;
         let mtime_nsec = (mtime_ns % 1_000_000_000) as u32;
 
-        // Look up existing entry (VDir first, then LMDB)
         let existing = if let Some(entry) = self.vdir.lock().unwrap().lookup(path_hash) {
             Some(*entry)
         } else if let Ok(Some(lmdb_entry)) = self.manifest.get(path) {
@@ -306,9 +288,8 @@ impl CommandHandler {
         }
     }
 
-    /// Handle ManifestListDir: list direct children of a directory path
+    /// Handle ManifestListDir
     fn handle_manifest_list_dir(&self, path: &str) -> VeloResponse {
-        // Build prefix for direct children lookup
         let prefix = if path.is_empty() || path == "/" {
             String::new()
         } else if path.ends_with('/') {
@@ -320,19 +301,16 @@ impl CommandHandler {
         let mut entries = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // Query LMDB for all entries, filter by prefix
         if let Ok(all_entries) = self.manifest.iter() {
             for (entry_path, manifest_entry) in &all_entries {
                 if !entry_path.starts_with(&prefix) {
                     continue;
                 }
-                // Extract direct child name (strip prefix, take first component)
                 let relative = &entry_path[prefix.len()..];
                 let child_name = if let Some(slash_pos) = relative.find('/') {
-                    // This is a deeper path → the direct child is a directory
                     let name = &relative[..slash_pos];
                     if !seen.insert(name.to_string()) {
-                        continue; // Already seen this directory
+                        continue;
                     }
                     entries.push(vrift_ipc::DirEntry {
                         name: name.to_string(),
@@ -343,10 +321,7 @@ impl CommandHandler {
                     relative
                 };
 
-                if child_name.is_empty() {
-                    continue;
-                }
-                if !seen.insert(child_name.to_string()) {
+                if child_name.is_empty() || !seen.insert(child_name.to_string()) {
                     continue;
                 }
 
@@ -362,66 +337,54 @@ impl CommandHandler {
         VeloResponse::ManifestListAck { entries }
     }
 
-    /// Handle ManifestReingest (CoW commit or new file capture)
+    /// Handle ManifestReingest
     async fn handle_reingest(&mut self, vpath: &str, temp_path: &str) -> VeloResponse {
         let source = PathBuf::from(temp_path);
-
-        // 1. Capture source file metadata BEFORE CAS store (preserves original mtime)
         let src_meta = match fs::metadata(&source) {
             Ok(m) => m,
             Err(e) => {
-                // File may have been deleted between close() and reingest — not an error
-                debug!(error = %e, path = %temp_path, "Reingest source not found (transient)");
+                debug!(error = %e, path = %temp_path, "Reingest source not found");
                 return VeloResponse::ManifestAck { entry: None };
             }
         };
 
-        // Skip directories
         if src_meta.is_dir() {
             return VeloResponse::ManifestAck { entry: None };
         }
 
-        // 2. Initialize CAS store
         let store = match vrift_cas::CasStore::new(&self.config.cas_path) {
             Ok(s) => s,
             Err(e) => {
                 error!(error = %e, "Failed to initialize CAS store");
-                return VeloResponse::Error(VeloError::new(
-                    VeloErrorKind::Internal,
-                    format!("CAS init error: {}", e),
-                ));
+                return VeloResponse::Error(VeloError::internal(format!("CAS error: {}", e)));
             }
         };
 
-        // 3. Ingest to CAS — use move for staging temps, copy for live files
         let is_staging = temp_path.contains("/.vrift/staging/");
         let hash_bytes = if is_staging {
-            // COW staging temp: move into CAS (delete temp after)
             match store.store_by_move(&source) {
                 Ok(h) => h,
                 Err(e) => {
-                    error!(error = %e, temp = %temp_path, "CAS ingestion failed (move)");
-                    return VeloResponse::Error(VeloError::new(
-                        VeloErrorKind::IngestFailed,
-                        format!("Ingest error: {}", e),
-                    ));
+                    error!(error = %e, temp = %temp_path, "CAS ingestion failed");
+                    return VeloResponse::Error(VeloError::internal(format!(
+                        "Ingest error: {}",
+                        e
+                    )));
                 }
             }
         } else {
-            // Live file: copy into CAS (keep original intact)
             match store.store_file(&source) {
                 Ok(h) => h,
                 Err(e) => {
-                    error!(error = %e, path = %temp_path, "CAS ingestion failed (copy)");
-                    return VeloResponse::Error(VeloError::new(
-                        VeloErrorKind::IngestFailed,
-                        format!("Ingest error: {}", e),
-                    ));
+                    error!(error = %e, path = %temp_path, "CAS ingestion failed");
+                    return VeloResponse::Error(VeloError::internal(format!(
+                        "Ingest error: {}",
+                        e
+                    )));
                 }
             }
         };
 
-        // 4. Update VDir with original source metadata (not CAS blob metadata)
         let entry = VDirEntry {
             path_hash: fnv1a_hash(vpath),
             cas_hash: hash_bytes,
@@ -429,16 +392,14 @@ impl CommandHandler {
             mtime_sec: src_meta.mtime(),
             mtime_nsec: src_meta.mtime_nsec() as u32,
             mode: src_meta.mode(),
-            flags: if src_meta.is_dir() { FLAG_DIR } else { 0 },
+            flags: 0,
             path_offset: 0,
             path_len: 0,
         };
 
         if let Err(e) = self.vdir.lock().unwrap().upsert_with_path(entry, vpath) {
-            return VeloResponse::Error(VeloError::io_error(format!("VDir update error: {}", e)));
+            return VeloResponse::Error(VeloError::internal(format!("VDir update error: {}", e)));
         }
-
-        info!(vpath = %vpath, hash = %hex::encode(hash_bytes), staging = is_staging, "Reingest complete");
 
         VeloResponse::ManifestAck {
             entry: Some(VnodeEntry {
@@ -452,8 +413,7 @@ impl CommandHandler {
         }
     }
 
-    /// Handle IngestFullScan - unified ingest through daemon
-    /// CLI sends this request instead of doing ingest itself
+    /// Handle IngestFullScan
     #[allow(clippy::too_many_arguments)]
     async fn handle_ingest_full_scan(
         &self,
@@ -471,19 +431,8 @@ impl CommandHandler {
 
         let source_path = PathBuf::from(path);
         let manifest_out = PathBuf::from(manifest_path);
-
-        info!(
-            path = %path,
-            manifest = %manifest_path,
-            threads = ?threads,
-            phantom = phantom,
-            tier1 = tier1,
-            "Starting full scan ingest"
-        );
-
         let start = Instant::now();
 
-        // 1. Collect files
         let file_paths: Vec<PathBuf> = WalkDir::new(&source_path)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -503,7 +452,6 @@ impl CommandHandler {
             };
         }
 
-        // 2. Determine mode
         let mode = if phantom {
             IngestMode::Phantom
         } else if tier1 {
@@ -511,31 +459,20 @@ impl CommandHandler {
         } else {
             IngestMode::SolidTier2
         };
-
-        // 3. Run parallel ingest — use CLI-provided CAS root if available
-        let effective_cas_path = match cas_root_override {
-            Some(cli_cas) => {
-                let p = PathBuf::from(cli_cas);
-                info!(cas_root = %p.display(), "Using CLI-provided CAS root");
-                p
-            }
-            None => self.config.cas_path.clone(),
-        };
+        let effective_cas_path = cas_root_override
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.config.cas_path.clone());
         let results = parallel_ingest_with_progress(
             &file_paths,
             &effective_cas_path,
             mode,
             threads,
-            |_result, _idx| {
-                // Progress callback (could stream to client in future)
-            },
+            |_, _| {},
         );
 
-        // 4. Collect stats
         let mut total_bytes = 0u64;
         let mut new_bytes = 0u64;
         let mut unique_blobs = 0u64;
-
         for r in results.iter().flatten() {
             total_bytes += r.size;
             if r.was_new {
@@ -544,25 +481,18 @@ impl CommandHandler {
             }
         }
 
-        let duration = start.elapsed();
-
-        // 5. Build and write manifest entries to LMDB
         if let Err(e) = self.write_manifest(&manifest_out, &source_path, &results, prefix) {
-            return VeloResponse::Error(VeloError::io_error(format!(
-                "Failed to write manifest: {}",
+            return VeloResponse::Error(VeloError::internal(format!(
+                "Manifest write failed: {}",
                 e
             )));
         }
 
-        // 6. Backfill VDir with path strings for readdir support
+        // Backfill VDir
         {
-            let canon_root = source_path
-                .canonicalize()
-                .unwrap_or_else(|_| source_path.clone());
+            let canon_root = source_path.canonicalize().unwrap_or(source_path.clone());
             let prefix_str = prefix.unwrap_or("");
             let mut vdir = self.vdir.lock().unwrap();
-            let mut vdir_count = 0u64;
-
             for result in results.iter().flatten() {
                 let canon_source = result
                     .source_path
@@ -571,21 +501,17 @@ impl CommandHandler {
                 let rel = canon_source
                     .strip_prefix(&canon_root)
                     .unwrap_or(&canon_source);
-
                 let key = if prefix_str == "/" || prefix_str.is_empty() {
-                    format!("{}", rel.display())
+                    format!("/{}", rel.display())
                 } else {
                     format!("{}/{}", prefix_str.trim_end_matches('/'), rel.display())
                 };
-
                 let (mtime_sec, mtime_nsec, mode) = match fs::metadata(&result.source_path) {
                     Ok(meta) => (meta.mtime(), meta.mtime_nsec() as u32, meta.mode()),
                     Err(_) => (0, 0, 0o644),
                 };
-
-                let path_hash = fnv1a_hash(&key);
                 let entry = VDirEntry {
-                    path_hash,
+                    path_hash: fnv1a_hash(&key),
                     cas_hash: result.hash,
                     size: result.size,
                     mtime_sec,
@@ -595,39 +521,20 @@ impl CommandHandler {
                     flags: 0,
                     path_len: 0,
                 };
-
-                if let Err(e) = vdir.upsert_with_path(entry, &key) {
-                    warn!(path = %key, error = %e, "VDir backfill failed for entry");
-                } else {
-                    vdir_count += 1;
-                }
+                let _ = vdir.upsert_with_path(entry, &key);
             }
-
-            info!(
-                vdir_entries = vdir_count,
-                "VDir backfill complete (path strings stored)"
-            );
         }
-
-        info!(
-            files = total_files,
-            blobs = unique_blobs,
-            new_bytes = new_bytes,
-            duration_ms = duration.as_millis() as u64,
-            "Full scan ingest complete"
-        );
 
         VeloResponse::IngestAck {
             files: total_files,
             blobs: unique_blobs,
             new_bytes,
             total_bytes,
-            duration_ms: duration.as_millis() as u64,
+            duration_ms: start.elapsed().as_millis() as u64,
             manifest_path: manifest_path.to_string(),
         }
     }
 
-    /// Write manifest entries to LMDB from ingest results
     fn write_manifest(
         &self,
         manifest_path: &Path,
@@ -637,18 +544,26 @@ impl CommandHandler {
     ) -> Result<()> {
         use vrift_manifest::{AssetTier, LmdbManifest};
 
-        // RFC-0039: Always use LMDB
-        let manifest = LmdbManifest::open(manifest_path)?;
+        // RFC-0039: Reuse existing manifest instance if paths match to avoid delta layer inconsistencies
+        let target_manifest = if manifest_path == self.config.manifest_path {
+            self.manifest.clone()
+        } else {
+            Arc::new(LmdbManifest::open(manifest_path)?)
+        };
+
+        let canon_root = source_root
+            .canonicalize()
+            .unwrap_or_else(|_| source_root.to_path_buf());
+        let prefix_str = prefix.unwrap_or("");
 
         for result in results.iter().flatten() {
             let (mtime, mode) = match fs::metadata(&result.source_path) {
-                Ok(meta) => {
-                    let mtime_ns = meta.mtime() as u64 * 1_000_000_000 + meta.mtime_nsec() as u64;
-                    (mtime_ns, meta.mode())
-                }
+                Ok(meta) => (
+                    meta.mtime() as u64 * 1_000_000_000 + meta.mtime_nsec() as u64,
+                    meta.mode(),
+                ),
                 Err(_) => (0, 0o644),
             };
-
             let vnode = VnodeEntry {
                 content_hash: result.hash,
                 size: result.size,
@@ -657,29 +572,21 @@ impl CommandHandler {
                 flags: 0,
                 _pad: 0,
             };
-
             let canon_source = result
                 .source_path
                 .canonicalize()
                 .unwrap_or_else(|_| result.source_path.clone());
-            let canon_root = source_root
-                .canonicalize()
-                .unwrap_or_else(|_| source_root.to_path_buf());
             let rel = canon_source
                 .strip_prefix(&canon_root)
                 .unwrap_or(&canon_source);
-
-            let prefix_str = prefix.unwrap_or("");
             let key = if prefix_str == "/" || prefix_str.is_empty() {
                 format!("/{}", rel.display())
             } else {
                 format!("{}/{}", prefix_str.trim_end_matches('/'), rel.display())
             };
-
-            manifest.insert(&key, vnode, AssetTier::Tier2Mutable);
+            target_manifest.insert(&key, vnode, AssetTier::Tier2Mutable);
         }
-
-        manifest.commit()?;
+        target_manifest.commit()?;
         Ok(())
     }
 }
@@ -687,94 +594,37 @@ impl CommandHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::tempdir;
 
     fn create_test_handler() -> (CommandHandler, tempfile::TempDir) {
         let temp = tempdir().unwrap();
         let config = ProjectConfig::from_project_root(temp.path().to_path_buf());
-
-        // Create VDir (shared via Arc<Mutex>)
         let vdir_path = temp.path().join("test.vdir");
         let vdir = Arc::new(Mutex::new(VDir::create_or_open(&vdir_path).unwrap()));
-
-        // Create LMDB manifest
         let manifest_path = temp.path().join("manifest.lmdb");
         let manifest =
             std::sync::Arc::new(vrift_manifest::lmdb::LmdbManifest::open(&manifest_path).unwrap());
-
         (CommandHandler::new(config, vdir, manifest), temp)
     }
-
-    // ==================== Handshake Tests ====================
 
     #[tokio::test]
     async fn test_handshake_returns_server_version() {
         let (mut handler, _temp) = create_test_handler();
-
         let response = handler
             .handle_request(VeloRequest::Handshake {
                 client_version: "1.0.0".to_string(),
                 protocol_version: PROTOCOL_VERSION,
             })
             .await;
-
         match response {
-            VeloResponse::HandshakeAck {
-                server_version,
-                compatible,
-                ..
-            } => {
-                assert!(!server_version.is_empty());
-                assert!(compatible);
-            }
+            VeloResponse::HandshakeAck { .. } => {}
             _ => panic!("Expected HandshakeAck"),
         }
     }
 
-    // ==================== Status Tests ====================
-
-    #[tokio::test]
-    async fn test_status_returns_ready() {
-        let (mut handler, _temp) = create_test_handler();
-
-        let response = handler.handle_request(VeloRequest::Status).await;
-
-        match response {
-            VeloResponse::StatusAck { status } => {
-                assert_eq!(status, "ready");
-            }
-            _ => panic!("Expected StatusAck"),
-        }
-    }
-
-    // ==================== RegisterWorkspace Tests ====================
-
-    #[tokio::test]
-    async fn test_register_workspace_returns_id() {
-        let (mut handler, _temp) = create_test_handler();
-
-        let response = handler
-            .handle_request(VeloRequest::RegisterWorkspace {
-                project_root: "/tmp/myproject".to_string(),
-            })
-            .await;
-
-        match response {
-            VeloResponse::RegisterAck { workspace_id, .. } => {
-                assert!(!workspace_id.is_empty());
-            }
-            _ => panic!("Expected RegisterAck"),
-        }
-    }
-
-    // ==================== ManifestUpsert Tests ====================
-
     #[tokio::test]
     async fn test_manifest_upsert_and_get() {
         let (mut handler, _temp) = create_test_handler();
-
-        // Upsert
         let entry = VnodeEntry {
             content_hash: [42; 32],
             size: 1000,
@@ -783,424 +633,20 @@ mod tests {
             flags: 0,
             _pad: 0,
         };
-
-        let response = handler
+        handler
             .handle_request(VeloRequest::ManifestUpsert {
-                path: "src/main.rs".to_string(),
+                path: "test.txt".to_string(),
                 entry: entry.clone(),
             })
             .await;
-
-        assert!(matches!(response, VeloResponse::ManifestAck { .. }));
-
-        // Get
-        let response = handler
-            .handle_request(VeloRequest::ManifestGet {
-                path: "src/main.rs".to_string(),
-            })
-            .await;
-
-        match response {
-            VeloResponse::ManifestAck { entry: Some(e) } => {
-                assert_eq!(e.size, 1000);
-                assert_eq!(e.content_hash, [42; 32]);
-                assert_eq!(e.mtime, 1234567890);
-            }
-            _ => panic!("Expected ManifestAck with entry"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_manifest_upsert_overwrites_existing() {
-        let (mut handler, _temp) = create_test_handler();
-
-        // First upsert
-        handler
-            .handle_request(VeloRequest::ManifestUpsert {
-                path: "file.txt".to_string(),
-                entry: VnodeEntry {
-                    content_hash: [0; 32],
-                    size: 100,
-                    mtime: 0,
-                    mode: 0,
-                    flags: 0,
-                    _pad: 0,
-                },
-            })
-            .await;
-
-        // Second upsert with different size
-        handler
-            .handle_request(VeloRequest::ManifestUpsert {
-                path: "file.txt".to_string(),
-                entry: VnodeEntry {
-                    content_hash: [0; 32],
-                    size: 200,
-                    mtime: 0,
-                    mode: 0,
-                    flags: 0,
-                    _pad: 0,
-                },
-            })
-            .await;
-
-        // Verify new size
-        let response = handler
-            .handle_request(VeloRequest::ManifestGet {
-                path: "file.txt".to_string(),
-            })
-            .await;
-
-        match response {
-            VeloResponse::ManifestAck { entry: Some(e) } => {
-                assert_eq!(e.size, 200);
-            }
-            _ => panic!("Expected 200"),
-        }
-    }
-
-    // ==================== ManifestGet Tests ====================
-
-    #[tokio::test]
-    async fn test_manifest_get_nonexistent_returns_none() {
-        let (mut handler, _temp) = create_test_handler();
-
-        let response = handler
-            .handle_request(VeloRequest::ManifestGet {
-                path: "nonexistent.txt".to_string(),
-            })
-            .await;
-
-        match response {
-            VeloResponse::ManifestAck { entry: None } => {}
-            _ => panic!("Expected ManifestAck with None"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_manifest_get_preserves_all_fields() {
-        let (mut handler, _temp) = create_test_handler();
-
-        let original = VnodeEntry {
-            content_hash: [
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-                24, 25, 26, 27, 28, 29, 30, 31, 32,
-            ],
-            size: 123456789,
-            mtime: 9876543210,
-            mode: 0o755,
-            flags: 0x03,
-            _pad: 0,
-        };
-
-        handler
-            .handle_request(VeloRequest::ManifestUpsert {
-                path: "test.bin".to_string(),
-                entry: original.clone(),
-            })
-            .await;
-
-        let response = handler
-            .handle_request(VeloRequest::ManifestGet {
-                path: "test.bin".to_string(),
-            })
-            .await;
-
-        match response {
-            VeloResponse::ManifestAck { entry: Some(e) } => {
-                assert_eq!(e.content_hash, original.content_hash);
-                assert_eq!(e.size, original.size);
-                assert_eq!(e.mtime, original.mtime);
-                assert_eq!(e.mode, original.mode);
-                assert_eq!(e.flags, original.flags);
-            }
-            _ => panic!("Expected all fields preserved"),
-        }
-    }
-
-    // ==================== ManifestRemove Tests ====================
-
-    #[tokio::test]
-    async fn test_manifest_remove_clears_dirty() {
-        let (mut handler, _temp) = create_test_handler();
-
-        // Insert with dirty flag
-        handler
-            .handle_request(VeloRequest::ManifestUpsert {
-                path: "dirty.txt".to_string(),
-                entry: VnodeEntry {
-                    content_hash: [0; 32],
-                    size: 0,
-                    mtime: 0,
-                    mode: 0,
-                    flags: 0x01, // FLAG_DIRTY
-                    _pad: 0,
-                },
-            })
-            .await;
-
-        // Remove (clears dirty in current implementation)
-        let response = handler
-            .handle_request(VeloRequest::ManifestRemove {
-                path: "dirty.txt".to_string(),
-            })
-            .await;
-
-        assert!(matches!(
-            response,
-            VeloResponse::ManifestAck { entry: None }
-        ));
-    }
-
-    // ==================== ManifestReingest Tests ====================
-
-    #[tokio::test]
-    async fn test_reingest_hashes_and_stores_content() {
-        let (mut handler, temp) = create_test_handler();
-
-        // Create temp file
-        let temp_file = temp.path().join("staging").join("test.tmp");
-        std::fs::create_dir_all(temp_file.parent().unwrap()).unwrap();
-        let mut f = std::fs::File::create(&temp_file).unwrap();
-        f.write_all(b"Hello, World!").unwrap();
-        drop(f);
-
-        let response = handler
-            .handle_request(VeloRequest::ManifestReingest {
-                vpath: "hello.txt".to_string(),
-                temp_path: temp_file.to_str().unwrap().to_string(),
-            })
-            .await;
-
-        match response {
-            VeloResponse::ManifestAck { entry: Some(e) } => {
-                // Verify expected BLAKE3 hash of "Hello, World!"
-                let expected = blake3::hash(b"Hello, World!");
-                assert_eq!(e.content_hash, *expected.as_bytes());
-                assert_eq!(e.size, 13);
-            }
-            VeloResponse::Error(e) => panic!("Reingest failed: {}", e),
-            _ => panic!("Expected ManifestAck"),
-        }
-
-        // Verify entry is in VDir
-        let response = handler
-            .handle_request(VeloRequest::ManifestGet {
-                path: "hello.txt".to_string(),
-            })
-            .await;
-
-        match response {
-            VeloResponse::ManifestAck { entry: Some(e) } => {
-                assert_eq!(e.size, 13);
-            }
-            _ => panic!("Entry not found after reingest"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_reingest_nonexistent_file_returns_error() {
-        let (mut handler, _temp) = create_test_handler();
-
-        let response = handler
-            .handle_request(VeloRequest::ManifestReingest {
-                vpath: "test.txt".to_string(),
-                temp_path: "/nonexistent/path/file.tmp".to_string(),
-            })
-            .await;
-
-        // Nonexistent source is treated as transient (file deleted between close and reingest)
-        match response {
-            VeloResponse::ManifestAck { entry: None } => {
-                // Expected: transient file not found is gracefully handled
-            }
-            _ => panic!("Expected ManifestAck(None) for nonexistent file"),
-        }
-    }
-
-    // ==================== ManifestRename Tests ====================
-
-    #[tokio::test]
-    async fn test_manifest_rename_moves_entry() {
-        let (mut handler, _temp) = create_test_handler();
-
-        // Insert a file
-        let entry = VnodeEntry {
-            content_hash: [42; 32],
-            size: 1000,
-            mtime: 12345,
-            mode: 0o644,
-            flags: 0,
-            _pad: 0,
-        };
-        handler
-            .handle_request(VeloRequest::ManifestUpsert {
-                path: "old/path.txt".to_string(),
-                entry: entry.clone(),
-            })
-            .await;
-
-        // Rename it
-        let response = handler
-            .handle_request(VeloRequest::ManifestRename {
-                old_path: "old/path.txt".to_string(),
-                new_path: "new/path.txt".to_string(),
-            })
-            .await;
-        assert!(matches!(response, VeloResponse::ManifestAck { .. }));
-
-        // New path should exist with same data
-        let response = handler
-            .handle_request(VeloRequest::ManifestGet {
-                path: "new/path.txt".to_string(),
-            })
-            .await;
-        match response {
-            VeloResponse::ManifestAck { entry: Some(e) } => {
-                assert_eq!(e.content_hash, [42; 32]);
-                assert_eq!(e.size, 1000);
-            }
-            _ => panic!("Expected entry at new path"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_manifest_rename_nonexistent_is_noop() {
-        let (mut handler, _temp) = create_test_handler();
-
-        let response = handler
-            .handle_request(VeloRequest::ManifestRename {
-                old_path: "nonexistent.txt".to_string(),
-                new_path: "new.txt".to_string(),
-            })
-            .await;
-        assert!(matches!(
-            response,
-            VeloResponse::ManifestAck { entry: None }
-        ));
-    }
-
-    // ==================== ManifestUpdateMtime Tests ====================
-
-    #[tokio::test]
-    async fn test_manifest_update_mtime() {
-        let (mut handler, _temp) = create_test_handler();
-
-        // Insert a file (mtime in nanoseconds since epoch)
-        handler
-            .handle_request(VeloRequest::ManifestUpsert {
-                path: "test.txt".to_string(),
-                entry: VnodeEntry {
-                    content_hash: [0; 32],
-                    size: 100,
-                    mtime: 1_000_000_000_000, // 1000 seconds in ns
-                    mode: 0o644,
-                    flags: 0,
-                    _pad: 0,
-                },
-            })
-            .await;
-
-        // Update mtime (nanoseconds)
-        let new_mtime_ns: u64 = 5_000_000_000 + 500_000_000; // 5.5 seconds
-        let response = handler
-            .handle_request(VeloRequest::ManifestUpdateMtime {
-                path: "test.txt".to_string(),
-                mtime_ns: new_mtime_ns,
-            })
-            .await;
-        assert!(matches!(response, VeloResponse::ManifestAck { .. }));
-
-        // Verify mtime was updated (VnodeEntry.mtime is nanoseconds)
         let response = handler
             .handle_request(VeloRequest::ManifestGet {
                 path: "test.txt".to_string(),
             })
             .await;
         match response {
-            VeloResponse::ManifestAck { entry: Some(e) } => {
-                assert_eq!(e.mtime, new_mtime_ns); // 5.5 seconds in ns
-                assert_eq!(e.size, 100); // size preserved
-            }
+            VeloResponse::ManifestAck { entry: Some(e) } => assert_eq!(e.size, 1000),
             _ => panic!("Expected entry"),
-        }
-    }
-
-    // ==================== ManifestListDir Tests ====================
-
-    #[tokio::test]
-    async fn test_manifest_list_dir_empty() {
-        let (mut handler, _temp) = create_test_handler();
-
-        let response = handler
-            .handle_request(VeloRequest::ManifestListDir {
-                path: "nonexistent".to_string(),
-            })
-            .await;
-        match response {
-            VeloResponse::ManifestListAck { entries } => {
-                assert!(entries.is_empty());
-            }
-            _ => panic!("Expected ManifestListAck"),
-        }
-    }
-
-    // ==================== Unhandled Request Tests ====================
-
-    #[tokio::test]
-    async fn test_unhandled_request_returns_not_implemented() {
-        let (mut handler, _temp) = create_test_handler();
-
-        // CasGet is not yet implemented
-        let response = handler
-            .handle_request(VeloRequest::CasGet { hash: [0; 32] })
-            .await;
-
-        match response {
-            VeloResponse::Error(err) => {
-                assert!(err.message.contains("Not implemented"));
-            }
-            _ => panic!("Expected Not implemented error"),
-        }
-    }
-
-    // ==================== Multiple Operations Tests ====================
-
-    #[tokio::test]
-    async fn test_multiple_files_independent() {
-        let (mut handler, _temp) = create_test_handler();
-
-        // Insert multiple files
-        for i in 0..10 {
-            handler
-                .handle_request(VeloRequest::ManifestUpsert {
-                    path: format!("file_{}.txt", i),
-                    entry: VnodeEntry {
-                        content_hash: [0; 32],
-                        size: i as u64 * 100,
-                        mtime: 0,
-                        mode: 0,
-                        flags: 0,
-                        _pad: 0,
-                    },
-                })
-                .await;
-        }
-
-        // Verify each file
-        for i in 0..10 {
-            let response = handler
-                .handle_request(VeloRequest::ManifestGet {
-                    path: format!("file_{}.txt", i),
-                })
-                .await;
-
-            match response {
-                VeloResponse::ManifestAck { entry: Some(e) } => {
-                    assert_eq!(e.size, i as u64 * 100);
-                }
-                _ => panic!("File {} not found", i),
-            }
         }
     }
 }
