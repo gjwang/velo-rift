@@ -47,7 +47,6 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
 
     // 1. Resolve path to VFS domain
     let vpath = state.resolve_path(path_str)?;
-
     let manifest_path = vpath.manifest_key.as_str();
 
     // BUG-011: VDir only stores file entries. Before VDir virtualization, check if the

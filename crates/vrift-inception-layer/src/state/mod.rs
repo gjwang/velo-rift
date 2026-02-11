@@ -777,6 +777,7 @@ pub(crate) struct SyntheticDir {
     pub vpath: FixedString<1024>,
     pub entries: Vec<vrift_ipc::DirEntry>,
     pub position: usize,
+    pub real_dir: *mut c_void,
 }
 unsafe impl Send for SyntheticDir {} // Raw pointers in open_dirs HashMap
 unsafe impl Sync for SyntheticDir {}

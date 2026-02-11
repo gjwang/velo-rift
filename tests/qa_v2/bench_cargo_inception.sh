@@ -182,7 +182,7 @@ if [ "$SKIP_INGEST" = false ]; then
 
     # Start daemon if not running
     if ! pgrep -f "vriftd.*$VRIFT_SOCKET_PATH" >/dev/null 2>&1; then
-        "$VRIFTD" --socket-path "$VRIFT_SOCKET_PATH" --cas-root "$VR_THE_SOURCE" &
+        VRIFT_SOCKET_PATH="$VRIFT_SOCKET_PATH" VR_THE_SOURCE="$VR_THE_SOURCE" "$VRIFTD" start &
         DAEMON_PID=$!
         sleep 2
         echo "  Started daemon (PID: $DAEMON_PID)"

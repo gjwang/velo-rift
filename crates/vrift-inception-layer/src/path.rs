@@ -69,6 +69,12 @@ impl PathResolver {
             let cwd = unsafe { CStr::from_ptr(cwd_buf.as_ptr() as *const c_char) };
             let cwd_str = cwd.to_str().ok()?;
             let _ = write!(abs_writer, "{}/{}", cwd_str, path);
+            crate::inception_log!(
+                "RESOLVE relative: '{}' in '{}' -> {}",
+                path,
+                cwd_str,
+                abs_writer.as_str()
+            );
         } else {
             let _ = write!(abs_writer, "{}", path);
         };

@@ -11,109 +11,71 @@ use std::ffi::CStr;
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn opendir_inception(path: *const libc::c_char) -> *mut c_void {
-    // RFC-0050: Use IT_OPENDIR.old_func from interpose table to avoid recursion.
-    // dlsym(RTLD_NEXT) returns the inception layer itself due to __interpose mechanism.
-    let real = std::mem::transmute::<
+    let real_opendir = std::mem::transmute::<
         *const (),
         unsafe extern "C" fn(*const libc::c_char) -> *mut c_void,
     >(crate::interpose::IT_OPENDIR.old_func);
 
-    // Early-boot passthrough
-    passthrough_if_init!(real, path);
+    passthrough_if_init!(real_opendir, path);
 
     if path.is_null() {
-        return real(path);
+        return real_opendir(path);
     }
 
     let path_str = match CStr::from_ptr(path).to_str() {
         Ok(s) => s,
-        Err(_) => return real(path),
+        Err(_) => return real_opendir(path),
     };
 
-    // Get inception layer state
     let state = match InceptionLayerState::get() {
         Some(s) => s,
-        None => return real(path),
+        None => return real_opendir(path),
     };
 
-    // Check if path is in VFS domain
+    // RFC-0051++: Lazy Merged Directory Listing
+    // We open BOTH physical and virtual sources and stream from both in readdir.
     if !state.inception_applicable(path_str) {
-        return real(path);
+        return real_opendir(path);
     }
 
-    // RFC-0051++: Merged Directory Listing
-    // We must return BOTH physical entries AND manifest entries to ensure
-    // that sibling processes see freshly created files.
-    let mut entries = Vec::new();
-    let mut seen_names = std::collections::HashSet::new();
+    let real_dir = real_opendir(path);
+    let vdir_entries = state.query_dir_listing(path_str).unwrap_or_default();
 
-    // 1. Scan physical directory
-    let phys_dir = real(path);
-    if !phys_dir.is_null() {
-        let readdir_raw = std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(*mut c_void) -> *mut libc::dirent,
-        >(crate::interpose::IT_READDIR.old_func);
-        let closedir_raw = std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(*mut c_void) -> c_int,
-        >(crate::interpose::IT_CLOSEDIR.old_func);
-
-        loop {
-            let ent = readdir_raw(phys_dir);
-            if ent.is_null() {
-                break;
-            }
-            let name_bytes = std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()).to_bytes();
-            if let Ok(name) = std::str::from_utf8(name_bytes) {
-                if name != "." && name != ".." {
-                    entries.push(vrift_ipc::DirEntry {
-                        name: name.to_string(),
-                        is_dir: (*ent).d_type == libc::DT_DIR,
-                    });
-                    seen_names.insert(name.to_string());
-                }
-            }
-        }
-        closedir_raw(phys_dir);
+    if vdir_entries.is_empty() && real_dir.is_null() {
+        return std::ptr::null_mut();
     }
 
-    // 2. Scan manifest and merge
-    if let Some(manifest_entries) = state.query_dir_listing(path_str) {
-        for ent in manifest_entries {
-            if !seen_names.contains(&ent.name) {
-                entries.push(ent);
-            }
-        }
-    }
+    let mut fs_vpath = crate::state::FixedString::<1024>::new();
+    fs_vpath.set(path_str);
 
-    if !entries.is_empty() {
-        // Create synthetic directory
-        let mut fs_vpath = crate::state::FixedString::<1024>::new();
-        fs_vpath.set(path_str);
-        let syn_dir = Box::new(SyntheticDir {
+    let syn_dir = Box::new(SyntheticDir {
+        vpath: fs_vpath,
+        entries: vdir_entries,
+        position: 0,
+        real_dir,
+    });
+
+    crate::inception_log!(
+        "OPENDIR path='{}' -> merging {} entries + real_dir={:?}",
+        path_str,
+        syn_dir.entries.len(),
+        real_dir
+    );
+
+    let ptr = Box::into_raw(syn_dir) as *mut c_void;
+
+    let mut dirs_guard = state.open_dirs.lock();
+    dirs_guard.insert(
+        ptr as usize,
+        SyntheticDir {
             vpath: fs_vpath,
-            entries,
+            entries: Vec::new(),
             position: 0,
-        });
-        let ptr = Box::into_raw(syn_dir) as *mut c_void;
+            real_dir,
+        },
+    );
 
-        // Track in open_dirs
-        let mut dirs = state.open_dirs.lock();
-        dirs.insert(
-            ptr as usize,
-            SyntheticDir {
-                vpath: crate::state::FixedString::new(),
-                entries: vec![],
-                position: 0,
-            },
-        );
-
-        return ptr;
-    }
-
-    // Fallback to real
-    real(path)
+    ptr
 }
 
 /// Static buffer for readdir dirent (readdir returns pointer to static data)
@@ -131,90 +93,115 @@ static mut DIRENT_BUF: libc::dirent = libc::dirent {
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn readdir_inception(dir: *mut c_void) -> *mut libc::dirent {
     profile_count!(readdir_calls);
-    // RFC-0050: Use IT_READDIR.old_func to avoid recursion (same fix as opendir_inception)
-    let real = std::mem::transmute::<
+    let real_readdir = std::mem::transmute::<
         *const (),
         unsafe extern "C" fn(*mut c_void) -> *mut libc::dirent,
     >(crate::interpose::IT_READDIR.old_func);
 
-    // Pattern 2648/2649: Passthrough during initialization to avoid TLS hazard
-    passthrough_if_init!(real, dir);
+    passthrough_if_init!(real_readdir, dir);
 
     if dir.is_null() {
-        return real(dir);
-    }
-
-    // Check if this is a synthetic directory
-    let syn_dir = dir as *mut SyntheticDir;
-
-    // Try to read from synthetic dir if it's one of ours
-    if let Some(state) = InceptionLayerState::get() {
-        let dirs = state.open_dirs.lock();
-        if dirs.contains_key(&(dir as usize)) {
-            drop(dirs); // Release lock before accessing syn_dir
-
-            let sd = &mut *syn_dir;
-            if sd.position >= sd.entries.len() {
-                return std::ptr::null_mut();
-            }
-
-            let entry = &sd.entries[sd.position];
-            sd.position += 1;
-
-            // Fill dirent buffer
-            DIRENT_BUF.d_ino = 1; // Synthetic inode
-            DIRENT_BUF.d_type = if entry.is_dir {
-                libc::DT_DIR
-            } else {
-                libc::DT_REG
-            };
-            DIRENT_BUF.d_namlen = entry.name.len() as u16;
-
-            // Copy name to buffer
-            let name_bytes = entry.name.as_bytes();
-            let copy_len = name_bytes.len().min(1023);
-            let dirent_ptr = std::ptr::addr_of_mut!(DIRENT_BUF);
-            let d_name_ptr = std::ptr::addr_of_mut!((*dirent_ptr).d_name);
-            std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), d_name_ptr as *mut u8, copy_len);
-            (*dirent_ptr).d_name[copy_len] = 0;
-
-            return dirent_ptr;
-        }
-    }
-
-    real(dir)
-}
-
-#[no_mangle]
-#[cfg(target_os = "macos")]
-pub unsafe extern "C" fn closedir_inception(dir: *mut c_void) -> c_int {
-    // RFC-0050: Use IT_CLOSEDIR.old_func to avoid recursion (same fix as opendir_inception)
-    let real = std::mem::transmute::<*const (), unsafe extern "C" fn(*mut c_void) -> c_int>(
-        crate::interpose::IT_CLOSEDIR.old_func,
-    );
-
-    // Pattern 2648/2649: Passthrough during initialization to avoid TLS hazard
-    passthrough_if_init!(real, dir);
-
-    if dir.is_null() {
-        return real(dir);
+        return real_readdir(dir);
     }
 
     // Check if this is a synthetic directory
     if let Some(state) = InceptionLayerState::get() {
         let is_synthetic = {
-            let mut dirs = state.open_dirs.lock();
-            dirs.remove(&(dir as usize)).is_some()
+            let dirs = state.open_dirs.lock();
+            dirs.contains_key(&(dir as usize))
         };
 
         if is_synthetic {
+            let sd = &mut *(dir as *mut SyntheticDir);
+
+            // Phase 1: Return virtual entries from manifest
+            if sd.position < sd.entries.len() {
+                let entry = &sd.entries[sd.position];
+                sd.position += 1;
+
+                // Fill dirent buffer via raw pointer (Rust 2024 safety)
+                let ent_ptr = &raw mut DIRENT_BUF;
+                (*ent_ptr).d_ino = 1; // Synthetic inode
+                (*ent_ptr).d_type = if entry.is_dir {
+                    libc::DT_DIR
+                } else {
+                    libc::DT_REG
+                };
+                (*ent_ptr).d_namlen = entry.name.len() as u16;
+
+                // Copy name to buffer
+                let name_bytes = entry.name.as_bytes();
+                let copy_len = name_bytes.len().min(1023);
+                std::ptr::copy_nonoverlapping(
+                    name_bytes.as_ptr(),
+                    (*ent_ptr).d_name.as_mut_ptr() as *mut u8,
+                    copy_len,
+                );
+                (*ent_ptr).d_name[copy_len] = 0;
+
+                return ent_ptr;
+            }
+
+            // Phase 2: Stream from physical directory, skipping duplicates
+            if !sd.real_dir.is_null() {
+                loop {
+                    let ent = real_readdir(sd.real_dir);
+                    if ent.is_null() {
+                        return std::ptr::null_mut();
+                    }
+
+                    // Extract name from physical dirent
+                    let name_ptr = (*ent).d_name.as_ptr();
+                    let name_bytes = CStr::from_ptr(name_ptr as *const libc::c_char).to_bytes();
+                    if let Ok(name) = std::str::from_utf8(name_bytes) {
+                        if name == "." || name == ".." {
+                            continue;
+                        }
+
+                        // Check if we already returned this name from VDir (deduplication)
+                        if sd.entries.iter().any(|v| v.name == name) {
+                            continue;
+                        }
+
+                        return ent;
+                    }
+                }
+            }
+
+            return std::ptr::null_mut();
+        }
+    }
+
+    real_readdir(dir)
+}
+
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn closedir_inception(dir: *mut c_void) -> c_int {
+    let real_closedir = std::mem::transmute::<*const (), unsafe extern "C" fn(*mut c_void) -> c_int>(
+        crate::interpose::IT_CLOSEDIR.old_func,
+    );
+
+    passthrough_if_init!(real_closedir, dir);
+
+    if dir.is_null() {
+        return real_closedir(dir);
+    }
+
+    // Check if this is a synthetic directory
+    if let Some(state) = InceptionLayerState::get() {
+        let mut dirs = state.open_dirs.lock();
+        if dirs.remove(&(dir as usize)).is_some() {
             // Free the synthetic directory
-            let _ = Box::from_raw(dir as *mut SyntheticDir);
+            let syn_dir = Box::from_raw(dir as *mut SyntheticDir);
+            if !syn_dir.real_dir.is_null() {
+                real_closedir(syn_dir.real_dir);
+            }
             return 0;
         }
     }
 
-    real(dir)
+    real_closedir(dir)
 }
 #[no_mangle]
 pub unsafe extern "C" fn getcwd_inception(
