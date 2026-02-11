@@ -472,11 +472,53 @@ pub unsafe extern "C" fn linkat_inception(
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn unlink_inception(path: *const c_char) -> c_int {
-    // BUG-012: Always passthrough to kernel. Build cache mode does not need
-    // mutation blocking on unlink. The kernel correctly returns ENOENT for
-    // non-existent files. Blocking virtual-only files (in manifest but not
-    // on disk) with EEXIST breaks Cargo's build flow.
-    crate::syscalls::macos_raw::raw_unlink(path)
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    let state = match InceptionLayerState::get() {
+        Some(s) => s,
+        None => return crate::syscalls::macos_raw::raw_unlink(path),
+    };
+
+    let vpath = match state.resolve_path(&path_str) {
+        Some(v) => v,
+        None => return crate::syscalls::macos_raw::raw_unlink(path),
+    };
+
+    let res = crate::syscalls::macos_raw::raw_unlink(path);
+
+    // If physical unlink failed with ENOENT, check if it exists in VFS
+    if res == -1 && crate::get_errno() == libc::ENOENT
+        && vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+            return 0;
+        }
+
+    res
+}
+
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn remove_inception(path: *const c_char) -> c_int {
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+
+    let state = match InceptionLayerState::get() {
+        Some(s) => s,
+        None => return libc::remove(path),
+    };
+
+    let vpath = match state.resolve_path(&path_str) {
+        Some(v) => v,
+        None => return libc::remove(path),
+    };
+
+    let res = libc::remove(path);
+
+    if res == -1 && crate::get_errno() == libc::ENOENT {
+        // Check if it's in VDir (file or directory)
+        if vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+            return 0;
+        }
+    }
+
+    res
 }
 
 /// BUG-016: Intercept fclonefileat to fix uchg/perms on CAS-cloned build artifacts.
@@ -525,21 +567,26 @@ pub unsafe extern "C" fn clonefileat_inception(
 #[no_mangle]
 #[cfg(target_os = "linux")]
 pub unsafe extern "C" fn unlink_inception(path: *const c_char) -> c_int {
-    let init_state = INITIALIZING.load(Ordering::Relaxed);
-    if init_state != 0
-        || crate::state::INCEPTION_LAYER_STATE
-            .load(std::sync::atomic::Ordering::Acquire)
-            .is_null()
-    {
-        // During early init, use quick check but allow non-prefix paths
-        if let Some(err) = quick_block_vfs_mutation(path) {
-            return err;
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    let state = match InceptionLayerState::get() {
+        Some(s) => s,
+        None => return crate::syscalls::linux_raw::raw_unlink(path),
+    };
+
+    let vpath = match state.resolve_path(&path_str) {
+        Some(v) => v,
+        None => return crate::syscalls::linux_raw::raw_unlink(path),
+    };
+
+    let res = crate::syscalls::linux_raw::raw_unlink(path);
+
+    if res == -1 && crate::get_errno() == libc::ENOENT {
+        if vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+            return 0;
         }
-        return crate::syscalls::linux_raw::raw_unlink(path);
     }
-    // RFC-0039: Allow unlink if file is NOT in manifest (cross-domain mv cleanup)
-    // Only block unlink on files that ARE in the manifest (protected VFS entries)
-    block_existing_vfs_entry(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_unlink(path))
+
+    res
 }
 
 #[no_mangle]
@@ -548,38 +595,43 @@ pub unsafe extern "C" fn unlinkat_inception(
     path: *const c_char,
     flags: c_int,
 ) -> c_int {
-    #[cfg(target_os = "macos")]
-    {
-        let init_state = INITIALIZING.load(Ordering::Relaxed);
-        if init_state != 0
-            || crate::state::INCEPTION_LAYER_STATE
-                .load(Ordering::Acquire)
-                .is_null()
-        {
-            if let Some(err) = quick_block_vfs_mutation(path) {
-                return err;
-            }
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    let state = match InceptionLayerState::get() {
+        Some(s) => s,
+        None => {
+            #[cfg(target_os = "macos")]
             return crate::syscalls::macos_raw::raw_unlinkat(dirfd, path, flags);
-        } // Pattern 2930: Use raw syscall to avoid post-init dlsym hazard
-        block_existing_vfs_entry(path)
-            .unwrap_or_else(|| crate::syscalls::macos_raw::raw_unlinkat(dirfd, path, flags))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if INITIALIZING.load(Ordering::Relaxed) >= 2
-            || crate::state::INCEPTION_LAYER_STATE
-                .load(Ordering::Acquire)
-                .is_null()
-        {
-            if let Some(err) = quick_block_vfs_mutation(path) {
-                return err;
-            }
+            #[cfg(target_os = "linux")]
             return crate::syscalls::linux_raw::raw_unlinkat(dirfd, path, flags);
         }
-        // RFC-0039: Allow unlink if file is NOT in manifest (cross-domain mv cleanup)
-        block_existing_vfs_entry(path)
-            .unwrap_or_else(|| crate::syscalls::linux_raw::raw_unlinkat(dirfd, path, flags))
+    };
+
+    let vpath = match state.resolve_path(&path_str) {
+        Some(v) => v,
+        None => {
+            #[cfg(target_os = "macos")]
+            return crate::syscalls::macos_raw::raw_unlinkat(dirfd, path, flags);
+            #[cfg(target_os = "linux")]
+            return crate::syscalls::linux_raw::raw_unlinkat(dirfd, path, flags);
+        }
+    };
+
+    #[cfg(target_os = "macos")]
+    let res = crate::syscalls::macos_raw::raw_unlinkat(dirfd, path, flags);
+    #[cfg(target_os = "linux")]
+    let res = crate::syscalls::linux_raw::raw_unlinkat(dirfd, path, flags);
+
+    if res == -1 && crate::get_errno() == libc::ENOENT
+        && vdir_lookup(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+            DIRTY_TRACKER.mark_dirty(&vpath.manifest_key);
+            return 0;
+        }
+
+    if res == 0 {
+        DIRTY_TRACKER.mark_dirty(&vpath.manifest_key);
     }
+
+    res
 }
 
 #[no_mangle]
@@ -691,37 +743,50 @@ pub unsafe extern "C" fn symlinkat_inception(
 #[no_mangle]
 #[cfg(target_os = "macos")]
 pub unsafe extern "C" fn rmdir_inception(path: *const c_char) -> c_int {
-    let init_state = INITIALIZING.load(Ordering::Relaxed);
-    if init_state != 0
-        || crate::state::INCEPTION_LAYER_STATE
-            .load(std::sync::atomic::Ordering::Acquire)
-            .is_null()
-    {
-        if let Some(err) = quick_block_vfs_mutation(path) {
-            return err;
-        }
-        return crate::syscalls::macos_raw::raw_rmdir(path);
-    }
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    let state = match InceptionLayerState::get() {
+        Some(s) => s,
+        None => return crate::syscalls::macos_raw::raw_rmdir(path),
+    };
 
-    // Pattern 2878: Use raw syscall to avoid dlsym recursion
-    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::macos_raw::raw_rmdir(path))
+    let vpath = match state.resolve_path(&path_str) {
+        Some(v) => v,
+        None => return crate::syscalls::macos_raw::raw_rmdir(path),
+    };
+
+    let res = crate::syscalls::macos_raw::raw_rmdir(path);
+
+    if res == -1 && crate::get_errno() == libc::ENOENT
+        && vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+            return 0;
+        }
+
+    res
 }
 
 #[no_mangle]
 #[cfg(target_os = "linux")]
 pub unsafe extern "C" fn rmdir_inception(path: *const c_char) -> c_int {
-    let init_state = INITIALIZING.load(Ordering::Relaxed);
-    if init_state != 0
-        || crate::state::INCEPTION_LAYER_STATE
-            .load(std::sync::atomic::Ordering::Acquire)
-            .is_null()
-    {
-        if let Some(err) = quick_block_vfs_mutation(path) {
-            return err;
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    let state = match InceptionLayerState::get() {
+        Some(s) => s,
+        None => return crate::syscalls::linux_raw::raw_rmdir(path),
+    };
+
+    let vpath = match state.resolve_path(&path_str) {
+        Some(v) => v,
+        None => return crate::syscalls::linux_raw::raw_rmdir(path),
+    };
+
+    let res = crate::syscalls::linux_raw::raw_rmdir(path);
+
+    if res == -1 && crate::get_errno() == libc::ENOENT {
+        if vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+            return 0;
         }
-        return crate::syscalls::linux_raw::raw_rmdir(path);
     }
-    block_vfs_mutation(path).unwrap_or_else(|| crate::syscalls::linux_raw::raw_rmdir(path))
+
+    res
 }
 
 #[no_mangle]

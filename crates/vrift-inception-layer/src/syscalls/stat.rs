@@ -244,6 +244,10 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
             use crate::state::vdir_list_dir;
             // Use manifest_path which already has the correct VDir-relative format
             if vdir_list_dir(state.mmap_ptr, state.mmap_size, manifest_path).is_some() {
+                // BUG-016: If we claim a directory exists virtually, we MUST ensure its physical
+                // parent exists to avoid ENOENT in subsequent child creation.
+                unsafe { crate::syscalls::open::materialize_directory(path_str) };
+
                 std::ptr::write_bytes(buf, 0, 1);
                 (*buf).st_size = 0;
                 #[cfg(target_os = "macos")]

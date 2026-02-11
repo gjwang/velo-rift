@@ -48,6 +48,15 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
     // FAST PATH: VDir mmap lookup — zero syscall, zero IPC, zero allocation
     // Only for non-dirty files where VDir has a valid cas_hash.
     // =========================================================================
+    let is_mutation = (flags & (libc::O_CREAT | libc::O_WRONLY | libc::O_RDWR)) != 0;
+    if is_mutation {
+        unsafe { ensure_parent_dirs(vpath.absolute.as_str()) };
+    }
+
+    // =========================================================================
+    // FAST PATH: VDir mmap lookup — zero syscall, zero IPC, zero allocation
+    // Only for non-dirty files where VDir has a valid cas_hash.
+    // =========================================================================
     if !DIRTY_TRACKER.is_dirty(&vpath.manifest_key) {
         if let Some(vdir_entry) = vdir_lookup(state.mmap_ptr, state.mmap_size, &vpath.manifest_key)
         {
@@ -151,8 +160,6 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
                         return None;
                     }
                 }
-
-                // duplicate record removed (handled above)
 
                 if is_write {
                     return open_cow_write(state, &vpath, blob_path.as_str(), flags, mode);
@@ -407,47 +414,73 @@ unsafe fn try_materialize_from_cas(
 }
 
 /// Recursively create parent directories for a path using raw mkdir syscalls.
+// materialize_directory: ensures a physical directory exists (recursive)
+pub(crate) unsafe fn materialize_directory(path: &str) {
+    if path.is_empty() || path == "/" {
+        return;
+    }
+
+    let mut stack_buf = [0u8; 1024];
+    if path.len() > 1023 {
+        return;
+    }
+    stack_buf[..path.len()].copy_from_slice(path.as_bytes());
+    stack_buf[path.len()] = 0;
+    let path_ptr = stack_buf.as_ptr() as *const libc::c_char;
+
+    #[cfg(target_os = "macos")]
+    let res = crate::syscalls::macos_raw::raw_mkdir(path_ptr, 0o755);
+    #[cfg(target_os = "linux")]
+    let res = crate::syscalls::linux_raw::raw_mkdirat(libc::AT_FDCWD, path_ptr, 0o755);
+
+    // Diagnostic log (zero-alloc)
+    if crate::state::DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut log_buf = [0u8; 1024];
+        let mut log_writer = crate::macros::StackWriter::new(&mut log_buf);
+        use std::fmt::Write;
+        let _ = writeln!(
+            log_writer,
+            "[vrift-inception] materialize_directory: {} -> {}",
+            path, res
+        );
+        let log_msg = log_writer.as_str();
+        unsafe {
+            #[cfg(target_os = "macos")]
+            crate::syscalls::macos_raw::raw_write(2, log_msg.as_ptr() as *const _, log_msg.len());
+            #[cfg(target_os = "linux")]
+            libc::write(2, log_msg.as_ptr() as *const _, log_msg.len());
+        }
+    }
+
+    if res == -1 {
+        let err = crate::get_errno();
+        if err == libc::EEXIST {
+            return;
+        }
+        if crate::state::DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            inception_log!("materialize_directory FAILED: {} errno={}", path, err);
+        }
+        if err == libc::ENOENT {
+            // Parent missing, recurse
+            if let Some(last_slash) = path.trim_end_matches('/').rfind('/') {
+                materialize_directory(&path[..last_slash]);
+                // Try again after parent created
+                #[cfg(target_os = "macos")]
+                crate::syscalls::macos_raw::raw_mkdir(path_ptr, 0o755);
+                #[cfg(target_os = "linux")]
+                crate::syscalls::linux_raw::raw_mkdirat(libc::AT_FDCWD, path_ptr, 0o755);
+            }
+        }
+    }
+}
+
 pub(crate) unsafe fn ensure_parent_dirs(path: &str) {
-    // Find the last '/' to get parent directory
     if let Some(last_slash) = path.rfind('/') {
         let parent = &path[..last_slash];
         if parent.is_empty() || parent == "/" {
             return;
         }
-        // Try to create the parent — if it fails with ENOENT, recurse
-        let parent_cpath = match std::ffi::CString::new(parent) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        #[cfg(target_os = "macos")]
-        let rc = crate::syscalls::macos_raw::raw_mkdir(parent_cpath.as_ptr(), 0o755);
-        #[cfg(target_os = "linux")]
-        let rc =
-            crate::syscalls::linux_raw::raw_mkdirat(libc::AT_FDCWD, parent_cpath.as_ptr(), 0o755);
-
-        if rc != 0 {
-            let err = crate::get_errno();
-            if err == libc::ENOENT {
-                // Parent's parent doesn't exist — recurse
-                ensure_parent_dirs(parent);
-                // Retry after creating grandparent
-                #[cfg(target_os = "macos")]
-                let rc2 = crate::syscalls::macos_raw::raw_mkdir(parent_cpath.as_ptr(), 0o755);
-                #[cfg(target_os = "linux")]
-                let rc2 = crate::syscalls::linux_raw::raw_mkdirat(
-                    libc::AT_FDCWD,
-                    parent_cpath.as_ptr(),
-                    0o755,
-                );
-
-                if rc2 == 0 {
-                    inception_log!("Materialized directory: '{}'", parent);
-                }
-            }
-        } else {
-            inception_log!("Materialized directory: '{}'", parent);
-        }
+        materialize_directory(parent);
     }
 }
 

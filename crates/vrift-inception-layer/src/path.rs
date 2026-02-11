@@ -138,6 +138,12 @@ impl PathResolver {
             return None;
         }
 
+        // RFC-0050: Explicitly exclude build-only directories from VFS management
+        // to prevent races between Cargo and Live Ingest/COW.
+        if normalized.contains("/target/") || normalized.contains("/.git/") {
+            return None;
+        }
+
         // 4. Extract manifest key
         let mut key_fs = FixedString::<1024>::new();
         let proj_root_str = self.project_root.as_str();
