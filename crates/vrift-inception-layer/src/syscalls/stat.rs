@@ -42,6 +42,9 @@ pub struct statx {
 
 /// RFC-0044: Virtual stat implementation using Hot Stat Cache
 /// Returns None to fallback to OS, Some(0) on success, Some(-1) on error
+///
+/// VDir-first design: check VDir mmap before any kernel stats to minimize
+/// overhead for the common case of files not in VDir (e.g. target/ artifacts).
 unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int> {
     let state = InceptionLayerState::get()?;
 
@@ -58,62 +61,6 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
     };
     let manifest_path = vpath.manifest_key.as_str();
 
-    // BUG-011: VDir only stores file entries. Before VDir virtualization, check if the
-    // physical path exists as a directory. If so, skip VDir entirely and let kernel stat
-    // handle it. This prevents hash collisions from returning file metadata for directories,
-    // which breaks create_dir_all (sees EEXIST + !is_dir → error).
-    let mut phys_buf: libc_stat = unsafe { std::mem::zeroed() };
-    let mut phys_exists = false;
-    {
-        // Use the resolved absolute physical path for the physical check
-        // Performance: Optimization for common path lengths using stack CString
-        let path_bytes = vpath.absolute.as_str().as_bytes();
-        let mut stack_buf = [0u8; 1024];
-        if path_bytes.len() < 1023 {
-            stack_buf[..path_bytes.len()].copy_from_slice(path_bytes);
-            stack_buf[path_bytes.len()] = 0;
-            let path_ptr = stack_buf.as_ptr() as *const libc::c_char;
-
-            #[cfg(target_os = "macos")]
-            let phys_result = crate::syscalls::macos_raw::raw_stat(path_ptr, &mut phys_buf);
-            #[cfg(target_os = "linux")]
-            let phys_result = crate::syscalls::linux_raw::raw_stat(path_ptr, &mut phys_buf);
-
-            if phys_result == 0 {
-                let mode = phys_buf.st_mode as u32;
-                if mode & 0o170000 == 0o040000 {
-                    // Physical path is a directory — skip VDir, let kernel stat handle it
-                    return None;
-                }
-                phys_exists = true;
-            }
-        } else {
-            // Fallback to heap for very long paths
-            let path_cstr = match std::ffi::CString::new(vpath.absolute.as_str()) {
-                Ok(c) => c,
-                Err(_) => return None,
-            };
-
-            #[cfg(target_os = "macos")]
-            let phys_result =
-                crate::syscalls::macos_raw::raw_stat(path_cstr.as_ptr(), &mut phys_buf);
-            #[cfg(target_os = "linux")]
-            let phys_result =
-                crate::syscalls::linux_raw::raw_stat(path_cstr.as_ptr(), &mut phys_buf);
-
-            if phys_result == 0 {
-                let mode = phys_buf.st_mode as u32;
-                if mode & 0o170000 == 0o040000 {
-                    // Physical path is a directory — skip VDir, let kernel stat handle it
-                    return None;
-                }
-                phys_exists = true;
-            }
-        }
-    }
-
-    // PSFS: hot path — zero alloc, zero lock, zero syscall. Hit/Miss recorded below.
-
     // M4: Dirty Check - if file is being written to, bypass mmap cache
     if DIRTY_TRACKER.is_dirty(manifest_path) {
         // Try to find live metadata from open FDs
@@ -128,187 +75,126 @@ unsafe fn stat_impl_common(path_str: &str, buf: *mut libc_stat) -> Option<c_int>
             let res = unsafe { crate::syscalls::linux_raw::raw_stat(temp_path_cstr.as_ptr(), buf) };
 
             if res == 0 {
-                // Virtualize the dev/ino to match VFS expectations
                 unsafe {
                     (*buf).st_dev = 0x52494654; // "RIFT"
                     (*buf).st_ino = vpath.manifest_key_hash as _;
                 }
-                inception_record!(EventType::StatHit, vpath.manifest_key_hash, 10); // 10 = dirty_hit (temp file stat)
+                inception_record!(EventType::StatHit, vpath.manifest_key_hash, 10);
                 return Some(0);
             }
         }
-        // If not found in open FDs (e.g. closed but not reingested), fall back to IPC
-        // but SKIP mmap cache.
-    } else {
-        // Try Hot Stat Cache — Phase 1.3: seqlock-protected VDir lookup
-        if let Some(entry) = vdir_lookup(state.mmap_ptr, state.mmap_size, manifest_path) {
-            // BUG-016: Cross-process Dirty Detection Heuristic.
-            // If physical file exists and its mtime is newer than VDir entry, it was
-            // likely updated by a sibling process (e.g. rustc) during the current session.
-            // Since DIRTY_TRACKER is per-process, we use this mtime check as a fallback.
+        // Dirty but no temp file — fall through to kernel stat
+        return None;
+    }
+
+    // 2. VDir-first lookup — O(1) mmap hash table, zero syscalls
+    //    This is the hot path: most target/ files won't be in VDir and we
+    //    short-circuit immediately without any kernel stat calls.
+    if let Some(entry) = vdir_lookup(state.mmap_ptr, state.mmap_size, manifest_path) {
+        // BUG-011: VDir only stores file entries. Check mode type.
+        let mode_with_type = if entry.mode & 0o170000 == 0 {
+            entry.mode | 0o100000
+        } else if entry.mode & 0o170000 != 0o100000 {
+            profile_count!(vdir_misses);
+            inception_record!(EventType::StatMiss, vpath.manifest_key_hash, 20);
+            return None;
+        } else {
+            entry.mode
+        };
+
+        // VDir HIT — now do physical stat for dirty detection and dir collision guard.
+        // This kernel stat is justified because we have a VDir entry to validate against.
+        let path_bytes = vpath.absolute.as_str().as_bytes();
+        let mut phys_buf: libc_stat = unsafe { std::mem::zeroed() };
+        let mut phys_exists = false;
+        let mut stack_buf = [0u8; 1024];
+        if path_bytes.len() < 1023 {
+            stack_buf[..path_bytes.len()].copy_from_slice(path_bytes);
+            stack_buf[path_bytes.len()] = 0;
+            let path_ptr = stack_buf.as_ptr() as *const libc::c_char;
+
+            #[cfg(target_os = "macos")]
+            let phys_result = crate::syscalls::macos_raw::raw_stat(path_ptr, &mut phys_buf);
+            #[cfg(target_os = "linux")]
+            let phys_result = crate::syscalls::linux_raw::raw_stat(path_ptr, &mut phys_buf);
+
+            if phys_result == 0 {
+                let mode = phys_buf.st_mode as u32;
+                if mode & 0o170000 == 0o040000 {
+                    // Physical path is a directory — VDir hash collision, let kernel handle
+                    return None;
+                }
+                phys_exists = true;
+            }
+        } else {
+            let path_cstr = match std::ffi::CString::new(vpath.absolute.as_str()) {
+                Ok(c) => c,
+                Err(_) => return None,
+            };
+            #[cfg(target_os = "macos")]
+            let phys_result =
+                crate::syscalls::macos_raw::raw_stat(path_cstr.as_ptr(), &mut phys_buf);
+            #[cfg(target_os = "linux")]
+            let phys_result =
+                crate::syscalls::linux_raw::raw_stat(path_cstr.as_ptr(), &mut phys_buf);
+            if phys_result == 0 {
+                let mode = phys_buf.st_mode as u32;
+                if mode & 0o170000 == 0o040000 {
+                    return None;
+                }
+                phys_exists = true;
+            }
+        }
+
+        // BUG-016: Cross-process Dirty Detection (Nanosecond-aware).
+        if phys_exists {
             let phys_mtime_sec = phys_buf.st_mtime as u64;
             let phys_mtime_nsec = phys_buf.st_mtime_nsec as u64;
-
-            inception_log!(
-                "DEBUG mtime '{}': phys={}.{:09}, vdir={}.0",
-                manifest_path,
-                phys_mtime_sec,
-                phys_mtime_nsec,
-                entry.mtime_sec
-            );
-
-            // BUG-016: Cross-process Dirty Detection (Nanosecond-aware).
-            // Materialized files have nanoseconds set to 0 (see materialize_from_cas_entry).
-            // Newly written files by rustc have high-precision nanoseconds > 0.
             let is_phys_newer = (phys_mtime_sec > (entry.mtime_sec as u64))
                 || (phys_mtime_sec == (entry.mtime_sec as u64) && phys_mtime_nsec > 0);
-
-            if phys_exists && is_phys_newer {
-                inception_log!(
-                    "physical file newer than VDir entry, bypassing VDir for '{}' (phys={}.{:09}, vdir={}.0)",
-                    manifest_path,
-                    phys_mtime_sec,
-                    phys_mtime_nsec,
-                    entry.mtime_sec
-                );
+            if is_phys_newer {
                 profile_count!(vdir_misses);
-                // Return the physical stat results directly by copying into the output buffer
                 unsafe {
                     std::ptr::copy_nonoverlapping(&phys_buf, buf, 1);
                 }
                 return Some(0);
             }
-
-            // BUG-011: VDir only stores file entries. If the entry mode lacks S_IFREG
-            // (0o100000), it's likely a hash collision or corrupted entry — fall through
-            // to kernel stat so directories are reported correctly.
-            let mode_with_type = if entry.mode & 0o170000 == 0 {
-                // No S_IFMT bits set — assume regular file, add S_IFREG
-                entry.mode | 0o100000
-            } else if entry.mode & 0o170000 != 0o100000 {
-                // Has S_IFMT but not S_IFREG (e.g. S_IFDIR) — skip VDir, fall through
-                profile_count!(vdir_misses);
-                inception_record!(EventType::StatMiss, vpath.manifest_key_hash, 20);
-                return None;
-            } else {
-                entry.mode
-            };
-            // RFC-0039 Architecture: Faithfully report the original mode from VDir.
-            // Decouples VFS visibility from the read-only CAS physical storage.
-
-            // Solid Mode: materialize from CAS if physical file doesn't exist.
-            // VDir says "file exists" → ensure it ACTUALLY exists on disk.
-            // After this, all subsequent syscalls (open/unlink/chmod) hit real files.
-            // Also ensures filesystem is intact after exiting inception mode.
-            if !phys_exists {
-                crate::syscalls::open::materialize_from_cas_entry(state, &entry, path_str);
-            }
-
-            profile_count!(vdir_hits);
-            inception_record!(EventType::StatHit, vpath.manifest_key_hash, 11); // 11 = vdir_hit (seqlock)
-            std::ptr::write_bytes(buf, 0, 1);
-            (*buf).st_size = entry.size as _;
-            // Materialization = fake compilation → mtime = Now()
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            #[cfg(target_os = "macos")]
-            {
-                (*buf).st_mode = mode_with_type as u16;
-                (*buf).st_mtime = now.as_secs() as _;
-                (*buf).st_mtime_nsec = now.subsec_nanos() as _;
-            }
-            #[cfg(target_os = "linux")]
-            {
-                (*buf).st_mode = mode_with_type as _;
-                (*buf).st_mtime = now.as_secs() as _;
-                (*buf).st_mtime_nsec = now.subsec_nanos() as _;
-            }
-            (*buf).st_dev = 0x52494654; // "RIFT"
-            (*buf).st_nlink = 1;
-            (*buf).st_ino = vpath.manifest_key_hash as _;
-            // duplicate record removed — line 83 already records the vdir_hit
-            return Some(0);
         }
 
-        // RFC-0051: Synthetic directory stat for VDir-implied directories.
-        // VDir only stores file entries, but directories are implied by file paths.
-        // When stat() is called on a non-existent path that has VDir children
-        // (e.g. target/debug/.fingerprint/slab-HASH/), return synthetic S_IFDIR
-        // metadata so cargo doesn't skip the directory.
+        // Solid Mode: materialize from CAS if physical file doesn't exist
         if !phys_exists {
-            use crate::state::vdir_list_dir;
-            // Use manifest_path which already has the correct VDir-relative format
-            if vdir_list_dir(state.mmap_ptr, state.mmap_size, manifest_path).is_some() {
-                // BUG-016: If we claim a directory exists virtually, we MUST ensure its physical
-                // parent exists to avoid ENOENT in subsequent child creation.
-                unsafe { crate::syscalls::open::materialize_directory(path_str) };
-
-                std::ptr::write_bytes(buf, 0, 1);
-                (*buf).st_size = 0;
-                #[cfg(target_os = "macos")]
-                {
-                    (*buf).st_mode = 0o040755_u16; // S_IFDIR | rwxr-xr-x
-                    (*buf).st_mtime = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as _;
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    (*buf).st_mode = 0o040755;
-                    (*buf).st_mtime = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as _;
-                }
-                (*buf).st_dev = 0x52494654; // "RIFT"
-                (*buf).st_nlink = 2;
-                (*buf).st_ino = vpath.manifest_key_hash as _;
-                profile_count!(vdir_hits);
-                inception_record!(EventType::StatHit, vpath.manifest_key_hash, 13); // 13 = synthetic_dir
-                return Some(0);
-            }
+            crate::syscalls::open::materialize_from_cas_entry(state, &entry, path_str);
         }
-    }
 
-    profile_count!(vdir_misses);
-    inception_record!(EventType::StatMiss, vpath.manifest_key_hash, 20); // 20 = vdir_miss, trying IPC
-
-    // Try IPC query (also use manifest path format)
-    profile_count!(ipc_calls);
-    if let Some(entry) = state.query_manifest(&vpath) {
+        profile_count!(vdir_hits);
+        inception_record!(EventType::StatHit, vpath.manifest_key_hash, 11);
         std::ptr::write_bytes(buf, 0, 1);
         (*buf).st_size = entry.size as _;
-        // Materialization = fake compilation → mtime = Now()
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         #[cfg(target_os = "macos")]
         {
-            (*buf).st_mode = entry.mode as u16;
+            (*buf).st_mode = mode_with_type as u16;
             (*buf).st_mtime = now.as_secs() as _;
             (*buf).st_mtime_nsec = now.subsec_nanos() as _;
         }
         #[cfg(target_os = "linux")]
         {
-            (*buf).st_mode = entry.mode as _;
+            (*buf).st_mode = mode_with_type as _;
             (*buf).st_mtime = now.as_secs() as _;
             (*buf).st_mtime_nsec = now.subsec_nanos() as _;
         }
         (*buf).st_dev = 0x52494654; // "RIFT"
         (*buf).st_nlink = 1;
         (*buf).st_ino = vpath.manifest_key_hash as _;
-        inception_record!(EventType::StatHit, vpath.manifest_key_hash, 12); // 12 = ipc_hit
         return Some(0);
     }
 
-    inception_record!(
-        EventType::StatMiss,
-        vrift_ipc::fnv1a_hash(path_str),
-        -libc::ENOENT
-    );
-
+    // VDir miss — fall through to kernel stat with zero added overhead.
+    // On kernel ENOENT, the caller (stat_impl / fstatat_impl) can check for
+    // VDir-implied synthetic directories if needed.
+    profile_count!(vdir_misses);
     None
 }
 
@@ -329,7 +215,58 @@ unsafe fn stat_impl(
         return Some(result);
     }
 
-    None
+    // VDir miss — try kernel stat
+    #[cfg(target_os = "macos")]
+    let kernel_result = crate::syscalls::macos_raw::raw_stat(path, buf);
+    #[cfg(target_os = "linux")]
+    let kernel_result = crate::syscalls::linux_raw::raw_stat(path, buf);
+
+    if kernel_result == 0 {
+        return Some(0);
+    }
+
+    // Kernel returned error — check for synthetic directory on ENOENT
+    if crate::get_errno() == libc::ENOENT {
+        if let Some(state) = InceptionLayerState::get() {
+            if let Some(vpath) = state.resolve_path(path_str) {
+                use crate::state::vdir_list_dir;
+                if vdir_list_dir(state.mmap_ptr, state.mmap_size, vpath.manifest_key.as_str())
+                    .is_some()
+                {
+                    // RFC-0051: VDir-implied directory — materialize and return synthetic stat
+                    crate::syscalls::open::materialize_directory(path_str);
+
+                    std::ptr::write_bytes(buf, 0, 1);
+                    (*buf).st_size = 0;
+                    #[cfg(target_os = "macos")]
+                    {
+                        (*buf).st_mode = 0o040755_u16;
+                        (*buf).st_mtime = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as _;
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        (*buf).st_mode = 0o040755;
+                        (*buf).st_mtime = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as _;
+                    }
+                    (*buf).st_dev = 0x52494654; // "RIFT"
+                    (*buf).st_nlink = 2;
+                    (*buf).st_ino = vpath.manifest_key_hash as _;
+                    profile_count!(vdir_hits);
+                    inception_record!(EventType::StatHit, vpath.manifest_key_hash, 13);
+                    return Some(0);
+                }
+            }
+        }
+    }
+
+    // Restore errno and return kernel result
+    Some(kernel_result)
 }
 
 #[no_mangle]

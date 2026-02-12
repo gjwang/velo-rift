@@ -188,32 +188,28 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
     }
 
     // =========================================================================
-    // SLOW PATH: IPC fallback — VDir miss, dirty file, or directory
+    // VDir miss path: try raw_open first, IPC only if file doesn't exist
     // =========================================================================
     profile_count!(vdir_misses);
-    profile_count!(ipc_calls);
-    let entry = match state.query_manifest_ipc(&vpath) {
-        Some(e) => {
-            inception_log!(
-                "manifest lookup '{}': FOUND (mode=0o{:o}, size={})",
-                vpath.manifest_key,
-                e.mode,
-                e.size
-            );
-            e
-        }
-        None => {
-            // RFC-0039 Solid Mode: Allow new file creation in VFS territory
-            inception_log!(
-                "manifest lookup '{}': NOT FOUND -> passthrough + track (is_write={})",
-                vpath.manifest_key,
-                is_write
-            );
-            // RFC-0051++: Solid Mode - ensure parent directories exist for VFS-territory opens.
-            // If the parent directory is supposed to exist according to readdir but is
-            // missing physically, we must materialize it to avoid ENOENT on O_CREAT.
-            ensure_parent_dirs(vpath.absolute.as_str());
 
+    // Fast path: if the file exists physically, open it directly — no IPC needed.
+    // Track it as a VFS file for consistency (dirty tracking, fd management).
+    if is_mutation {
+        // Write/create: always use raw open, track for dirty detection
+        let fd = unsafe { raw_open(path, flags, mode) };
+        if fd >= 0 {
+            crate::syscalls::io::track_fd(
+                fd,
+                &vpath.manifest_key,
+                true,
+                None,
+                vpath.manifest_key_hash,
+            );
+            return Some(fd);
+        }
+        // O_CREAT with ENOENT — ensure parent dirs then retry
+        if crate::get_errno() == libc::ENOENT {
+            ensure_parent_dirs(vpath.absolute.as_str());
             let fd = unsafe { raw_open(path, flags, mode) };
             if fd >= 0 {
                 crate::syscalls::io::track_fd(
@@ -225,43 +221,68 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
                 );
                 return Some(fd);
             }
-
-            // Solid-mode CAS materialization: if file doesn't exist on disk
-            // but VDir has a cached entry, materialize from CAS blob via clonefile.
-            if crate::get_errno() == libc::ENOENT {
-                if let Some(fd) = try_materialize_from_cas(state, &vpath, path, flags, mode) {
-                    return Some(fd);
-                }
-            }
-            return None;
         }
-    };
-
-    let blob_path = format_blob_path_fixed(&state.cas_root, &entry.content_hash, entry.size as u64);
-
-    inception_log!("redirection path (IPC): '{}'", blob_path.as_str());
-
-    if is_write {
-        open_cow_write(
-            state,
-            &vpath,
-            blob_path.as_str(),
-            flags,
-            mode,
-            entry.mode as u32,
-        )
-    } else {
-        open_cas_read(
-            state,
-            &vpath,
-            blob_path.as_str(),
-            flags,
-            mode,
-            entry.size as u64,
-            entry.mode as u32,
-            entry.mtime,
-        )
+        return None;
     }
+
+    // Read-only open: try raw_open first
+    {
+        let fd = unsafe { raw_open(path, flags, mode) };
+        if fd >= 0 {
+            crate::syscalls::io::track_fd(
+                fd,
+                &vpath.manifest_key,
+                false,
+                None,
+                vpath.manifest_key_hash,
+            );
+            return Some(fd);
+        }
+    }
+
+    // File doesn't exist physically — try IPC to check daemon manifest
+    if crate::get_errno() == libc::ENOENT {
+        // Solid-mode CAS materialization: if VDir has a cached entry, materialize from CAS
+        if let Some(fd) = try_materialize_from_cas(state, &vpath, path, flags, mode) {
+            return Some(fd);
+        }
+
+        // Last resort: IPC query
+        profile_count!(ipc_calls);
+        if let Some(entry) = state.query_manifest_ipc(&vpath) {
+            inception_log!(
+                "manifest lookup '{}': FOUND via IPC (mode=0o{:o}, size={})",
+                vpath.manifest_key,
+                entry.mode,
+                entry.size
+            );
+            let blob_path =
+                format_blob_path_fixed(&state.cas_root, &entry.content_hash, entry.size as u64);
+            if is_write {
+                return open_cow_write(
+                    state,
+                    &vpath,
+                    blob_path.as_str(),
+                    flags,
+                    mode,
+                    entry.mode as u32,
+                );
+            } else {
+                return open_cas_read(
+                    state,
+                    &vpath,
+                    blob_path.as_str(),
+                    flags,
+                    mode,
+                    entry.size as u64,
+                    entry.mode as u32,
+                    entry.mtime,
+                );
+            }
+        }
+    }
+
+    None
 }
 
 // ============================================================================

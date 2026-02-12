@@ -122,10 +122,8 @@ impl PathResolver {
             return None;
         }
 
-        // RFC-0050: Explicitly exclude build-only directories
-        if normalized.contains("/target/") || normalized.contains("/.git/") {
-            return None;
-        }
+        // No hardcoded path exclusions. VDir lookup is O(1) via mmap hash table;
+        // paths not in VDir naturally fall through to kernel with minimal overhead.
 
         // 4. Extract manifest key
         let mut key_fs = FixedString::<1024>::new();
