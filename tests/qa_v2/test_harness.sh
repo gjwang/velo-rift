@@ -14,9 +14,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-VRIFT_BIN="$PROJECT_ROOT/target/release/vrift"
-VRIFTD_BIN="$PROJECT_ROOT/target/release/vriftd"
+
+# Source SSOT env vars (REPO_ROOT, VRIFT_CLI, VRIFTD, VRIFT_SOCKET_PATH, etc.)
+source "$SCRIPT_DIR/../lib/vrift_env.sh"
+
+PROJECT_ROOT="$REPO_ROOT"
+VRIFT_BIN="$VRIFT_CLI"
+VRIFTD_BIN="$VRIFTD"
 
 # ──────────────────────────────────────────────
 # Portable timeout (macOS has no GNU timeout)
@@ -36,9 +40,8 @@ portable_timeout() {
 ensure_daemon_stopped() {
     pkill -f vriftd 2>/dev/null || true
     sleep 0.3
-    # Remove stale socket
-    local socket_path="${VRIFT_SOCKET:-/tmp/vrift.sock}"
-    rm -f "$socket_path" 2>/dev/null || true
+    # Remove stale socket (uses SSOT path from vrift_env.sh)
+    rm -f "$VRIFT_SOCKET_PATH" 2>/dev/null || true
 }
 
 start_daemon_and_wait() {

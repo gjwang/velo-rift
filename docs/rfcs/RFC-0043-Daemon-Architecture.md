@@ -50,7 +50,7 @@ RFC-0039 requires immutable Tier-1 assets protected via `chattr +i`, which requi
 ### Transport
 
 - **Linux**: Unix Domain Socket at `/run/vrift/daemon.sock`
-- **macOS**: Unix Domain Socket at `~/Library/Application Support/vrift/daemon.sock`
+- **macOS**: Unix Domain Socket at `/tmp/vrift.sock`
 
 ### Messages (JSON-RPC 2.0)
 

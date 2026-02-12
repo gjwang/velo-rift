@@ -72,19 +72,9 @@ PROJECT_NAME=$(basename "$PROJECT_DIR")
 # Configuration
 # ============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-SHIM_LIB="$REPO_ROOT/target/release/libvrift_inception_layer.dylib"
-VRIFT_CLI="$REPO_ROOT/target/release/vrift"
-VRIFTD="$REPO_ROOT/target/release/vriftd"
-
-VR_THE_SOURCE="${VR_THE_SOURCE:-$HOME/.vrift/the_source}"
-# Default socket: /tmp/vrift.sock on macOS, /run/vrift/daemon.sock on Linux
-if [ "$(uname -s)" = "Darwin" ]; then
-    VRIFT_SOCKET_PATH="${VRIFT_SOCKET_PATH:-/tmp/vrift.sock}"
-else
-    VRIFT_SOCKET_PATH="${VRIFT_SOCKET_PATH:-/run/vrift/daemon.sock}"
-fi
+# Source SSOT env vars (REPO_ROOT, VRIFT_CLI, VRIFTD, SHIM_LIB, VRIFT_SOCKET_PATH, VR_THE_SOURCE)
+source "$SCRIPT_DIR/../lib/vrift_env.sh"
 
 PASSED=0
 FAILED=0

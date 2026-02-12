@@ -17,8 +17,19 @@ safe_rm() {
 
 echo "=== Velo Rift E2E Verification ==="
 
-# Force socket path to /tmp for consistent testing across platforms
-export VRIFT_SOCKET_PATH="/tmp/vrift.sock"
+# Source SSOT env vars (sets VRIFT_SOCKET_PATH, VR_THE_SOURCE, etc.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/../tests/lib/vrift_env.sh" ]; then
+    export REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    source "$SCRIPT_DIR/../tests/lib/vrift_env.sh"
+else
+    # Fallback for standalone execution
+    if [ "$(uname -s)" = "Darwin" ]; then
+        export VRIFT_SOCKET_PATH="${VRIFT_SOCKET_PATH:-/tmp/vrift.sock}"
+    else
+        export VRIFT_SOCKET_PATH="${VRIFT_SOCKET_PATH:-/run/vrift/daemon.sock}"
+    fi
+fi
 
 # 1. Build project
 echo "[*] Building Velo Rift..."
@@ -92,13 +103,13 @@ vrift daemon status || true
 # Wait for socket (up to 5 seconds)
 MAX_RETRIES=10
 RETRY_COUNT=0
-while [ ! -S "/tmp/vrift.sock" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+while [ ! -S "$VRIFT_SOCKET_PATH" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     sleep 0.5
     RETRY_COUNT=$((RETRY_COUNT + 1))
 done
 
-if [ ! -S "/tmp/vrift.sock" ]; then
-    echo "ERROR: Daemon socket not found. Auto-start failed after timeout."
+if [ ! -S "$VRIFT_SOCKET_PATH" ]; then
+    echo "ERROR: Daemon socket not found at $VRIFT_SOCKET_PATH. Auto-start failed after timeout."
     exit 1
 fi
 
@@ -131,7 +142,7 @@ echo "[*] Testing Persistence..."
 pkill vriftd
 sleep 1
 # Daemon should be dead
-if [ -S "/tmp/vrift.sock" ]; then
+if [ -S "$VRIFT_SOCKET_PATH" ]; then
     echo "Warning: Socket still exists after pkill."
 fi
 

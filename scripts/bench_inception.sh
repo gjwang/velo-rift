@@ -39,9 +39,11 @@ ITERATIONS="${BENCH_ITERATIONS:-3}"
 # Resolve project dir to absolute path
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
 
-# Auto-detect release shim library
+# Source SSOT env vars
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RIFT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export REPO_ROOT="$RIFT_ROOT"
+source "$RIFT_ROOT/tests/lib/vrift_env.sh"
 
 if [[ "$(uname)" == "Darwin" ]]; then
     SHIM_NAME="libvrift_inception_layer.dylib"
@@ -118,11 +120,11 @@ if [[ -z "$TOUCH_FILE" ]] || [[ ! -f "$PROJECT_DIR/$TOUCH_FILE" ]]; then
     TOUCH_FILE=""
 fi
 
-# Socket path
-SOCK="${VRIFT_SOCKET_PATH:-/tmp/vrift.sock}"
+# Socket path (from SSOT helper)
+SOCK="$VRIFT_SOCKET_PATH"
 
-# CAS root
-CAS_ROOT="${VR_THE_SOURCE:-$HOME/.vrift/the_source}"
+# CAS root (from SSOT helper)
+CAS_ROOT="$VR_THE_SOURCE"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
