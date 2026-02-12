@@ -18,7 +18,7 @@ check_prerequisites || exit 1
 
 log_section "Shell Mutation Suite"
 
-start_daemon || exit 1
+# NOTE: No daemon needed — mutation blocking uses shim's VFS prefix check.
 
 # Create test workspace
 mkdir -p "$TEST_WORKSPACE/src/subdir"
