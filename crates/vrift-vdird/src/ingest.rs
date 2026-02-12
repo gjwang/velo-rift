@@ -159,6 +159,7 @@ pub struct IngestHandler {
     manifest: std::sync::Arc<vrift_manifest::lmdb::LmdbManifest>,
     cas: vrift_cas::CasStore,
     vdir: Option<Arc<Mutex<crate::vdir::VDir>>>,
+    vfs_prefix: String,
 }
 
 impl IngestHandler {
@@ -172,7 +173,14 @@ impl IngestHandler {
             manifest,
             cas,
             vdir: None,
+            vfs_prefix: "/vrift".to_string(), // Default, should be updated via with_vfs_prefix
         }
+    }
+
+    /// Set VFS virtual prefix (RFC-0050)
+    pub fn with_vfs_prefix(mut self, prefix: String) -> Self {
+        self.vfs_prefix = prefix;
+        self
     }
 
     /// Set VDir handle for dual-write (manifest + VDir mmap)
@@ -370,11 +378,15 @@ impl IngestHandler {
         }
     }
 
-    /// Convert absolute path to manifest key (relative path)
+    /// Convert absolute path to manifest key (RFC-0050: prefix + relative path)
     fn to_manifest_key(&self, path: &std::path::Path) -> String {
-        path.strip_prefix(&self.project_root)
-            .map(|p| format!("/{}", p.display()))
-            .unwrap_or_else(|_| path.display().to_string())
+        let rel_path = path
+            .strip_prefix(&self.project_root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+
+        let prefix = self.vfs_prefix.trim_end_matches('/');
+        format!("{}/{}", prefix, rel_path.trim_start_matches('/'))
     }
 }
 

@@ -34,73 +34,72 @@ pub(crate) unsafe fn raw_unix_connect(path: &str) -> c_int {
         Err(_) => return -1,
     };
     // BUG-007b: Use raw_access via RawContext — access is interposed by the shim
-    if CTX.access(path_cstr.as_ptr(), libc::F_OK) != 0 {
-        return -1;
-    }
+    let mut attempts = 0;
+    while attempts < 10 {
+        if CTX.access(path_cstr.as_ptr(), libc::F_OK) == 0 {
+            let fd = {
+                #[cfg(target_os = "linux")]
+                {
+                    libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                    if s >= 0 {
+                        CTX.fcntl(s, libc::F_SETFD, libc::FD_CLOEXEC as i64);
+                    }
+                    s
+                }
+            };
 
-    // RFC-0043: Prevent FD leakage to child processes (Atomic CLOEXEC)
-    let fd = {
-        #[cfg(target_os = "linux")]
-        {
-            libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-            if s >= 0 {
-                // BUG-007b: Use raw_fcntl via RawContext to avoid interposed fcntl
-                CTX.fcntl(s, libc::F_SETFD, libc::FD_CLOEXEC as i64);
+            if fd >= 0 {
+                // Set timeouts
+                let timeout = libc::timeval {
+                    tv_sec: 2,
+                    tv_usec: 0,
+                };
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVTIMEO,
+                    &timeout as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+                );
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDTIMEO,
+                    &timeout as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+                );
+
+                let mut addr: libc::sockaddr_un = std::mem::zeroed();
+                addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+
+                let path_bytes = path.as_bytes();
+                if path_bytes.len() < addr.sun_path.len() {
+                    ptr::copy_nonoverlapping(
+                        path_bytes.as_ptr(),
+                        addr.sun_path.as_mut_ptr().cast::<u8>(),
+                        path_bytes.len(),
+                    );
+
+                    let addr_len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+                    if libc::connect(fd, &addr as *const _ as *const libc::sockaddr, addr_len) == 0
+                    {
+                        return fd;
+                    }
+                }
+                ipc_raw_close(fd);
             }
-            s
         }
-    };
 
-    if fd < 0 {
-        return -1;
+        attempts += 1;
+        let sleep_ms = 10 * attempts;
+        libc::usleep(sleep_ms * 1000);
     }
 
-    // RFC-0053: Set socket timeouts BEFORE connect to prevent UE process states
-    // 5 second timeout for both send and receive
-    let timeout = libc::timeval {
-        tv_sec: 5,
-        tv_usec: 0,
-    };
-    libc::setsockopt(
-        fd,
-        libc::SOL_SOCKET,
-        libc::SO_RCVTIMEO,
-        &timeout as *const _ as *const libc::c_void,
-        std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-    );
-    libc::setsockopt(
-        fd,
-        libc::SOL_SOCKET,
-        libc::SO_SNDTIMEO,
-        &timeout as *const _ as *const libc::c_void,
-        std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-    );
-
-    let mut addr: libc::sockaddr_un = std::mem::zeroed();
-    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-
-    let path_bytes = path.as_bytes();
-    if path_bytes.len() >= addr.sun_path.len() {
-        ipc_raw_close(fd);
-        return -1;
-    }
-    ptr::copy_nonoverlapping(
-        path_bytes.as_ptr(),
-        addr.sun_path.as_mut_ptr().cast::<u8>(),
-        path_bytes.len(),
-    );
-
-    let addr_len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-    if libc::connect(fd, &addr as *const _ as *const libc::sockaddr, addr_len) < 0 {
-        ipc_raw_close(fd);
-        return -1;
-    }
-
-    fd
+    -1
 }
 
 /// Raw write using RawContext (avoids recursion through inception layer)
@@ -592,12 +591,31 @@ pub(crate) unsafe fn sync_ipc_manifest_get(
     vdird_socket: &str,
     path: &str,
 ) -> Option<vrift_ipc::VnodeEntry> {
+    inception_info!(
+        "sync_ipc_manifest_get(socket={}, path={})",
+        vdird_socket,
+        path
+    );
     let request = vrift_ipc::VeloRequest::ManifestGet {
         path: path.to_string(),
     };
     match sync_rpc_vdird(vdird_socket, &request) {
-        Some(vrift_ipc::VeloResponse::ManifestAck { entry }) => entry,
-        _ => None,
+        Some(vrift_ipc::VeloResponse::ManifestAck { entry }) => {
+            inception_info!("sync_ipc_manifest_get(path={}) -> FOUND", path);
+            entry
+        }
+        Some(resp) => {
+            inception_warn!(
+                "sync_ipc_manifest_get(path={}) -> Unexpected response: {:?}",
+                path,
+                resp
+            );
+            None
+        }
+        None => {
+            inception_warn!("sync_ipc_manifest_get(path={}) -> IPC FAILED (None)", path);
+            None
+        }
     }
 }
 

@@ -65,21 +65,21 @@ echo "4. Ingesting via Daemon..."
 "$VRIFT_BIN" ingest --mode solid src --output verify.manifest -j 1
 
 echo "5. Verifying Virtual Permissions (stat)..."
-# Find VDir file from project root (standard location)
-VDIR_FILE="$TEST_DIR/home/.vrift/vdir/f37bb59acdd9c2bb.vdir"
+# Find VDir file dynamically (hash depends on canonical path)
+VDIR_FILE=$(ls "$TEST_DIR/home/.vrift/vdir/"*.vdir | head -n 1)
 echo "Using VDir: $VDIR_FILE"
 export VRIFT_VDIR_MMAP="$VDIR_FILE"
 
-"$VRIFT_BIN" --the-source-root "$TEST_DIR/home/.vrift/the_source" run -m verify.manifest stat -f "%A %N" src/readonly.txt
-"$VRIFT_BIN" --the-source-root "$TEST_DIR/home/.vrift/the_source" run -m verify.manifest stat -f "%A %N" src/exec.sh
-"$VRIFT_BIN" --the-source-root "$TEST_DIR/home/.vrift/the_source" run -m verify.manifest stat -f "%A %N" src/normal.txt
+"$VRIFT_BIN" run -m verify.manifest stat -f "%A %N" src/readonly.txt
+"$VRIFT_BIN" run -m verify.manifest stat -f "%A %N" src/exec.sh
+"$VRIFT_BIN" run -m verify.manifest stat -f "%A %N" src/normal.txt
 
 echo "6. Verifying Materialization (deleting physical then run)..."
 rm -f "$TEST_DIR/src/readonly.txt" "$TEST_DIR/src/exec.sh"
 
 echo "Accessing files to trigger materialization..."
-"$VRIFT_BIN" --the-source-root "$TEST_DIR/home/.vrift/the_source" run -m verify.manifest cat src/readonly.txt > /dev/null
-"$VRIFT_BIN" --the-source-root "$TEST_DIR/home/.vrift/the_source" run -m verify.manifest ./src/exec.sh > /dev/null
+"$VRIFT_BIN" run -m verify.manifest cat src/readonly.txt > /dev/null
+"$VRIFT_BIN" run -m verify.manifest ./src/exec.sh > /dev/null
 
 echo "Checking physical modes after materialization..."
 stat -f "%A %N" src/readonly.txt
@@ -91,7 +91,7 @@ echo "Checking physical mode of COW staged file..."
 stat -f "%A %N" src/normal.txt
 
 echo "8. Execution Test..."
-"$VRIFT_BIN" --the-source-root "$TEST_DIR/home/.vrift/the_source" run -m verify.manifest ./src/exec.sh
+"$VRIFT_BIN" run -m verify.manifest ./src/exec.sh
 
 # Cleanup
 echo "Cleaning up..."

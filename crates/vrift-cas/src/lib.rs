@@ -177,7 +177,7 @@ impl CasStore {
         let l1 = &hex[..2];
         let l2 = &hex[2..4];
         let filename = if ext.is_empty() {
-            format!("{}_{}", hex, size)
+            format!("{}_{}.bin", hex, size)
         } else {
             format!("{}_{}.{}", hex, size, ext)
         };
@@ -1116,7 +1116,7 @@ mod tests {
 
         // Test without extension
         let path_no_ext = cas.blob_path_with_metadata(&hash, 512, "");
-        assert!(path_no_ext.to_string_lossy().ends_with("_512"));
+        assert!(path_no_ext.to_string_lossy().ends_with("_512.bin"));
         assert!(!path_no_ext.to_string_lossy().ends_with("."));
     }
 

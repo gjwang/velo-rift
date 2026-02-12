@@ -511,8 +511,35 @@ fn cmd_status(
         println!("CAS: {} Unique blobs", cas.stats()?.blob_count);
     }
     if let Some(manifest_path) = manifest {
-        let m = LmdbManifest::open(manifest_path)?;
-        println!("Manifest: {} files", m.stats()?.file_count);
+        if manifest_path.exists() {
+            let m = LmdbManifest::open(manifest_path)?;
+            let s = m.stats()?;
+            println!("Manifest: {}", manifest_path.display());
+            println!("  Files:       {}", s.file_count);
+            println!("  Directories: {}", s.dir_count);
+            println!("  Total size:  {}", format_bytes(s.total_size));
+
+            // Calculate dedup ratio if CAS is available
+            if cas_root.exists() {
+                let cas = CasStore::new(cas_root)?;
+                let cas_stats = cas.stats()?;
+                if s.total_size > 0 && cas_stats.total_bytes > 0 {
+                    let savings = s.total_size.saturating_sub(cas_stats.total_bytes);
+                    let ratio = (savings as f64 / s.total_size as f64) * 100.0;
+                    println!();
+                    println!("  Deduplication:");
+                    println!("    Original:     {}", format_bytes(s.total_size));
+                    println!("    Deduplicated: {}", format_bytes(cas_stats.total_bytes));
+                    println!(
+                        "    Savings:      {} ({:.1}%)",
+                        format_bytes(savings),
+                        ratio
+                    );
+                }
+            }
+        } else {
+            println!("Manifest: {} (not found)", manifest_path.display());
+        }
     }
     Ok(())
 }

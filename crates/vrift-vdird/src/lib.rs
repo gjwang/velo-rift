@@ -46,6 +46,8 @@ pub struct ProjectConfig {
     pub cas_path: PathBuf,
     /// Path to LMDB manifest
     pub manifest_path: PathBuf,
+    /// VFS virtual prefix (RFC-0050)
+    pub vfs_prefix: String,
 }
 
 impl ProjectConfig {
@@ -86,9 +88,14 @@ impl ProjectConfig {
                 .ok()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| {
-                    vrift_config::path::get_manifest_db_path(&project_id)
-                        .unwrap_or_else(|| project_root.join(".vrift").join("manifest.lmdb"))
+                    let local = project_root.join(".vrift").join("manifest.lmdb");
+                    if local.exists() {
+                        local
+                    } else {
+                        vrift_config::path::get_manifest_db_path(&project_id).unwrap_or(local)
+                    }
                 }),
+            vfs_prefix: std::env::var("VRIFT_VFS_PREFIX").unwrap_or_else(|_| "/vrift".to_string()),
         }
     }
 
@@ -186,7 +193,8 @@ pub async fn run_daemon(config: ProjectConfig) -> Result<()> {
     let ingest_queue = ingest::IngestQueue::new(ingest_rx);
     let handler = std::sync::Arc::new(
         ingest::IngestHandler::new(config.project_root.clone(), manifest.clone(), cas)
-            .with_vdir(vdir.clone()),
+            .with_vdir(vdir.clone())
+            .with_vfs_prefix(config.vfs_prefix.clone()),
     );
     let consumer_handle = tokio::spawn(async move {
         ingest::run_consumer(ingest_queue, handler).await;

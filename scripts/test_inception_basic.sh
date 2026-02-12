@@ -48,7 +48,12 @@ echo -n "hello world" > "$TEST_DIR/source/testfile.txt"
 # 2. Ingest into the workspace's default .vrift/manifest.lmdb
 echo "Ingesting source..."
 export VR_THE_SOURCE="$TEST_DIR/cas"
-"$VELO_BIN" ingest "$TEST_DIR/source" --prefix "" > "$TEST_DIR/ingest.log" 2>&1
+# Use --prefix "/vrift" to match the shim's VFS prefix
+# Standardize: ingest to .vrift/manifest.lmdb instead of custom file
+mkdir -p "$TEST_DIR/source/.vrift"
+"$VELO_BIN" ingest "$TEST_DIR/source" --prefix "/vrift" > "$TEST_DIR/ingest.log" 2>&1
+echo "Manifest Content:"
+"$VELO_BIN" status --manifest "$TEST_DIR/source/.vrift/manifest.lmdb"
 
 # 3. Start daemon
 echo "Starting daemon..."
@@ -90,8 +95,18 @@ gcc "$TEST_DIR/test.c" -o "$TEST_DIR/test"
 
 # 5. Run with inception (Point VRIFT_PROJECT_ROOT to the ingested workspace)
 echo "Running with inception..."
-export "$PRELOAD_VAR"="$(realpath "$INCEPTION_LIB")"
-if [ "$OS_TYPE" == "Darwin" ]; then export DYLD_FORCE_FLAT_NAMESPACE=1; fi
+INCEPTION_PATH="$(realpath "$INCEPTION_LIB")"
+if [ ! -f "$INCEPTION_PATH" ]; then
+    echo "❌ ERROR: Shim library not found at $INCEPTION_PATH"
+    exit 1
+fi
+
+export "$PRELOAD_VAR"="$INCEPTION_PATH"
+if [ "$OS_TYPE" == "Darwin" ]; then
+    export DYLD_FORCE_FLAT_NAMESPACE=1
+fi
+export VR_THE_SOURCE="$TEST_DIR/cas"
+export VRIFT_MANIFEST="$TEST_DIR/source/.vrift/manifest.lmdb"
 export VRIFT_VFS_PREFIX="/vrift"
 export VRIFT_PROJECT_ROOT="$TEST_DIR/source"
 export VRIFT_DEBUG=1

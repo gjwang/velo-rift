@@ -2,10 +2,9 @@
 
 use crate::vdir::{fnv1a_hash, VDir, VDirEntry, FLAG_DIR};
 use crate::ProjectConfig;
-use anyhow::Result;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 use vrift_ipc::{VeloError, VeloRequest, VeloResponse, VnodeEntry, PROTOCOL_VERSION};
@@ -130,6 +129,7 @@ impl CommandHandler {
     /// Handle ManifestGet
     fn handle_manifest_get(&self, path: &str) -> VeloResponse {
         let path_hash = fnv1a_hash(path);
+        debug!(path = %path, hash = %path_hash, "ManifestGet request");
 
         // 1. First check VDir (runtime overlay for COW mutations)
         if let Some(entry) = self.vdir.lock().unwrap().lookup(path_hash) {
@@ -149,9 +149,18 @@ impl CommandHandler {
         match self.manifest.get(path) {
             Ok(Some(entry)) => {
                 debug!(path = %path, "ManifestGet: found in LMDB");
-                VeloResponse::ManifestAck {
-                    entry: Some(entry.vnode),
-                }
+
+                // Explicitly convert to vrift_ipc's VnodeEntry to ensure correct serialization
+                let vnode = vrift_ipc::VnodeEntry {
+                    content_hash: entry.vnode.content_hash,
+                    size: entry.vnode.size,
+                    mtime: entry.vnode.mtime,
+                    mode: entry.vnode.mode,
+                    flags: entry.vnode.flags,
+                    _pad: 0,
+                };
+
+                VeloResponse::ManifestAck { entry: Some(vnode) }
             }
             Ok(None) => {
                 debug!(path = %path, "ManifestGet: not found");
@@ -182,7 +191,13 @@ impl CommandHandler {
 
         match self.vdir.lock().unwrap().upsert_with_path(vdir_entry, path) {
             Ok(_) => {
-                debug!(path = %path, "Upserted entry");
+                debug!(path = %path, "Upserted entry in VDir");
+                // Also update persistent LMDB
+                self.manifest
+                    .insert(path, entry.clone(), vrift_manifest::AssetTier::Tier2Mutable);
+                if let Err(e) = self.manifest.commit() {
+                    error!(error = %e, path = %path, "Failed to commit manifest upsert");
+                }
                 VeloResponse::ManifestAck { entry: Some(entry) }
             }
             Err(e) => {
@@ -196,6 +211,9 @@ impl CommandHandler {
     fn handle_manifest_remove(&mut self, path: &str) -> VeloResponse {
         let path_hash = fnv1a_hash(path);
         if self.vdir.lock().unwrap().mark_dirty(path_hash, false) {
+            // Update persistent LMDB
+            self.manifest.remove(path);
+            let _ = self.manifest.commit();
             debug!(path = %path, "Marked for removal");
             VeloResponse::ManifestAck { entry: None }
         } else {
@@ -240,7 +258,23 @@ impl CommandHandler {
                     .upsert_with_path(new_entry, new_path)
                 {
                     Ok(_) => {
-                        debug!(old = %old_path, new = %new_path, "Manifest rename");
+                        debug!(old = %old_path, new = %new_path, "Manifest rename in VDir");
+                        // Also update persistent LMDB
+                        self.manifest.remove(old_path);
+                        self.manifest.insert(
+                            new_path,
+                            vrift_ipc::VnodeEntry {
+                                content_hash: entry.cas_hash,
+                                size: entry.size,
+                                mtime: (entry.mtime_sec as u64 * 1_000_000_000)
+                                    + entry.mtime_nsec as u64,
+                                mode: entry.mode,
+                                flags: entry.flags,
+                                _pad: 0,
+                            },
+                            vrift_manifest::AssetTier::Tier2Mutable,
+                        );
+                        let _ = self.manifest.commit();
                         VeloResponse::ManifestAck { entry: None }
                     }
                     Err(e) => {
@@ -289,7 +323,10 @@ impl CommandHandler {
                 };
                 match self.vdir.lock().unwrap().upsert_with_path(updated, path) {
                     Ok(_) => {
-                        debug!(path = %path, mtime_sec, "Updated mtime");
+                        debug!(path = %path, mtime_sec, "Updated mtime in VDir");
+                        // Also update persistent LMDB
+                        self.manifest.mark_stale(path);
+                        let _ = self.manifest.commit();
                         VeloResponse::ManifestAck { entry: None }
                     }
                     Err(e) => {
@@ -437,7 +474,7 @@ impl CommandHandler {
     fn handle_ingest_full_scan_sync(
         config: &ProjectConfig,
         vdir_arc: &Arc<Mutex<VDir>>,
-        _manifest_arc: &Arc<vrift_manifest::lmdb::LmdbManifest>,
+        manifest: &Arc<vrift_manifest::lmdb::LmdbManifest>,
         path: &str,
         manifest_path: &str,
         threads: Option<usize>,
@@ -451,7 +488,15 @@ impl CommandHandler {
         use walkdir::WalkDir;
 
         let source_path = PathBuf::from(path);
-        let manifest_out = PathBuf::from(manifest_path);
+        let start = Instant::now();
+        info!(
+            path = %path,
+            manifest = %manifest_path,
+            threads = ?threads,
+            phantom = phantom,
+            tier1 = tier1,
+            "Starting full scan ingest"
+        );
         let start = Instant::now();
 
         info!("Collecting files via WalkDir...");
@@ -512,22 +557,18 @@ impl CommandHandler {
             }
         }
 
-        // 5. Build and write manifest
-        if let Err(e) = Self::write_manifest_sync(&manifest_out, &source_path, &results, prefix, config, _manifest_arc) {
-            return VeloResponse::Error(VeloError::io_error(format!(
-                "Failed to write manifest: {}",
-                e
-            )));
-        }
-                e
-            )));
-        }
-
-        // Backfill VDir
+        let duration = start.elapsed();
+        // 5. Build and write manifest (persistently using LMDB)
         {
             let canon_root = source_path.canonicalize().unwrap_or(source_path.clone());
             let prefix_str = prefix.unwrap_or("");
             let mut vdir = vdir_arc.lock().unwrap();
+            let mut vdir = vdir_arc.lock().unwrap();
+            let asset_tier = if tier1 {
+                vrift_manifest::AssetTier::Tier1Immutable
+            } else {
+                vrift_manifest::AssetTier::Tier2Mutable
+            };
             for result in results.iter().flatten() {
                 let canon_source = result
                     .source_path
@@ -545,6 +586,19 @@ impl CommandHandler {
                     Ok(meta) => (meta.mtime(), meta.mtime_nsec() as u32, meta.mode()),
                     Err(_) => (0, 0, 0o644),
                 };
+                // Add to persistent LMDB manifest
+                let vnode = vrift_ipc::VnodeEntry {
+                    content_hash: result.hash,
+                    size: result.size,
+                    mtime: (mtime_sec as u64 * 1_000_000_000) + mtime_nsec as u64,
+                    mode,
+                    flags: 0,
+                    _pad: 0,
+                };
+                manifest.insert(&key, vnode, asset_tier);
+
+                // Backfill VDir
+                let _path_hash = fnv1a_hash(&key);
                 let entry = VDirEntry {
                     path_hash: fnv1a_hash(&key),
                     cas_hash: result.hash,
@@ -560,6 +614,18 @@ impl CommandHandler {
             }
         }
 
+        // Commit LMDB transactions
+        if let Err(e) = manifest.commit() {
+            error!(error = %e, "Failed to commit manifest after ingest");
+        }
+
+        info!(
+            files = total_files,
+            blobs = unique_blobs,
+            new_bytes = new_bytes,
+            duration_ms = duration.as_millis() as u64,
+            "Full scan ingest complete"
+        );
         VeloResponse::IngestAck {
             files: total_files,
             blobs: unique_blobs,
@@ -568,63 +634,6 @@ impl CommandHandler {
             duration_ms: start.elapsed().as_millis() as u64,
             manifest_path: manifest_path.to_string(),
         }
-    }
-
-    /// Write manifest file from ingest results
-    fn write_manifest_sync(
-        manifest_path: &Path,
-        source_root: &Path,
-        results: &[Result<vrift_cas::IngestResult, vrift_cas::CasError>],
-        prefix: Option<&str>,
-        config: &ProjectConfig,
-        manifest: &Arc<vrift_manifest::lmdb::LmdbManifest>,
-    ) -> Result<()> {
-        use vrift_manifest::{AssetTier, LmdbManifest};
-
-        // RFC-0039: Reuse existing manifest instance if paths match to avoid delta layer inconsistencies
-        let target_manifest = if manifest_path == config.manifest_path {
-            manifest.clone()
-        } else {
-            Arc::new(LmdbManifest::open(manifest_path)?)
-        };
-
-        let canon_root = source_root
-            .canonicalize()
-            .unwrap_or_else(|_| source_root.to_path_buf());
-        let prefix_str = prefix.unwrap_or("");
-
-        for result in results.iter().flatten() {
-            let (mtime, mode) = match fs::metadata(&result.source_path) {
-                Ok(meta) => (
-                    meta.mtime() as u64 * 1_000_000_000 + meta.mtime_nsec() as u64,
-                    meta.mode(),
-                ),
-                Err(_) => (0, 0o644),
-            };
-            let vnode = VnodeEntry {
-                content_hash: result.hash,
-                size: result.size,
-                mtime,
-                mode,
-                flags: 0,
-                _pad: 0,
-            };
-            let canon_source = result
-                .source_path
-                .canonicalize()
-                .unwrap_or_else(|_| result.source_path.clone());
-            let rel = canon_source
-                .strip_prefix(&canon_root)
-                .unwrap_or(&canon_source);
-            let key = if prefix_str == "/" || prefix_str.is_empty() {
-                format!("/{}", rel.display())
-            } else {
-                format!("{}/{}", prefix_str.trim_end_matches('/'), rel.display())
-            };
-            target_manifest.insert(&key, vnode, AssetTier::Tier2Mutable);
-        }
-        target_manifest.commit()?;
-        Ok(())
     }
 }
 

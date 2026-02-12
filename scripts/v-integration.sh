@@ -45,8 +45,11 @@ export PATH=$PATH:$(pwd)/target/release
 TEST_DIR="/tmp/vrift_test"
 CAS_DIR="$TEST_DIR/cas"
 DATA_DIR="$TEST_DIR/data"
-# RFC-0039: Manifest is a directory
-MANIFEST="$TEST_DIR/vrift.manifest"
+# RFC-0039: Manifest is a directory, but CLI commands expect the .lmdb file path
+# Standardize: use .vrift/manifest.lmdb relative to DATA_DIR
+MANIFEST_DIR="$DATA_DIR/.vrift"
+MANIFEST="$MANIFEST_DIR/manifest.lmdb"
+mkdir -p "$MANIFEST_DIR"
 
 safe_rm "$TEST_DIR"
 mkdir -p "$CAS_DIR" "$DATA_DIR"
@@ -79,8 +82,8 @@ EOF
 # 3. Test Daemon Auto-Start & Ingest
 echo "[*] Testing Daemon Auto-Start & Ingest..."
 # Note: Ingest Solid Tier-2 doesn't use the daemon currently.
-# vrift ingest creates the directory if it doesn't exist
-vrift ingest "$DATA_DIR" --prefix /data --output "$MANIFEST"
+# Standardize: ingest to DATA_DIR (defaults to .vrift/manifest.lmdb)
+vrift ingest "$DATA_DIR" --prefix /data
 
 # Trigger daemon auto-start via a command that requires it
 echo "[*] Triggering daemon auto-start via status check..."

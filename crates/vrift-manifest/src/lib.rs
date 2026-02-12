@@ -159,12 +159,23 @@ impl VnodeEntry {
 }
 
 /// Path hash type - hash of the normalized path string
-pub type PathHash = Blake3Hash;
+/// Unique identifier for a path within the virtual filesystem
+pub type PathHash = u64;
 
 /// Compute the path hash for a given path string
 pub fn compute_path_hash(path: &str) -> PathHash {
     let normalized = normalize_vfs_path(path);
-    *blake3::hash(normalized.as_bytes()).as_bytes()
+    fnv1a_hash(&normalized)
+}
+
+/// FNV-1a hashing for fast O(1) path mapping
+pub fn fnv1a_hash(s: &str) -> u64 {
+    let mut hash = 14695981039346656037u64;
+    for &b in s.as_bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(1099511628211u64);
+    }
+    hash
 }
 
 /// Normalize a path for consistent hashing within the VFS

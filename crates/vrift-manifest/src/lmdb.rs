@@ -8,7 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use heed::types::{Bytes, SerdeBincode, Str};
+use heed::byteorder::NativeEndian;
+use heed::types::{SerdeBincode, Str, U64};
 use heed::{Database, Env, EnvOpenOptions};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -80,10 +81,10 @@ pub struct LmdbManifest {
     env: Env,
 
     /// Path hash → ManifestEntry database
-    entries_db: Database<Bytes, SerdeBincode<ManifestEntry>>,
+    entries_db: Database<U64<NativeEndian>, SerdeBincode<ManifestEntry>>,
 
     /// Path hash → original path string database
-    paths_db: Database<Bytes, Str>,
+    paths_db: Database<U64<NativeEndian>, Str>,
 
     /// Delta layer for uncommitted modifications
     delta: Arc<DashMap<PathHash, DeltaEntry>>,
@@ -106,9 +107,15 @@ impl LmdbManifest {
         let path = path.as_ref();
 
         // If path exists as a regular file (e.g., legacy flat manifest),
-        // remove it first — LMDB needs a directory.
+        // return an error — we should not automatically nuke files.
         if path.is_file() {
-            std::fs::remove_file(path)?;
+            return Err(LmdbError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "Path exists but is a file, expected a directory for LMDB: {:?}",
+                    path
+                ),
+            )));
         }
 
         // Create directory if needed
@@ -123,10 +130,13 @@ impl LmdbManifest {
                 .open(path)?
         };
 
-        // Open databases
+        // Open databases with explicit types for u64 keys and Bincode/String values
         let mut wtxn = env.write_txn()?;
-        let entries_db = env.create_database(&mut wtxn, Some("entries"))?;
-        let paths_db = env.create_database(&mut wtxn, Some("paths"))?;
+        let entries_db = env.create_database::<U64<NativeEndian>, SerdeBincode<ManifestEntry>>(
+            &mut wtxn,
+            Some("entries"),
+        )?;
+        let paths_db = env.create_database::<U64<NativeEndian>, Str>(&mut wtxn, Some("paths"))?;
         wtxn.commit()?;
 
         debug!("Opened LMDB manifest at {:?}", path);
@@ -175,11 +185,7 @@ impl LmdbManifest {
 
         // Check base layer
         let rtxn = self.env.read_txn()?;
-        if let Some(entry) = self.entries_db.get(&rtxn, hash)? {
-            return Ok(Some(entry));
-        }
-
-        Ok(None)
+        Ok(self.entries_db.get(&rtxn, hash)?)
     }
 
     /// Mark an entry as stale (pending re-ingest after write)
@@ -220,7 +226,8 @@ impl LmdbManifest {
         // Check base
         let rtxn = self.env.read_txn()?;
         if let Some(path) = self.paths_db.get(&rtxn, hash)? {
-            return Ok(Some(path.to_string()));
+            let path_str: &str = path;
+            return Ok(Some(path_str.to_string()));
         }
 
         Ok(None)
@@ -301,30 +308,33 @@ impl LmdbManifest {
         let rtxn = self.env.read_txn()?;
         let mut result = Vec::new();
         let mut deleted_hashes = std::collections::HashSet::new();
+        let mut modified_hashes = std::collections::HashSet::new();
 
-        // Collect delta deletions
+        // 1. Process Delta layer
         for entry in self.delta.iter() {
-            if matches!(entry.value(), DeltaEntry::Deleted) {
-                deleted_hashes.insert(*entry.key());
-            }
-        }
-
-        // Add delta modifications first
-        for entry in self.delta.iter() {
-            if let DeltaEntry::Modified(manifest_entry) = entry.value() {
-                if let Some(path_ref) = self.delta_paths.get(entry.key()) {
-                    result.push((path_ref.value().clone(), manifest_entry.clone()));
+            let hash = entry.key();
+            match entry.value() {
+                DeltaEntry::Deleted => {
+                    deleted_hashes.insert(*hash);
+                }
+                DeltaEntry::Modified(manifest_entry) => {
+                    if let Some(path_ref) = self.delta_paths.get(hash) {
+                        result.push((path_ref.value().clone(), manifest_entry.clone()));
+                        modified_hashes.insert(*hash);
+                    }
                 }
             }
         }
 
-        // Add base entries not in delta
-        let mut iter = self.entries_db.iter(&rtxn)?;
-        while let Some(Ok((hash_bytes, entry))) = iter.next() {
-            let hash: PathHash = hash_bytes.try_into().unwrap_or([0u8; 32]);
-            if !self.delta.contains_key(&hash) && !deleted_hashes.contains(&hash) {
+        // 2. Process Base layer
+        let mut cursor = self.entries_db.iter(&rtxn)?;
+        while let Some(Ok((hash, manifest_entry))) = cursor.next() {
+            let hash: u64 = hash;
+            let entry: ManifestEntry = manifest_entry;
+            if !deleted_hashes.contains(&hash) && !modified_hashes.contains(&hash) {
                 if let Some(path) = self.paths_db.get(&rtxn, &hash)? {
-                    result.push((path.to_string(), entry));
+                    let path_str: &str = path;
+                    result.push((path_str.to_string(), entry));
                 }
             }
         }

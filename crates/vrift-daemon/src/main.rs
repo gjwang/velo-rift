@@ -281,6 +281,8 @@ struct DaemonState {
     lock_manager: LockManager,
     // Daemon start time (for uptime reporting)
     start_time: std::time::Instant,
+    // VFS virtual prefix (RFC-0050)
+    vfs_prefix: String,
 }
 
 async fn start_daemon() -> Result<()> {
@@ -319,6 +321,7 @@ async fn start_daemon() -> Result<()> {
         cas: cas.clone(),
         lock_manager: LockManager::new(),
         start_time: std::time::Instant::now(),
+        vfs_prefix: std::env::var("VRIFT_VFS_PREFIX").unwrap_or_else(|_| "/vrift".to_string()),
     });
 
     // Start background scan (Warm-up)
@@ -1377,12 +1380,16 @@ async fn spawn_or_get_vdird(
     // Spawn vDird subprocess
     // CRITICAL: Clear VRIFT_SOCKET_PATH so vDird derives its own project-specific
     // socket path instead of re-using the daemon's socket path (env leak bug).
+    // RFC-0050: Pass VRIFT_VFS_PREFIX so vDird can map physical paths back to virtual keys.
+    // RFC-0039: Pass VR_THE_SOURCE to ensure vDird uses the same CAS root as the daemon.
     let child = std::process::Command::new(&vdird_bin)
         .arg(project_root.to_string_lossy().as_ref())
         .env_remove("VRIFT_SOCKET_PATH")
+        .env("VRIFT_VFS_PREFIX", &state.vfs_prefix)
+        .env("VR_THE_SOURCE", state.cas.root().to_string_lossy().as_ref())
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn vDird: {}", e))?;
 
