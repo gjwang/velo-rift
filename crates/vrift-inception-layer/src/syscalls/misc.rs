@@ -1226,10 +1226,11 @@ pub unsafe extern "C" fn fchown_inception(
         let mut path_buf = [0i8; 1024];
         if crate::syscalls::macos_raw::raw_fcntl(fd, libc::F_GETPATH, path_buf.as_mut_ptr() as i64)
             == 0
-            && quick_is_in_vfs(path_buf.as_ptr()) {
-                crate::set_errno(libc::EPERM);
-                return -1;
-            }
+            && quick_is_in_vfs(path_buf.as_ptr())
+        {
+            crate::set_errno(libc::EPERM);
+            return -1;
+        }
 
         let init_state = INITIALIZING.load(Ordering::Relaxed);
         if init_state != 0

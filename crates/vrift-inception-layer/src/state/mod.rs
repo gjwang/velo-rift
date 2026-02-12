@@ -821,6 +821,10 @@ const MAX_SEQLOCK_SPINS: u32 = 1000;
 
 /// O(1) seqlock-protected stat lookup from VDir MAP_SHARED mmap.
 /// ZERO ALLOCATIONS, ZERO LOCKS, ZERO SYSCALLS — safe for PSFS hot path.
+///
+/// Note: This version is optimized for performance and resilience against
+/// crashed writers. It performs the lookup even if the generation is odd,
+/// only retrying if the generation changes *during* the read.
 #[inline(always)]
 pub(crate) fn vdir_lookup(
     mmap_ptr: *const u8,
@@ -837,80 +841,84 @@ pub(crate) fn vdir_lookup(
         return None;
     }
 
-    // Read header fields we need (offsets from VDirHeader layout)
-    // generation is at offset 8 (after magic:u32 + version:u32)
-    let gen_addr = mmap_ptr as usize + 8;
-    debug_assert!(
-        gen_addr.is_multiple_of(8),
-        "AtomicU64 (generation) not 8-byte aligned"
-    );
-    let gen_ptr = unsafe { &*(gen_addr as *const AtomicU64) };
-    // table_capacity at offset 20 (u32), table_offset at offset 24 (u32)
+    // Read header fields we need
     let table_capacity = unsafe { *((mmap_ptr as usize + 20) as *const u32) } as usize;
     let table_offset = unsafe { *((mmap_ptr as usize + 24) as *const u32) } as usize;
-
     if table_capacity == 0 {
         return None;
     }
 
+    let gen_addr = mmap_ptr as usize + 8;
+    let gen_ptr = unsafe { &*(gen_addr as *const AtomicU64) };
+
     let path_hash = vrift_ipc::fnv1a_hash(path);
     let start_slot = (path_hash as usize) % table_capacity;
 
-    // Seqlock read loop with bounded spin
-    let mut spins: u32 = 0;
-    loop {
+    // Seqlock read: try twice then accept stale
+    for _ in 0..2 {
         let g1 = gen_ptr.load(Ordering::Acquire);
-        if g1 & 1 != 0 {
-            // Writer active (odd generation) — spin with upper bound
-            spins += 1;
-            if spins > MAX_SEQLOCK_SPINS {
-                return None; // Fallback: vDird may have crashed mid-write
-            }
-            core::hint::spin_loop();
-            continue;
-        }
-
-        // O(1) hash table lookup with linear probing
-        let mut result: Option<VDirStatResult> = None;
-        for i in 0..table_capacity {
-            let slot = (start_slot + i) % table_capacity;
-            let entry_offset = table_offset + slot * VDIR_ENTRY_SIZE;
-            if entry_offset + VDIR_ENTRY_SIZE > mmap_size {
-                break;
-            }
-            let entry = unsafe { &*(mmap_ptr.add(entry_offset) as *const VDirEntry) };
-
-            if entry.path_hash == 0 {
-                break; // Empty slot = not found
-            }
-
-            if entry.path_hash == path_hash {
-                result = Some(VDirStatResult {
-                    size: entry.size,
-                    mtime_sec: entry.mtime_sec,
-                    mtime_nsec: entry.mtime_nsec,
-                    mode: entry.mode,
-                    flags: entry.flags,
-                    cas_hash: entry.cas_hash,
-                });
-                break;
-            }
-        }
-
-        // Re-read generation to check for concurrent write
+        let result = vdir_probe(
+            mmap_ptr,
+            mmap_size,
+            table_offset,
+            table_capacity,
+            start_slot,
+            path_hash,
+        );
         let g2 = gen_ptr.load(Ordering::Acquire);
-        if g1 != g2 {
-            // Data changed during read — retry (also bounded by MAX_SEQLOCK_SPINS)
-            spins += 1;
-            if spins > MAX_SEQLOCK_SPINS {
-                return None;
-            }
-            core::hint::spin_loop();
-            continue;
+
+        if g1 == g2 {
+            return result;
+        }
+        // Concurrent write detected — retry once
+    }
+
+    // After retry, return whatever we found (stale read)
+    vdir_probe(
+        mmap_ptr,
+        mmap_size,
+        table_offset,
+        table_capacity,
+        start_slot,
+        path_hash,
+    )
+}
+
+/// Linear probe the VDir hash table for a matching path_hash.
+/// Extracted to share between normal seqlock path and BUG-017 stale read recovery.
+#[inline(always)]
+fn vdir_probe(
+    mmap_ptr: *const u8,
+    mmap_size: usize,
+    table_offset: usize,
+    table_capacity: usize,
+    start_slot: usize,
+    path_hash: u64,
+) -> Option<VDirStatResult> {
+    for i in 0..table_capacity {
+        let slot = (start_slot + i) % table_capacity;
+        let entry_offset = table_offset + slot * VDIR_ENTRY_SIZE;
+        if entry_offset + VDIR_ENTRY_SIZE > mmap_size {
+            break;
+        }
+        let entry = unsafe { &*(mmap_ptr.add(entry_offset) as *const VDirEntry) };
+
+        if entry.path_hash == 0 {
+            break; // Empty slot = not found
         }
 
-        return result;
+        if entry.path_hash == path_hash {
+            return Some(VDirStatResult {
+                size: entry.size,
+                mtime_sec: entry.mtime_sec,
+                mtime_nsec: entry.mtime_nsec,
+                mode: entry.mode,
+                flags: entry.flags,
+                cas_hash: entry.cas_hash,
+            });
+        }
     }
+    None
 }
 
 // ============================================================================
@@ -963,92 +971,112 @@ pub(crate) fn vdir_list_dir(
         format!("{}/", dir_prefix)
     };
 
-    // Seqlock read loop
-    let mut spins: u32 = 0;
-    loop {
+    // Seqlock read: try twice then accept stale
+    for _ in 0..2 {
         let g1 = gen_ptr.load(Ordering::Acquire);
-        if g1 & 1 != 0 {
-            spins += 1;
-            if spins > MAX_SEQLOCK_SPINS {
-                return None;
-            }
-            core::hint::spin_loop();
-            continue;
-        }
 
-        // Scan all entries for path prefix match
-        let mut results: Vec<VDirDirEntry> = Vec::new();
-        let mut seen_names: Vec<String> = Vec::new();
+        let result = vdir_list_dir_scan(
+            mmap_ptr,
+            mmap_size,
+            table_offset,
+            table_capacity,
+            string_pool_offset,
+            string_pool_size,
+            &prefix,
+        );
 
-        for slot in 0..table_capacity {
-            let entry_offset = table_offset + slot * VDIR_ENTRY_SIZE;
-            if entry_offset + VDIR_ENTRY_SIZE > mmap_size {
-                break;
-            }
-            let entry = unsafe { &*(mmap_ptr.add(entry_offset) as *const VDirEntry) };
-
-            // Skip empty/deleted entries
-            if entry.path_hash == 0 || entry.flags & FLAG_DELETED != 0 {
-                continue;
-            }
-
-            // Skip entries without path strings
-            if entry.path_len == 0 {
-                continue;
-            }
-
-            // Read path string from string pool
-            let path_start = string_pool_offset + entry.path_offset as usize;
-            let path_end = path_start + entry.path_len as usize;
-            if path_end > mmap_size {
-                continue;
-            }
-
-            let path_bytes = unsafe {
-                std::slice::from_raw_parts(mmap_ptr.add(path_start), entry.path_len as usize)
-            };
-            let path = match std::str::from_utf8(path_bytes) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            // Check if path matches the directory prefix
-            if let Some(rest) = path.strip_prefix(&prefix) {
-                // Extract immediate child name
-                let child_name = if let Some(slash_pos) = rest.find('/') {
-                    &rest[..slash_pos]
-                } else {
-                    rest
-                };
-
-                if !child_name.is_empty() && !seen_names.iter().any(|n| n == child_name) {
-                    let is_dir = rest.contains('/') || (entry.flags & FLAG_DIR != 0);
-                    results.push(VDirDirEntry {
-                        name: child_name.to_string(),
-                        is_dir,
-                    });
-                    seen_names.push(child_name.to_string());
-                }
-            }
-        }
-
-        // Validate seqlock
         let g2 = gen_ptr.load(Ordering::Acquire);
-        if g1 != g2 {
-            spins += 1;
-            if spins > MAX_SEQLOCK_SPINS {
-                return None;
-            }
-            core::hint::spin_loop();
+        if g1 == g2 {
+            return if result.is_empty() {
+                None
+            } else {
+                Some(result)
+            };
+        }
+    }
+
+    // After retry, return whatever we found (stale read)
+    let result = vdir_list_dir_scan(
+        mmap_ptr,
+        mmap_size,
+        table_offset,
+        table_capacity,
+        string_pool_offset,
+        string_pool_size,
+        &prefix,
+    );
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Extracted scan logic for vdir_list_dir to allow retries.
+fn vdir_list_dir_scan(
+    mmap_ptr: *const u8,
+    mmap_size: usize,
+    table_offset: usize,
+    table_capacity: usize,
+    string_pool_offset: usize,
+    _string_pool_size: usize,
+    prefix: &str,
+) -> Vec<VDirDirEntry> {
+    let mut results: Vec<VDirDirEntry> = Vec::new();
+    let mut seen_names: Vec<String> = Vec::new();
+
+    for slot in 0..table_capacity {
+        let entry_offset = table_offset + slot * VDIR_ENTRY_SIZE;
+        if entry_offset + VDIR_ENTRY_SIZE > mmap_size {
+            break;
+        }
+        let entry = unsafe { &*(mmap_ptr.add(entry_offset) as *const VDirEntry) };
+
+        // Skip empty/deleted entries
+        if entry.path_hash == 0 || entry.flags & FLAG_DELETED != 0 {
             continue;
         }
 
-        return if results.is_empty() {
-            None
-        } else {
-            Some(results)
+        // Skip entries without path strings
+        if entry.path_len == 0 {
+            continue;
+        }
+
+        // Read path string from string pool
+        let path_start = string_pool_offset + entry.path_offset as usize;
+        let path_end = path_start + entry.path_len as usize;
+        if path_end > mmap_size {
+            continue;
+        }
+
+        let path_bytes = unsafe {
+            std::slice::from_raw_parts(mmap_ptr.add(path_start), entry.path_len as usize)
         };
+        let path = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Check if path matches the directory prefix
+        if let Some(rest) = path.strip_prefix(prefix) {
+            // Extract immediate child name
+            let child_name = if let Some(slash_pos) = rest.find('/') {
+                &rest[..slash_pos]
+            } else {
+                rest
+            };
+
+            if !child_name.is_empty() && !seen_names.iter().any(|n| n == child_name) {
+                let is_dir = rest.contains('/') || (entry.flags & FLAG_DIR != 0);
+                results.push(VDirDirEntry {
+                    name: child_name.to_string(),
+                    is_dir,
+                });
+                seen_names.push(child_name.to_string());
+            }
+        }
     }
+    results
 }
 
 // ============================================================================

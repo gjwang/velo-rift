@@ -69,119 +69,63 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
                 let blob_path =
                     format_blob_path_fixed(&state.cas_root, &vdir_entry.cas_hash, vdir_entry.size);
 
-                // BUG-016: Cross-process Dirty Detection Heuristic (Open path).
-                // Similar to stat_impl_common, we check if a physical file exists and is newer.
-                let mut phys_buf: libc::stat = unsafe { std::mem::zeroed() };
-                let phys_rc;
-
+                // BUG-016: Fast Dirty Check (Stat on hit)
+                // We check if a physical file exists and is newer than the VDir entry.
+                let mut is_stale = false;
                 let path_bytes = vpath.absolute.as_str().as_bytes();
                 let mut stack_buf = [0u8; 1024];
                 if path_bytes.len() < 1023 {
                     stack_buf[..path_bytes.len()].copy_from_slice(path_bytes);
                     stack_buf[path_bytes.len()] = 0;
                     let path_ptr = stack_buf.as_ptr() as *const libc::c_char;
+                    let mut phys_buf: libc::stat = unsafe { std::mem::zeroed() };
 
                     #[cfg(target_os = "macos")]
-                    {
-                        phys_rc = crate::syscalls::macos_raw::raw_stat(path_ptr, &mut phys_buf);
-                    }
+                    let rc =
+                        unsafe { crate::syscalls::macos_raw::raw_stat(path_ptr, &mut phys_buf) };
                     #[cfg(target_os = "linux")]
-                    {
-                        phys_rc = crate::syscalls::linux_raw::raw_stat(path_ptr, &mut phys_buf);
-                    }
+                    let rc =
+                        unsafe { crate::syscalls::linux_raw::raw_stat(path_ptr, &mut phys_buf) };
 
-                    let phys_mtime_sec = phys_buf.st_mtime as u64;
-                    let phys_mtime_nsec = phys_buf.st_mtime_nsec as u64;
+                    if rc == 0 {
+                        let phys_mtime_sec = phys_buf.st_mtime as u64;
+                        let phys_mtime_nsec = phys_buf.st_mtime_nsec as u64;
+                        let vdir_mtime_sec = vdir_entry.mtime_sec as u64;
+                        let vdir_mtime_nsec = vdir_entry.mtime_nsec as u64;
 
-                    // BUG-016: Cross-process Dirty Detection (Nanosecond-aware).
-                    let is_phys_newer = (phys_mtime_sec > (vdir_entry.mtime_sec as u64))
-                        || (phys_mtime_sec == (vdir_entry.mtime_sec as u64) && phys_mtime_nsec > 0);
-
-                    if phys_rc == 0 && is_phys_newer {
-                        profile_count!(vdir_misses);
-                        let fd = crate::syscalls::macos_raw::raw_open(path_ptr, flags, mode);
-                        if fd >= 0 {
-                            crate::syscalls::io::track_fd(
-                                fd,
-                                &vpath.manifest_key,
-                                false,
-                                None,
-                                vpath.manifest_key_hash,
-                            );
-                            return Some(fd);
+                        if (phys_mtime_sec > vdir_mtime_sec)
+                            || (phys_mtime_sec == vdir_mtime_sec
+                                && phys_mtime_nsec > vdir_mtime_nsec)
+                        {
+                            is_stale = true;
                         }
-                        return None;
                     }
-                } else {
-                    let abs_path_cstr = match std::ffi::CString::new(vpath.absolute.as_str()) {
-                        Ok(c) => c,
-                        Err(_) => return None,
-                    };
+                }
 
-                    #[cfg(target_os = "macos")]
-                    {
-                        phys_rc = crate::syscalls::macos_raw::raw_stat(
-                            abs_path_cstr.as_ptr(),
-                            &mut phys_buf,
-                        );
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        phys_rc = crate::syscalls::linux_raw::raw_stat(
-                            abs_path_cstr.as_ptr(),
-                            &mut phys_buf,
-                        );
-                    }
-
-                    let phys_mtime_sec = phys_buf.st_mtime as u64;
-                    let phys_mtime_nsec = phys_buf.st_mtime_nsec as u64;
-
-                    // BUG-016: Cross-process Dirty Detection (Nanosecond-aware).
-                    let is_phys_newer = (phys_mtime_sec > (vdir_entry.mtime_sec as u64))
-                        || (phys_mtime_sec == (vdir_entry.mtime_sec as u64) && phys_mtime_nsec > 0);
-
-                    if phys_rc == 0 && is_phys_newer {
-                        profile_count!(vdir_misses);
-                        let fd = crate::syscalls::macos_raw::raw_open(
-                            abs_path_cstr.as_ptr(),
+                if !is_stale {
+                    if is_write {
+                        return open_cow_write(
+                            state,
+                            &vpath,
+                            blob_path.as_str(),
                             flags,
                             mode,
+                            vdir_entry.mode,
                         );
-                        if fd >= 0 {
-                            crate::syscalls::io::track_fd(
-                                fd,
-                                &vpath.manifest_key,
-                                false,
-                                None,
-                                vpath.manifest_key_hash,
-                            );
-                            return Some(fd);
-                        }
-                        return None;
+                    } else {
+                        return open_cas_read(
+                            state,
+                            &vpath,
+                            blob_path.as_str(),
+                            flags,
+                            mode,
+                            vdir_entry.size,
+                            vdir_entry.mode,
+                            vdir_entry.mtime_sec as u64,
+                        );
                     }
                 }
-
-                if is_write {
-                    return open_cow_write(
-                        state,
-                        &vpath,
-                        blob_path.as_str(),
-                        flags,
-                        mode,
-                        vdir_entry.mode,
-                    );
-                } else {
-                    return open_cas_read(
-                        state,
-                        &vpath,
-                        blob_path.as_str(),
-                        flags,
-                        mode,
-                        vdir_entry.size,
-                        vdir_entry.mode,
-                        vdir_entry.mtime_sec as u64,
-                    );
-                }
+                // Stale hit: fall through to miss path (physical file open)
             }
             // Directory entry — fall through to passthrough
         }
