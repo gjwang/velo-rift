@@ -24,10 +24,9 @@ SAMPLE_PROJECT="$SCRIPT_DIR/lib/sample_project"
 DAEMON_PID=""
 
 cleanup() {
-    # Stop daemons
+    # Stop OUR daemon only (PID-based, not pkill)
     [ -n "$DAEMON_PID" ] && kill -9 "$DAEMON_PID" 2>/dev/null || true
-    pkill -9 -f "vriftd.*$TEST_WORKSPACE" 2>/dev/null || true
-    pkill -f vriftd 2>/dev/null || true
+    DAEMON_PID=""
     rm -f "$VRIFT_SOCKET_PATH"
     
     # Cleanup
@@ -64,21 +63,20 @@ stop_daemon_graceful() {
         wait "$DAEMON_PID" 2>/dev/null || true
         DAEMON_PID=""
     fi
-    pkill -TERM -f vriftd 2>/dev/null || true
     sleep 1
 }
 
 stop_daemon_kill() {
     if [ -n "$DAEMON_PID" ]; then
         kill -9 "$DAEMON_PID" 2>/dev/null || true
+        wait "$DAEMON_PID" 2>/dev/null || true
         DAEMON_PID=""
     fi
-    pkill -9 -f vriftd 2>/dev/null || true
     sleep 0.5
 }
 
 daemon_is_running() {
-    pgrep -f vriftd >/dev/null 2>&1
+    [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null
 }
 
 # ============================================================================
