@@ -202,10 +202,18 @@ run_bench "Baseline no-op (no inception)" \
 run_bench "Inception no-op (shim loaded)" \
     'INCEP cargo build >/dev/null 2>&1 || true'
 
-# ── 3) Touch incremental ─────────────────────────────────────────────────────
+# ── 3) Touch incremental (baseline vs inception) ─────────────────────────────
 if [[ -n "$TOUCH_FILE" ]]; then
     echo ""
-    echo "── Touch incremental ──"
+    echo "── Touch incremental (BASELINE) ──"
+    for i in $(seq 1 "$ITERATIONS"); do
+        sleep 1; touch "$TOUCH_FILE"
+        T0=$(ms); cargo build >/dev/null 2>&1; T1=$(ms)
+        echo "  Run $i: $((T1 - T0))ms"
+    done
+
+    echo ""
+    echo "── Touch incremental (INCEPTION) ──"
     for i in $(seq 1 "$ITERATIONS"); do
         sleep 1; touch "$TOUCH_FILE"
         T0=$(ms); INCEP cargo build >/dev/null 2>&1 || true; T1=$(ms)
@@ -213,11 +221,23 @@ if [[ -n "$TOUCH_FILE" ]]; then
     done
 fi
 
-# ── 4) Code change incremental ───────────────────────────────────────────────
+# ── 4) Code change incremental (baseline vs inception) ───────────────────────
 if [[ -n "$TOUCH_FILE" ]]; then
-    echo ""
-    echo "── Code change incremental ──"
     cp "$TOUCH_FILE" "${TOUCH_FILE}.bench_bak"
+
+    echo ""
+    echo "── Code change incremental (BASELINE) ──"
+    for i in $(seq 1 "$ITERATIONS"); do
+        echo "" >> "$TOUCH_FILE"
+        echo "// bench_canary_${i}_$(date +%s)" >> "$TOUCH_FILE"
+        T0=$(ms); cargo build >/dev/null 2>&1; T1=$(ms)
+        echo "  Run $i: $((T1 - T0))ms"
+        cp "${TOUCH_FILE}.bench_bak" "$TOUCH_FILE"
+        cargo build >/dev/null 2>&1  # restore baseline
+    done
+
+    echo ""
+    echo "── Code change incremental (INCEPTION) ──"
     for i in $(seq 1 "$ITERATIONS"); do
         echo "" >> "$TOUCH_FILE"
         echo "// bench_canary_${i}_$(date +%s)" >> "$TOUCH_FILE"
@@ -226,6 +246,7 @@ if [[ -n "$TOUCH_FILE" ]]; then
         cp "${TOUCH_FILE}.bench_bak" "$TOUCH_FILE"
         INCEP cargo build >/dev/null 2>&1 || true  # restore baseline
     done
+
     rm -f "${TOUCH_FILE}.bench_bak"
 fi
 
