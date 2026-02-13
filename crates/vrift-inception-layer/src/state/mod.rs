@@ -1170,18 +1170,28 @@ impl InceptionLayerState {
             Some(p) => {
                 INCEPTION_LAYER_STATE.store(p, Ordering::Release);
                 unsafe { INITIALIZING.store(InceptionState::Ready as u8, Ordering::SeqCst) };
-                // RFC-0053: Publish VFS prefix to C layer for fast path bypass
+                // RFC-0053/0054: Publish VFS prefix AND project root to C layer
+                // for fast path bypass. Both must be known to avoid false bypasses.
                 let state = unsafe { &*p };
+                extern "C" {
+                    fn set_vfs_prefix(prefix: *const libc::c_char);
+                    fn set_project_root(root: *const libc::c_char);
+                }
                 let prefix = state.vfs_prefix.as_str();
                 if !prefix.is_empty() {
-                    extern "C" {
-                        fn set_vfs_prefix(prefix: *const libc::c_char);
-                    }
                     let mut buf = [0u8; 256];
                     let len = prefix.len().min(255);
                     buf[..len].copy_from_slice(&prefix.as_bytes()[..len]);
                     buf[len] = 0;
                     unsafe { set_vfs_prefix(buf.as_ptr() as *const libc::c_char) };
+                }
+                let proj_root = state.project_root.as_str();
+                if !proj_root.is_empty() {
+                    let mut buf = [0u8; 1024];
+                    let len = proj_root.len().min(1023);
+                    buf[..len].copy_from_slice(&proj_root.as_bytes()[..len]);
+                    buf[len] = 0;
+                    unsafe { set_project_root(buf.as_ptr() as *const libc::c_char) };
                 }
                 let init_elapsed = crate::profile::now_ns().wrapping_sub(init_start);
                 crate::profile::PROFILE

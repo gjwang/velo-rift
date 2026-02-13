@@ -74,6 +74,12 @@ volatile char INITIALIZING = 2;
 static char VFS_PREFIX[256] = {0};
 static int VFS_PREFIX_LEN = 0;
 
+/* RFC-0054: C-level project root for dual-prefix path filtering.
+ * Paths matching either VFS_PREFIX or PROJECT_ROOT must enter Rust.
+ * Without this, project-root-scoped paths bypass inception entirely. */
+static char PROJECT_ROOT[1024] = {0};
+static int PROJECT_ROOT_LEN = 0;
+
 void set_vfs_prefix(const char *prefix) {
   if (!prefix)
     return;
@@ -86,22 +92,61 @@ void set_vfs_prefix(const char *prefix) {
   VFS_PREFIX_LEN = i;
 }
 
-/* Returns 1 if this path might be in the VFS and needs Rust processing.
- * Returns 0 if the path is definitely outside VFS (safe to raw-syscall). */
+void set_project_root(const char *root) {
+  if (!root)
+    return;
+  int i = 0;
+  while (root[i] && i < 1023) {
+    PROJECT_ROOT[i] = root[i];
+    i++;
+  }
+  PROJECT_ROOT[i] = '\0';
+  PROJECT_ROOT_LEN = i;
+}
+
+/* RFC-0054: Returns 1 if this path might be in the VFS and needs Rust
+ * processing. Returns 0 if the path is definitely outside VFS (safe to
+ * raw-syscall).
+ *
+ * Decision rules (conservative — only bypass what we're CERTAIN is outside
+ * VFS):
+ *   1. Prefix not configured yet → Rust (safe default)
+ *   2. NULL path → bypass (kernel will EFAULT)
+ *   3. Relative path → Rust (CWD may be in VFS scope)
+ *   4. Matches VFS_PREFIX → Rust
+ *   5. Matches PROJECT_ROOT → Rust
+ *   6. None of the above → bypass (definitely outside VFS)
+ */
 static inline int path_needs_inception(const char *path) {
   if (VFS_PREFIX_LEN == 0)
     return 1; /* Prefix not set yet, be safe → enter Rust */
   if (!path)
     return 0;
-  /* Relative paths might be inside VFS if CWD is within VFS scope.
-   * We cannot resolve them cheaply in C, so route to Rust. */
   if (path[0] != '/')
-    return 1;
+    return 1; /* Relative path → Rust (CWD may be in VFS) */
+  /* Check VFS_PREFIX */
+  int match = 1;
   for (int i = 0; i < VFS_PREFIX_LEN; i++) {
-    if (path[i] != VFS_PREFIX[i])
-      return 0; /* Mismatch → not VFS path */
+    if (path[i] != VFS_PREFIX[i]) {
+      match = 0;
+      break;
+    }
   }
-  return 1; /* Starts with VFS prefix → needs Rust */
+  if (match)
+    return 1;
+  /* Check PROJECT_ROOT */
+  if (PROJECT_ROOT_LEN > 0) {
+    match = 1;
+    for (int i = 0; i < PROJECT_ROOT_LEN; i++) {
+      if (path[i] != PROJECT_ROOT[i]) {
+        match = 0;
+        break;
+      }
+    }
+    if (match)
+      return 1;
+  }
+  return 0; /* Definitely outside VFS → bypass */
 }
 
 __attribute__((constructor(101))) void inception_init_constructor() {
