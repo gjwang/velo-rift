@@ -519,13 +519,14 @@ pub unsafe extern "C" fn remove_inception(path: *const c_char) -> c_int {
 
     let res = libc::remove(path);
 
-    if res == -1 && crate::get_errno() == libc::ENOENT
+    if res == -1
+        && crate::get_errno() == libc::ENOENT
         && vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key)
             .map(|v| !v.is_empty())
             .unwrap_or(false)
-        {
-            return 0;
-        }
+    {
+        return 0;
+    }
 
     res
 }

@@ -379,11 +379,13 @@ impl VDir {
             })
             .collect();
 
-        // 2. Resize file and remap (include string pool)
+        // 2. Resize file and remap (include string pool + bloom filter)
         let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         let table_size = new_capacity * VDIR_ENTRY_SIZE;
         let new_pool_offset = VDIR_HEADER_SIZE + table_size;
-        let new_size = new_pool_offset + VDIR_STRING_POOL_CAPACITY;
+        let bloom_filter_size = 64 * 1024; // 64KB Bloom Filter (match create_or_open)
+        let new_bloom_offset = new_pool_offset + VDIR_STRING_POOL_CAPACITY;
+        let new_size = new_bloom_offset + bloom_filter_size;
         file.set_len(new_size as u64)?;
 
         // Re-map MmapMut
@@ -398,6 +400,8 @@ impl VDir {
         header.string_pool_offset = new_pool_offset as u32;
         header.string_pool_size = 0; // Reset — will be repopulated
         header.string_pool_capacity = VDIR_STRING_POOL_CAPACITY as u32;
+        header.bloom_offset = new_bloom_offset as u32;
+        header.bloom_size = bloom_filter_size as u32;
 
         // 4. Clear table (zero out)
         let entries_ptr = unsafe { self.mmap.as_mut_ptr().add(VDIR_HEADER_SIZE) };
@@ -411,7 +415,13 @@ impl VDir {
             std::ptr::write_bytes(pool_ptr, 0, VDIR_STRING_POOL_CAPACITY);
         }
 
-        // 6. Re-insert with paths (rehash + compact pool)
+        // 6. Clear bloom filter (stale bits would cause false positives)
+        let bloom_ptr = unsafe { self.mmap.as_mut_ptr().add(new_bloom_offset) };
+        unsafe {
+            std::ptr::write_bytes(bloom_ptr, 0, bloom_filter_size);
+        }
+
+        // 7. Re-insert with paths (rehash + compact pool)
         for (mut entry, path) in entries_snapshot {
             // Re-allocate path in new pool if available
             if let Some(ref p) = path {
