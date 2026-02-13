@@ -519,12 +519,13 @@ pub unsafe extern "C" fn remove_inception(path: *const c_char) -> c_int {
 
     let res = libc::remove(path);
 
-    if res == -1 && crate::get_errno() == libc::ENOENT {
-        // Check if it's in VDir (file or directory)
-        if vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+    if res == -1 && crate::get_errno() == libc::ENOENT
+        && vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             return 0;
         }
-    }
 
     res
 }
@@ -767,7 +768,9 @@ pub unsafe extern "C" fn rmdir_inception(path: *const c_char) -> c_int {
 
     if res == -1
         && crate::get_errno() == libc::ENOENT
-        && vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some()
+        && vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
     {
         return 0;
     }
@@ -792,7 +795,10 @@ pub unsafe extern "C" fn rmdir_inception(path: *const c_char) -> c_int {
     let res = crate::syscalls::linux_raw::raw_rmdir(path);
 
     if res == -1 && crate::get_errno() == libc::ENOENT {
-        if vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+        if vdir_list_dir(state.mmap_ptr, state.mmap_size, &vpath.manifest_key)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             return 0;
         }
     }

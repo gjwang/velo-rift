@@ -122,8 +122,25 @@ impl PathResolver {
             return None;
         }
 
-        // No hardcoded path exclusions. VDir lookup is O(1) via mmap hash table;
-        // paths not in VDir naturally fall through to kernel with minimal overhead.
+        // RFC-0050.1: Exclude /target/ paths from inception.
+        // Build artifacts (target/) are not in VDir and change every build.
+        // Multiple syscalls (access, realpath) incorrectly report success for
+        // VFS-resolved paths without checking physical existence, causing E0463
+        // when rustc tries to load crate metadata during cargo build.
+        // Rather than fixing each syscall individually, exclude the entire
+        // target/ directory since VDir never contains target/ entries.
+        {
+            let strip_prefix = if matched_vfs {
+                vfs_prefix_str
+            } else {
+                proj_root_str
+            };
+            let rel = normalized.strip_prefix(strip_prefix).unwrap_or(normalized);
+            // Match /target, /target/, /target/..., and Cargo temp dirs like /targetC2IekI
+            if rel.starts_with("/target") {
+                return None;
+            }
+        }
 
         // 4. Extract manifest key
         let mut key_fs = FixedString::<1024>::new();

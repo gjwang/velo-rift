@@ -229,9 +229,12 @@ unsafe fn stat_impl(
     if crate::get_errno() == libc::ENOENT {
         if let Some(state) = InceptionLayerState::get() {
             if let Some(vpath) = state.resolve_path(path_str) {
-                use crate::state::vdir_list_dir;
+                // RFC-0051: VDir-implied directory — only if path has actual children.
+                // Note: vdir_list_dir returns Some(vec![]) for valid-but-empty dirs,
+                // so we must check non-empty to confirm this is truly a directory.
                 if vdir_list_dir(state.mmap_ptr, state.mmap_size, vpath.manifest_key.as_str())
-                    .is_some()
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
                 {
                     // RFC-0051: VDir-implied directory — materialize and return synthetic stat
                     crate::syscalls::open::materialize_directory(path_str);
@@ -450,11 +453,16 @@ pub unsafe extern "C" fn velo_access_impl(path: *const c_char, mode: c_int) -> c
             }
         };
 
-        if InceptionLayerState::get()
-            .map(|s| s.inception_applicable(path_str))
-            .unwrap_or(false)
-        {
-            return 0;
+        if let Some(state) = InceptionLayerState::get() {
+            if state.inception_applicable(path_str) {
+                // Check VDir for file existence first
+                if let Some(vpath) = state.resolve_path(path_str) {
+                    if vdir_lookup(state.mmap_ptr, state.mmap_size, &vpath.manifest_key).is_some() {
+                        return 0; // VDir HIT — file exists in VFS
+                    }
+                }
+                // VDir miss — fall through to raw_access for physical check
+            }
         }
 
         #[cfg(target_os = "macos")]

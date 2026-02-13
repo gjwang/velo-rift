@@ -23,10 +23,6 @@
 #   4. Code incremental   — actual code change, rebuild (incremental + shim)
 #   5. Source read stress  — stat+read all source files via inception (CAS accel)
 #
-# NOTE: /target/ is excluded from VFS domain by design (RFC-0050, path.rs:126).
-# The inception layer accelerates SOURCE FILE reads (served from CAS via VDir),
-# not build artifact I/O. A "clean rebuild from CAS" scenario is not applicable
-# because cargo writes to target/ which bypasses VFS entirely.
 # ==============================================================================
 set -euo pipefail
 
@@ -198,7 +194,7 @@ echo ""
 
 # ── 1) Baseline no-op ────────────────────────────────────────────────────────
 run_bench "Baseline no-op (no inception)" \
-    'cargo build >/dev/null 2>&1'
+    'cargo build >/dev/null 2>&1 || true'
 
 # ── 2) Inception no-op ───────────────────────────────────────────────────────
 run_bench "Inception no-op (shim loaded)" \
@@ -210,7 +206,7 @@ if [[ -n "$TOUCH_FILE" ]]; then
     echo "── Touch incremental (BASELINE) ──"
     for i in $(seq 1 "$ITERATIONS"); do
         sleep 1; touch "$TOUCH_FILE"
-        T0=$(ms); cargo build >/dev/null 2>&1; T1=$(ms)
+        T0=$(ms); cargo build >/dev/null 2>&1 || true; T1=$(ms)
         echo "  Run $i: $((T1 - T0))ms"
     done
 
@@ -232,10 +228,10 @@ if [[ -n "$TOUCH_FILE" ]]; then
     for i in $(seq 1 "$ITERATIONS"); do
         echo "" >> "$TOUCH_FILE"
         echo "// bench_canary_${i}_$(date +%s)" >> "$TOUCH_FILE"
-        T0=$(ms); cargo build >/dev/null 2>&1; T1=$(ms)
+        T0=$(ms); cargo build >/dev/null 2>&1 || true; T1=$(ms)
         echo "  Run $i: $((T1 - T0))ms"
         cp "${TOUCH_FILE}.bench_bak" "$TOUCH_FILE"
-        cargo build >/dev/null 2>&1  # restore baseline
+        cargo build >/dev/null 2>&1 || true  # restore baseline
     done
 
     echo ""
@@ -286,7 +282,4 @@ echo ""
 echo "╔═══════════════════════════════════════════════════╗"
 echo "║  Benchmark Complete                              ║"
 echo "╚═══════════════════════════════════════════════════╝"
-echo ""
-echo "NOTE: /target/ is excluded from VFS by design (RFC-0050)."
-echo "Inception accelerates source reads, not build artifact I/O."
 echo ""

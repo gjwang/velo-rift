@@ -184,47 +184,12 @@ pub(crate) unsafe fn open_impl(path: *const c_char, flags: c_int, mode: mode_t) 
         }
     }
 
-    // File doesn't exist physically — try IPC to check daemon manifest
-    if crate::get_errno() == libc::ENOENT {
-        // Solid-mode CAS materialization: if VDir has a cached entry, materialize from CAS
-        if let Some(fd) = try_materialize_from_cas(state, &vpath, path, flags, mode) {
-            return Some(fd);
-        }
-
-        // Last resort: IPC query
-        profile_count!(ipc_calls);
-        if let Some(entry) = state.query_manifest_ipc(&vpath) {
-            inception_log!(
-                "manifest lookup '{}': FOUND via IPC (mode=0o{:o}, size={})",
-                vpath.manifest_key,
-                entry.mode,
-                entry.size
-            );
-            let blob_path =
-                format_blob_path_fixed(&state.cas_root, &entry.content_hash, entry.size as u64);
-            if is_write {
-                return open_cow_write(
-                    state,
-                    &vpath,
-                    blob_path.as_str(),
-                    flags,
-                    mode,
-                    entry.mode as u32,
-                );
-            } else {
-                return open_cas_read(
-                    state,
-                    &vpath,
-                    blob_path.as_str(),
-                    flags,
-                    mode,
-                    entry.size as u64,
-                    entry.mode as u32,
-                    entry.mtime,
-                );
-            }
-        }
-    }
+    // VDir-miss + ENOENT: file doesn't exist in VDir or on disk.
+    // Return None to let caller's raw_open return the ENOENT naturally.
+    // NOTE: We intentionally do NOT fall back to IPC/LMDB manifest here.
+    // VDir mmap is the authoritative source; LMDB may contain stale entries
+    // (e.g. old target/ artifacts from previous builds) that would cause
+    // incorrect materialization (EISDIR, wrong data).
 
     None
 }
