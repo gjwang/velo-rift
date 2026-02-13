@@ -93,6 +93,10 @@ static inline int path_needs_inception(const char *path) {
     return 1; /* Prefix not set yet, be safe → enter Rust */
   if (!path)
     return 0;
+  /* Relative paths might be inside VFS if CWD is within VFS scope.
+   * We cannot resolve them cheaply in C, so route to Rust. */
+  if (path[0] != '/')
+    return 1;
   for (int i = 0; i < VFS_PREFIX_LEN; i++) {
     if (path[i] != VFS_PREFIX[i])
       return 0; /* Mismatch → not VFS path */
@@ -254,7 +258,7 @@ int c_fstatat_bridge(int dirfd, const char *path, void *buf, int flags) {
 #endif
 
 #define SYS_RENAME 128
-#define SYS_RENAMEAT 444
+#define SYS_RENAMEAT 465
 #define SYS_FCNTL 92
 
 extern int velo_rename_impl(const char *old, const char *new);
