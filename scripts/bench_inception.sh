@@ -172,51 +172,94 @@ run_bench() {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+PROJECT_NAME=$(basename "$PROJECT_DIR")
+
 echo ""
-echo "╔═══════════════════════════════════════════════════╗"
-echo "║  Inception Layer Benchmark                       ║"
-echo "╚═══════════════════════════════════════════════════╝"
-echo ""
-echo "  Project:    $PROJECT_DIR"
-echo "  Shim:       $SHIM"
-echo "  VDir:       ${VDIR:-NONE (no CAS acceleration)}"
-echo "  Socket:     $SOCK"
-echo "  Touch file: ${TOUCH_FILE:-NONE}"
-echo "  Iterations: $ITERATIONS"
+echo "╔═══════════════════════════════════════════════════════════════════╗"
+echo "║  Inception Layer Benchmark                                      ║"
+echo "╠═══════════════════════════════════════════════════════════════════╣"
+echo "║  Project:    $PROJECT_DIR"
+echo "║  Shim:       $SHIM"
+echo "║  VDir:       ${VDIR:-NONE (no CAS acceleration)}"
+echo "║  Socket:     $SOCK"
+echo "║  Touch file: ${TOUCH_FILE:-NONE}"
+echo "║  Iterations: $ITERATIONS"
+echo "╚═══════════════════════════════════════════════════════════════════╝"
 echo ""
 
 cd "$PROJECT_DIR"
 
+# Result accumulators
+BASELINE_NOOP_AVG=0
+INCEPTION_NOOP_AVG=0
+BASELINE_TOUCH_AVG=0
+INCEPTION_TOUCH_AVG=0
+BASELINE_CODE_AVG=0
+INCEPTION_CODE_AVG=0
+STAT_BASELINE=0
+STAT_INCEPTION=0
+READ_BASELINE=0
+READ_INCEPTION=0
+SRC_COUNT=0
+
 # Warmup — ensure cargo index is cached
-echo "Warming up..."
+echo "Warming up ($PROJECT_NAME)..."
 cargo build >/dev/null 2>&1 || true
 echo ""
 
 # ── 1) Baseline no-op ────────────────────────────────────────────────────────
-run_bench "Baseline no-op (no inception)" \
-    'cargo build >/dev/null 2>&1 || true'
+echo ""
+echo "── [$PROJECT_NAME] Baseline no-op (no inception) ──"
+times_base=()
+for i in $(seq 1 "$ITERATIONS"); do
+    T0=$(ms); cargo build >/dev/null 2>&1 || true; T1=$(ms)
+    elapsed=$((T1 - T0)); times_base+=("$elapsed")
+    echo "  Run $i: ${elapsed}ms"
+done
+sum=0; for t in "${times_base[@]}"; do sum=$((sum + t)); done
+BASELINE_NOOP_AVG=$((sum / ITERATIONS))
+echo "  Avg: ${BASELINE_NOOP_AVG}ms"
 
 # ── 2) Inception no-op ───────────────────────────────────────────────────────
-run_bench "Inception no-op (shim loaded)" \
-    'INCEP cargo build >/dev/null 2>&1 || true'
+echo ""
+echo "── [$PROJECT_NAME] Inception no-op (shim loaded) ──"
+times_incep=()
+for i in $(seq 1 "$ITERATIONS"); do
+    T0=$(ms); INCEP cargo build >/dev/null 2>&1 || true; T1=$(ms)
+    elapsed=$((T1 - T0)); times_incep+=("$elapsed")
+    echo "  Run $i: ${elapsed}ms"
+done
+sum=0; for t in "${times_incep[@]}"; do sum=$((sum + t)); done
+INCEPTION_NOOP_AVG=$((sum / ITERATIONS))
+echo "  Avg: ${INCEPTION_NOOP_AVG}ms"
 
 # ── 3) Touch incremental (baseline vs inception) ─────────────────────────────
 if [[ -n "$TOUCH_FILE" ]]; then
     echo ""
-    echo "── Touch incremental (BASELINE) ──"
+    echo "── [$PROJECT_NAME] Touch incremental (BASELINE) — $TOUCH_FILE ──"
+    times_touch_b=()
     for i in $(seq 1 "$ITERATIONS"); do
         sleep 1; touch "$TOUCH_FILE"
         T0=$(ms); cargo build >/dev/null 2>&1 || true; T1=$(ms)
-        echo "  Run $i: $((T1 - T0))ms"
+        elapsed=$((T1 - T0)); times_touch_b+=("$elapsed")
+        echo "  Run $i: ${elapsed}ms"
     done
+    sum=0; for t in "${times_touch_b[@]}"; do sum=$((sum + t)); done
+    BASELINE_TOUCH_AVG=$((sum / ITERATIONS))
+    echo "  Avg: ${BASELINE_TOUCH_AVG}ms"
 
     echo ""
-    echo "── Touch incremental (INCEPTION) ──"
+    echo "── [$PROJECT_NAME] Touch incremental (INCEPTION) — $TOUCH_FILE ──"
+    times_touch_i=()
     for i in $(seq 1 "$ITERATIONS"); do
         sleep 1; touch "$TOUCH_FILE"
         T0=$(ms); INCEP cargo build >/dev/null 2>&1 || true; T1=$(ms)
-        echo "  Run $i: $((T1 - T0))ms"
+        elapsed=$((T1 - T0)); times_touch_i+=("$elapsed")
+        echo "  Run $i: ${elapsed}ms"
     done
+    sum=0; for t in "${times_touch_i[@]}"; do sum=$((sum + t)); done
+    INCEPTION_TOUCH_AVG=$((sum / ITERATIONS))
+    echo "  Avg: ${INCEPTION_TOUCH_AVG}ms"
 fi
 
 # ── 4) Code change incremental (baseline vs inception) ───────────────────────
@@ -224,62 +267,104 @@ if [[ -n "$TOUCH_FILE" ]]; then
     cp "$TOUCH_FILE" "${TOUCH_FILE}.bench_bak"
 
     echo ""
-    echo "── Code change incremental (BASELINE) ──"
+    echo "── [$PROJECT_NAME] Code change incremental (BASELINE) — $TOUCH_FILE ──"
+    times_code_b=()
     for i in $(seq 1 "$ITERATIONS"); do
         echo "" >> "$TOUCH_FILE"
         echo "// bench_canary_${i}_$(date +%s)" >> "$TOUCH_FILE"
         T0=$(ms); cargo build >/dev/null 2>&1 || true; T1=$(ms)
-        echo "  Run $i: $((T1 - T0))ms"
+        elapsed=$((T1 - T0)); times_code_b+=("$elapsed")
+        echo "  Run $i: ${elapsed}ms"
         cp "${TOUCH_FILE}.bench_bak" "$TOUCH_FILE"
         cargo build >/dev/null 2>&1 || true  # restore baseline
     done
+    sum=0; for t in "${times_code_b[@]}"; do sum=$((sum + t)); done
+    BASELINE_CODE_AVG=$((sum / ITERATIONS))
+    echo "  Avg: ${BASELINE_CODE_AVG}ms"
 
     echo ""
-    echo "── Code change incremental (INCEPTION) ──"
+    echo "── [$PROJECT_NAME] Code change incremental (INCEPTION) — $TOUCH_FILE ──"
+    times_code_i=()
     for i in $(seq 1 "$ITERATIONS"); do
         echo "" >> "$TOUCH_FILE"
         echo "// bench_canary_${i}_$(date +%s)" >> "$TOUCH_FILE"
         T0=$(ms); INCEP cargo build >/dev/null 2>&1 || true; T1=$(ms)
-        echo "  Run $i: $((T1 - T0))ms"
+        elapsed=$((T1 - T0)); times_code_i+=("$elapsed")
+        echo "  Run $i: ${elapsed}ms"
         cp "${TOUCH_FILE}.bench_bak" "$TOUCH_FILE"
         INCEP cargo build >/dev/null 2>&1 || true  # restore baseline
     done
+    sum=0; for t in "${times_code_i[@]}"; do sum=$((sum + t)); done
+    INCEPTION_CODE_AVG=$((sum / ITERATIONS))
+    echo "  Avg: ${INCEPTION_CODE_AVG}ms"
 
     rm -f "${TOUCH_FILE}.bench_bak"
 fi
 
 # ── 5) Source read stress (CAS acceleration test) ─────────────────────────────
 echo ""
-echo "── Source file stat stress (CAS acceleration) ──"
+echo "── [$PROJECT_NAME] Source file I/O stress (CAS acceleration) ──"
 SRC_COUNT=$(find "$PROJECT_DIR" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' | wc -l | tr -d ' ')
 echo "  Source files: $SRC_COUNT .rs files"
 
 # Baseline: stat all source files without inception
 T0=$(ms)
-find "$PROJECT_DIR" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -exec stat {} + >/dev/null 2>&1
+find "$PROJECT_DIR" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -exec stat {} + >/dev/null 2>&1 || true
 T1=$(ms)
-echo "  Baseline stat-all: $((T1 - T0))ms"
+STAT_BASELINE=$((T1 - T0))
+echo "  Baseline stat-all: ${STAT_BASELINE}ms"
 
 # Inception: stat all source files with inception (should use VDir)
 T0=$(ms)
 INCEP find "$PROJECT_DIR" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -exec stat {} + >/dev/null 2>&1 || true
 T1=$(ms)
-echo "  Inception stat-all: $((T1 - T0))ms"
+STAT_INCEPTION=$((T1 - T0))
+echo "  Inception stat-all: ${STAT_INCEPTION}ms"
 
 # Baseline: cat all source files (read content)
 T0=$(ms)
 find "$PROJECT_DIR" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -exec cat {} + >/dev/null 2>&1 || true
 T1=$(ms)
-echo "  Baseline read-all: $((T1 - T0))ms"
+READ_BASELINE=$((T1 - T0))
+echo "  Baseline read-all: ${READ_BASELINE}ms"
 
 # Inception: cat all source files (should serve from CAS)
 T0=$(ms)
 INCEP find "$PROJECT_DIR" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -exec cat {} + >/dev/null 2>&1 || true
 T1=$(ms)
-echo "  Inception read-all: $((T1 - T0))ms"
+READ_INCEPTION=$((T1 - T0))
+echo "  Inception read-all: ${READ_INCEPTION}ms"
+
+# ── Summary Table ─────────────────────────────────────────────────────────────
+NOOP_RATIO=$(python3 -c "print(f'{$INCEPTION_NOOP_AVG/$BASELINE_NOOP_AVG:.2f}x')" 2>/dev/null || echo "N/A")
+if [[ "$STAT_BASELINE" -gt 0 ]]; then
+    STAT_RATIO=$(python3 -c "print(f'{$STAT_INCEPTION/$STAT_BASELINE:.2f}x')" 2>/dev/null || echo "N/A")
+else
+    STAT_RATIO="N/A"
+fi
+if [[ "$READ_BASELINE" -gt 0 ]]; then
+    READ_RATIO=$(python3 -c "print(f'{$READ_INCEPTION/$READ_BASELINE:.2f}x')" 2>/dev/null || echo "N/A")
+else
+    READ_RATIO="N/A"
+fi
 
 echo ""
-echo "╔═══════════════════════════════════════════════════╗"
-echo "║  Benchmark Complete                              ║"
-echo "╚═══════════════════════════════════════════════════╝"
+echo "╔═══════════════════════════════════════════════════════════════════╗"
+echo "║  BENCHMARK SUMMARY                                             ║"
+echo "║  Project: $PROJECT_DIR"
+echo "║  Source:  $SRC_COUNT .rs files | Iterations: $ITERATIONS"
+echo "╠═══════════════════════════════════════════════════════════════════╣"
+printf "║  %-32s %8s  %8s  %8s ║\n" "Scenario" "Baseline" "Inception" "Ratio"
+echo "║  ────────────────────────────────────────────────────────────── ║"
+printf "║  %-32s %7dms  %7dms  %8s ║\n" "No-op build" "$BASELINE_NOOP_AVG" "$INCEPTION_NOOP_AVG" "$NOOP_RATIO"
+if [[ -n "$TOUCH_FILE" ]]; then
+    TOUCH_RATIO=$(python3 -c "print(f'{$INCEPTION_TOUCH_AVG/$BASELINE_TOUCH_AVG:.2f}x')" 2>/dev/null || echo "N/A")
+    CODE_RATIO=$(python3 -c "print(f'{$INCEPTION_CODE_AVG/$BASELINE_CODE_AVG:.2f}x')" 2>/dev/null || echo "N/A")
+    printf "║  %-32s %7dms  %7dms  %8s ║\n" "Touch incremental" "$BASELINE_TOUCH_AVG" "$INCEPTION_TOUCH_AVG" "$TOUCH_RATIO"
+    printf "║  %-32s %7dms  %7dms  %8s ║\n" "Code change incremental" "$BASELINE_CODE_AVG" "$INCEPTION_CODE_AVG" "$CODE_RATIO"
+fi
+printf "║  %-32s %7dms  %7dms  %8s ║\n" "Stat-all ($SRC_COUNT files)" "$STAT_BASELINE" "$STAT_INCEPTION" "$STAT_RATIO"
+printf "║  %-32s %7dms  %7dms  %8s ║\n" "Read-all ($SRC_COUNT files)" "$READ_BASELINE" "$READ_INCEPTION" "$READ_RATIO"
+echo "╚═══════════════════════════════════════════════════════════════════╝"
 echo ""
+
